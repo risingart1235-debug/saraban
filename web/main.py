@@ -615,7 +615,12 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
             _spp_cookie["value"] = sppweb.get_cookie(sess)
         docs = _s.get_store().status_of(sppweb.list_documents(sess, pages=max(1, min(pages, 8))))
     except sppweb.LoginError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+        # เว็บ สพป. อยู่หลัง Cloudflare ซึ่งบล็อก IP ของศูนย์ข้อมูล
+        # เปิดจากคอมที่โรงเรียนได้ แต่เปิดจากเซิร์ฟเวอร์คลาวด์ไม่ได้
+        # กรณีนี้ต้องบอกทางออกให้ผู้ใช้ ไม่ใช่โยน error ดิบๆ ใส่
+        blocked = "Cloudflare" in str(e) or "403" in str(e)
+        return JSONResponse({"ok": False, "error": str(e), "blocked": blocked},
+                            status_code=502)
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=502)
 

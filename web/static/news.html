@@ -97,11 +97,34 @@ async function load(pages = 3) {
     const r = await fetch('/api/spp/list?pages=' + pages);
     if (r.status === 401) { location.href = '/login'; return; }
     const d = await readJSON(r);
+    if (d.blocked) { blockedNotice(d.error); return; }
     if (!d.ok) throw new Error(d.error || 'โหลดไม่สำเร็จ');
     DATA = d; render();
   } catch (e) {
     $('sum').innerHTML = `<div class="err" style="margin:0">${esc(e.message)}</div>`;
   }
+}
+
+// เว็บ สพป. บล็อก IP ของศูนย์ข้อมูล -> อธิบายและบอกทางออก แทนที่จะโชว์ error ดิบ
+function blockedNotice(msg) {
+  $('sum').innerHTML = `
+    <div class="err" style="margin:0 0 12px">🚫 <b>ดึงหนังสือจากเว็บ สพป. ที่นี่ไม่ได้</b></div>
+    <p class="hint" style="margin:0 0 10px">
+      เว็บ สพป. ปิดกั้นการเข้าจากเซิร์ฟเวอร์คลาวด์ (Cloudflare)
+      อนุญาตเฉพาะเครื่องที่อยู่ในเครือข่ายทั่วไป เช่น คอมที่โรงเรียน
+    </p>
+    <p class="hint" style="margin:0 0 10px">
+      <b>ให้ทำโหมดนี้ที่คอมโรงเรียนแทน</b> — ข้อมูลใช้ Google Sheets ร่วมกัน
+      ลงรับที่ไหนก็เห็นตรงกันทุกเครื่อง
+    </p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="btn purple" href="/stamp" style="flex:1;min-width:150px;text-decoration:none;
+         text-align:center;line-height:28px">🔢 ลงตรายางเลขรับ</a>
+      <a class="btn grey" href="/fix" style="flex:1;min-width:150px;text-decoration:none;
+         text-align:center;line-height:24px">🔧 ดูทะเบียน / ถอยเลข</a>
+    </div>
+    <p class="tiny" style="margin:10px 0 0;color:#9aa1ab">รายละเอียด: ${esc(msg)}</p>`;
+  $('tabs').innerHTML = ''; $('list').innerHTML = '';
 }
 
 function render() {
