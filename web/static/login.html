@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>เข้าสู่ระบบ — ลงรับหนังสือราชการ</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap" style="max-width:420px; padding-top:44px">
+  <div style="text-align:center; margin-bottom:20px">
+    <div style="font-size:44px">📚</div>
+    <h1 style="color:var(--blue); font-size:20px; margin:8px 0 2px">ระบบลงรับหนังสือราชการ</h1>
+    <p class="tiny">โรงเรียนบ้านโพนทองประชาอุทิศ</p>
+  </div>
+
+  <div class="card">
+    <div id="err" class="err hidden"></div>
+    <form id="f">
+      <label for="u">ชื่อผู้ใช้</label>
+      <input id="u" name="username" type="text" autocomplete="username" autocapitalize="none" required>
+      <label for="p">รหัสผ่าน</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button class="btn" type="submit" style="margin-top:18px">เข้าสู่ระบบ</button>
+    </form>
+  </div>
+
+    <p class="tiny" style="text-align:center; margin-top:16px">
+      ยังไม่มีบัญชี? <a href="/register" style="color:var(--blue); font-weight:700">สมัครสมาชิก</a>
+      <br>(สมัครแล้วรอผู้ดูแลอนุมัติก่อนใช้งาน)
+    </p>
+</div>
+
+<script>
+const f = document.getElementById('f');
+const err = document.getElementById('err');
+
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  err.classList.add('hidden');
+  const btn = f.querySelector('button');
+  btn.disabled = true;
+  btn.textContent = 'กำลังเข้าสู่ระบบ...';
+  try {
+    const body = new URLSearchParams({
+      username: document.getElementById('u').value,
+      password: document.getElementById('p').value,
+    });
+    const r = await fetch('/login', { method: 'POST', body });
+    const d = await r.json();
+    if (d.ok) {
+      location.href = '/';
+      return;
+    }
+    err.textContent = d.error || 'เข้าสู่ระบบไม่สำเร็จ';
+    err.classList.remove('hidden');
+  } catch (ex) {
+    err.textContent = 'ติดต่อเซิร์ฟเวอร์ไม่ได้: ' + ex.message;
+    err.classList.remove('hidden');
+  }
+  btn.disabled = false;
+  btn.textContent = 'เข้าสู่ระบบ';
+});
+</script>
+</body>
+</html>

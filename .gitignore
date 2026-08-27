@@ -1,0 +1,39 @@
+# ===== ห้ามขึ้น GitHub เด็ดขาด — มีรหัสผ่านและ API Key =====
+config.json
+users.json
+*.env
+.env
+secrets/
+service_account*.json
+credentials*.json
+token*.json
+
+# ===== ข้อมูลราชการ / ไฟล์งาน =====
+history_ids.txt
+*.migrated
+stamp_pos.json
+ai_error.log
+*.xlsx
+แฟ้มเสนอ_ผอ/
+
+# ===== ไฟล์ชั่วคราวที่โปรแกรมสร้าง =====
+temp.pdf
+temp_work.pdf
+temp_stamp.pdf
+stamp_page1.jpg
+stamp_p1.pdf
+page1.jpg
+page_sig.jpg
+page1_final.jpg
+p1.pdf
+psig.pdf
+blank.pdf
+
+# ===== Python =====
+_jobs/
+.claude/
+__pycache__/
+*.py[cod]
+*.bak
+.venv/
+venv/

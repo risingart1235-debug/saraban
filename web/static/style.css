@@ -1,0 +1,117 @@
+/* style.css — ใช้ร่วมกันทุกหน้า ออกแบบให้นิ้วกดง่ายบนมือถือก่อน */
+:root {
+  --blue: #003399;
+  --green: #4CAF50;
+  --green-dark: #43A047;
+  --purple: #9C27B0;
+  --orange: #FF9800;
+  --teal: #00695C;
+  --red: #C62828;
+  --bg: #f0f2f5;
+  --card: #ffffff;
+  --line: #dfe3e8;
+  --text: #1f2328;
+  --muted: #6b7280;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Sarabun", "Leelawadee UI", "Tahoma", system-ui, -apple-system, sans-serif;
+  font-size: 16px;                 /* ห้ามต่ำกว่า 16px ไม่งั้น iOS จะซูมเองตอนกดช่องพิมพ์ */
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+
+header.bar {
+  background: var(--blue);
+  color: #fff;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+header.bar h1 { font-size: 17px; margin: 0; flex: 1; font-weight: 700; }
+header.bar a, header.bar button {
+  color: #fff;
+  background: rgba(255,255,255,.18);
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  text-decoration: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.card h2 { margin: 0 0 4px; font-size: 16px; color: var(--blue); }
+.card p.hint { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+/* ปุ่ม — สูงอย่างน้อย 48px ให้นิ้วกดไม่พลาด */
+.btn {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-radius: 10px;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: inherit;
+  color: #fff;
+  background: var(--green);
+  cursor: pointer;
+  padding: 12px;
+}
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn.purple { background: var(--purple); }
+.btn.blue   { background: #2196F3; }
+.btn.grey   { background: #e5e7eb; color: #374151; min-height: 44px; font-size: 15px; font-weight: 400; }
+.btn.small  { min-height: 40px; font-size: 14px; font-weight: 400; }
+
+label { display: block; font-size: 14px; margin: 10px 0 4px; color: #374151; }
+input[type=text], input[type=password] {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+  font-size: 16px;
+  font-family: inherit;
+  background: #fff;
+}
+input:focus { outline: 2px solid #93c5fd; border-color: #60a5fa; }
+.tiny { font-size: 12px; color: #9aa1ab; margin: 3px 0 0; }
+
+.err {
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+.ok {
+  background: #dcfce7;
+  color: #14532d;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+.hidden { display: none !important; }

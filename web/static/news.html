@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>หนังสือจากเว็บ สพป.</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding-bottom:4px; margin-bottom:12px;
+          -webkit-overflow-scrolling:touch }
+  .tabs button { flex:0 0 auto; min-height:40px; padding:8px 14px; border:1px solid var(--line);
+                 background:#fff; border-radius:999px; font-family:inherit; font-size:14px; cursor:pointer }
+  .tabs button.on { background:var(--blue); color:#fff; border-color:var(--blue); font-weight:700 }
+  .tabs button .n { opacity:.75; font-size:12px }
+
+  .day { margin-bottom:18px }
+  .day > h3 { font-size:15px; color:var(--blue); margin:0 0 4px;
+              display:flex; align-items:baseline; gap:8px; flex-wrap:wrap }
+  .day > h3 .sub { font-size:12px; font-weight:400; color:var(--muted) }
+
+  .doc { border:1px solid var(--line); border-left-width:5px; border-radius:10px;
+         padding:11px 12px; margin-bottom:8px; background:#fff }
+  .doc.registered { border-left-color:#16a34a }
+  .doc.skipped    { border-left-color:#9ca3af; opacity:.72 }
+  .doc.new        { border-left-color:#f59e0b; background:#fffdf5 }
+  .doc .ttl { font-weight:700; font-size:14px; line-height:1.45 }
+  .doc .meta { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55 }
+  .tag { font-size:11px; padding:2px 9px; border-radius:999px; font-weight:700; white-space:nowrap }
+  .tag.registered { background:#dcfce7; color:#166534 }
+  .tag.skipped    { background:#e5e7eb; color:#4b5563 }
+  .tag.new        { background:#fef3c7; color:#92400e }
+  .doc .acts { display:flex; gap:8px; margin-top:9px }
+  .doc .acts button { flex:1; min-height:42px; border:0; border-radius:8px; color:#fff;
+                      font-family:inherit; font-size:14px; cursor:pointer; padding:8px }
+  .a-new  { background:var(--green) }
+  .a-redo { background:#0284c7 }
+  .a-skip { background:#e5e7eb; color:#374151 !important }
+  .spin { width:20px;height:20px;border:3px solid #d1d5db;border-top-color:#fff;
+          border-radius:50%;animation:sp .9s linear infinite;display:inline-block;vertical-align:-3px }
+  @keyframes sp { to { transform:rotate(360deg) } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>📰 หนังสือจากเว็บ สพป.</h1>
+  <button id="reload">↻</button>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div class="card" id="sum">
+    <p class="tiny" style="margin:0">กำลังโหลดรายการจากเว็บ...</p>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="list"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+// อ่านคำตอบจากเซิร์ฟเวอร์อย่างปลอดภัย
+// ถ้าเซิร์ฟเวอร์พังแล้วส่ง HTML กลับมา r.json() จะพังและ Safari ขึ้นข้อความว่า
+// "The string did not match the expected pattern" ซึ่งไม่บอกอะไรเลย จึงดักไว้เอง
+async function readJSON(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const brief = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`เซิร์ฟเวอร์ผิดพลาด (${r.status})${brief ? ': ' + brief : ''}`);
+  }
+}
+
+const LBL = { registered: 'รับแล้ว', skipped: 'ข้าม', new: 'ยังไม่ลงรับ' };
+let DATA = null, filter = 'all', day = 'all';
+
+function show(kind, html) {
+  const m = $('msg'); m.className = kind; m.innerHTML = html;
+  m.classList.remove('hidden'); window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function load(pages = 3) {
+  $('sum').innerHTML = '<p class="tiny" style="margin:0"><span class="spin" style="border-top-color:#003399"></span> กำลังโหลดรายการจากเว็บ...</p>';
+  $('list').innerHTML = ''; $('tabs').innerHTML = '';
+  try {
+    const r = await fetch('/api/spp/list?pages=' + pages);
+    if (r.status === 401) { location.href = '/login'; return; }
+    const d = await readJSON(r);
+    if (!d.ok) throw new Error(d.error || 'โหลดไม่สำเร็จ');
+    DATA = d; render();
+  } catch (e) {
+    $('sum').innerHTML = `<div class="err" style="margin:0">${esc(e.message)}</div>`;
+  }
+}
+
+function render() {
+  const t = DATA.total;
+  $('sum').innerHTML =
+    `<h2 style="margin:0 0 8px">รายการทั้งหมด ${DATA.count} เรื่อง</h2>
+     <div style="display:flex;gap:6px;flex-wrap:wrap">
+       ${chip('all', 'ทั้งหมด', DATA.count)}
+       ${chip('new', LBL.new, t.new)}
+       ${chip('registered', LBL.registered, t.registered)}
+       ${chip('skipped', LBL.skipped, t.skipped)}
+     </div>
+     <p class="tiny" style="margin:10px 0 0">
+       เรียงตามวันที่เว็บอัปโหลด (วันเวลาที่ส่ง) ใหม่สุดอยู่บน<br>
+       กด "ลงรับใหม่" ในเรื่องที่รับแล้ว จะใช้<b>เลขรับเดิม</b> ไม่กินเลขใหม่
+     </p>`;
+  for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; render(); };
+
+  $('tabs').innerHTML =
+    `<button class="${day === 'all' ? 'on' : ''}" data-d="all">ทุกวัน</button>` +
+    DATA.days.map(g => `<button class="${day === g.key ? 'on' : ''}" data-d="${g.key}">
+        ${esc(g.label)} <span class="n">(${g.docs.length})</span></button>`).join('');
+  for (const el of $('tabs').querySelectorAll('[data-d]')) el.onclick = () => { day = el.dataset.d; render(); };
+
+  const days = DATA.days.filter(g => day === 'all' || g.key === day);
+  let html = '', shown = 0;
+  for (const g of days) {
+    const docs = g.docs.filter(x => filter === 'all' || x.status === filter);
+    if (!docs.length) continue;
+    shown += docs.length;
+    html += `<div class="day"><h3>📅 ${esc(g.label)}
+        <span class="sub">${docs.length} เรื่อง · รับแล้ว ${g.registered} · ข้าม ${g.skipped} · ยังไม่ลงรับ ${g.new}</span></h3>`;
+    html += docs.map(card).join('') + '</div>';
+  }
+  $('list').innerHTML = shown ? html
+    : '<div class="card"><p class="tiny" style="margin:0">ไม่มีเรื่องที่ตรงกับตัวกรองนี้</p></div>';
+}
+
+function chip(f, label, n) {
+  const on = filter === f;
+  return `<button data-f="${f}" style="min-height:38px;padding:6px 12px;border-radius:999px;
+    border:1px solid ${on ? 'var(--blue)' : 'var(--line)'};background:${on ? 'var(--blue)' : '#fff'};
+    color:${on ? '#fff' : 'inherit'};font-family:inherit;font-size:13px;cursor:pointer;
+    font-weight:${on ? '700' : '400'}">${esc(label)} ${n}</button>`;
+}
+
+function card(d) {
+  const no = d.receipt_no ? ` · เลขรับ <b>${esc(d.receipt_no)}</b>` : '';
+  let acts = '';
+  if (d.status === 'new') {
+    acts = `<div class="acts">
+      <button class="a-new" onclick="open_('${esc(d.book_id)}','')">📥 ลงรับเรื่องนี้</button>
+      <button class="a-skip" onclick="skip('${esc(d.book_id)}')">ข้าม</button></div>`;
+  } else if (d.status === 'registered') {
+    acts = `<div class="acts">
+      <button class="a-redo" onclick="open_('${esc(d.book_id)}','${esc(d.receipt_no)}')">
+        ♻️ ลงรับใหม่${d.receipt_no ? ' (ใช้เลข ' + d.receipt_no + ')' : ''}</button></div>`;
+  } else {
+    acts = `<div class="acts">
+      <button class="a-new" onclick="open_('${esc(d.book_id)}','')">📥 ลงรับเรื่องนี้</button></div>`;
+  }
+  return `<div class="doc ${d.status}" id="d${esc(d.book_id)}">
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <span class="ttl" style="flex:1">${esc(d.doc_title)}</span>
+      <span class="tag ${d.status}">${LBL[d.status]}</span>
+    </div>
+    <div class="meta">${esc(d.doc_no)} · ลงวันที่ ${esc(d.doc_date)} · ${esc(d.sender)}<br>
+      เว็บอัปโหลด ${esc(d.sent_date)} ${esc(d.sent_time)} น.${no}</div>
+    ${acts}</div>`;
+}
+
+async function open_(book_id, redo_no) {
+  const el = document.querySelector(`#d${esc(book_id)} .acts`);
+  el.innerHTML = '<button class="a-new" disabled><span class="spin"></span> กำลังเปิด...</button>';
+  try {
+    const r = await fetch('/api/doc/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id, redo_no: redo_no || null }) });
+    const d = await readJSON(r);
+    location.href = '/doc?job=' + d.job_id;
+  } catch (e) { show('err', 'เปิดไม่สำเร็จ: ' + e.message); }
+}
+
+async function skip(book_id) {
+  if (!confirm('ข้ามเรื่องนี้ใช่ไหม?\n\nจะไม่ลงทะเบียนและไม่ส่ง LINE')) return;
+  const r = await fetch('/api/spp/skip', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id }) });
+  if (r.ok) { show('ok', 'ข้ามเรื่องนี้แล้ว'); load(); }
+  else show('err', 'ทำรายการไม่สำเร็จ');
+}
+
+$('reload').onclick = () => load();
+load();
+</script>
+</body>
+</html>

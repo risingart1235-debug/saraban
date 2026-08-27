@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>จัดการผู้ใช้</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .u { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:#fff }
+  .u.pending { border-color:#f59e0b; background:#fffbeb }
+  .u .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+  .u .name { font-weight:700; flex:1 }
+  .tag { font-size:12px; padding:3px 9px; border-radius:999px; font-weight:700 }
+  .tag.pending  { background:#fef3c7; color:#92400e }
+  .tag.approved { background:#dcfce7; color:#166534 }
+  .tag.rejected { background:#fee2e2; color:#991b1b }
+  .tag.admin    { background:#e0e7ff; color:#3730a3 }
+  .acts { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap }
+  .acts button { flex:1; min-width:96px; min-height:42px; border:0; border-radius:8px;
+                 font-size:14px; font-family:inherit; cursor:pointer; color:#fff; padding:8px }
+  .a-ok { background:var(--green) } .a-no { background:#ef4444 }
+  .a-grey { background:#e5e7eb; color:#374151 !important }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>👥 จัดการผู้ใช้</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+  <div id="pendingBox" class="card hidden" style="border-color:#f59e0b">
+    <h2 style="color:#92400e">⏳ รออนุมัติ <span id="pcount"></span></h2>
+    <p class="hint">คนที่สมัครเข้ามาใหม่ กดอนุมัติแล้วจึงจะเข้าใช้งานได้</p>
+    <div id="pending"></div>
+  </div>
+
+  <div class="card">
+    <h2>📁 ลิงก์โฟลเดอร์ Google Drive</h2>
+    <p class="hint">ลิงก์นี้จะขึ้นเป็นปุ่มบนหน้าแรกให้ทุกคนกดเปิดได้ · เว้นว่างไว้ = ซ่อนปุ่ม</p>
+    <input id="drive" type="text" placeholder="https://drive.google.com/drive/folders/...">
+    <button class="btn grey small" id="saveDrive" style="margin-top:10px">บันทึกลิงก์</button>
+  </div>
+
+  <div class="card">
+    <h2>รายชื่อผู้ใช้ทั้งหมด</h2>
+    <div id="all"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+
+function tag(cls, txt) { return `<span class="tag ${cls}">${txt}</span>`; }
+
+function card(u) {
+  const st = { pending: 'รออนุมัติ', approved: 'ใช้งานได้', rejected: 'ไม่อนุญาต' }[u.status] || u.status;
+  let acts = '';
+  if (u.is_me) {
+    acts = '<p class="tiny" style="margin-top:8px">นี่คือบัญชีของคุณเอง</p>';
+  } else if (u.status === 'pending') {
+    acts = `<div class="acts">
+      <button class="a-ok"  onclick="act('${u.username}','approve')">✓ อนุมัติ</button>
+      <button class="a-no"  onclick="act('${u.username}','reject')">✕ ไม่อนุญาต</button></div>`;
+  } else {
+    const role = u.role === 'admin'
+      ? `<button class="a-grey" onclick="act('${u.username}','demote')">ถอดผู้ดูแล</button>`
+      : `<button class="a-grey" onclick="act('${u.username}','promote')">ตั้งเป็นผู้ดูแล</button>`;
+    const onoff = u.status === 'approved'
+      ? `<button class="a-no" onclick="act('${u.username}','reject')">ระงับการใช้งาน</button>`
+      : `<button class="a-ok" onclick="act('${u.username}','approve')">เปิดใช้งาน</button>`;
+    acts = `<div class="acts">${onoff}${role}
+      <button class="a-grey" onclick="act('${u.username}','delete')">ลบ</button></div>`;
+  }
+  return `<div class="u ${u.status === 'pending' ? 'pending' : ''}">
+    <div class="top">
+      <span class="name">${esc(u.display)}</span>
+      ${tag(u.status, st)}${u.role === 'admin' ? tag('admin', 'ผู้ดูแล') : ''}
+    </div>
+    <p class="tiny">ชื่อผู้ใช้: ${u.username} · สมัคร ${u.created}</p>
+    ${acts}</div>`;
+}
+
+async function load() {
+  const r = await fetch('/api/admin/users');
+  if (r.status === 401) { location.href = '/login'; return; }
+  const d = await r.json();
+  const pend = d.users.filter(u => u.status === 'pending');
+  $('pending').innerHTML = pend.map(card).join('');
+  $('pcount').textContent = pend.length ? `(${pend.length} คน)` : '';
+  $('pendingBox').classList.toggle('hidden', pend.length === 0);
+  $('all').innerHTML = d.users.map(card).join('');
+}
+
+async function act(username, action) {
+  const label = { approve:'อนุมัติ', reject:'ระงับ/ไม่อนุญาต', delete:'ลบถาวร',
+                  promote:'ตั้งเป็นผู้ดูแล', demote:'ถอดสิทธิ์ผู้ดูแล' }[action];
+  if ((action === 'delete' || action === 'reject') &&
+      !confirm(`ยืนยัน${esc(label)} "${username}" ?`)) return;
+  const r = await fetch('/api/admin/set', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, action }),
+  });
+  const m = $('msg');
+  if (r.ok) {
+    m.className = 'ok'; m.textContent = `${esc(label)} "${username}" เรียบร้อยแล้ว`;
+  } else {
+    const d = await r.json().catch(() => ({}));
+    m.className = 'err'; m.textContent = d.detail || 'ทำรายการไม่สำเร็จ';
+  }
+  m.classList.remove('hidden');
+  load();
+}
+
+fetch('/api/me').then(r => r.json())
+  .then(d => { $('drive').value = d.drive_url || ''; }).catch(() => {});
+
+$('saveDrive').onclick = async () => {
+  const r = await fetch('/api/admin/drive', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: $('drive').value.trim() }) });
+  const m = $('msg');
+  if (r.ok) { m.className = 'ok'; m.textContent = 'บันทึกลิงก์แล้ว — ปุ่มบนหน้าแรกจะอัปเดตทันที'; }
+  else { const d = await r.json().catch(() => ({}));
+         m.className = 'err'; m.textContent = d.detail || 'บันทึกไม่สำเร็จ'; }
+  m.classList.remove('hidden');
+};
+
+load();
+</script>
+</body>
+</html>

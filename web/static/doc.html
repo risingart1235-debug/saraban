@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>จัดหน้าเอกสาร</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .stage { background:#8f9499; padding:12px; border-radius:12px; margin-bottom:14px }
+  .page {
+    position:relative; width:100%; background:#fff; margin-bottom:14px;
+    box-shadow:0 2px 10px rgba(0,0,0,.2); overflow:hidden;
+    touch-action:none; user-select:none;
+  }
+  .page:last-child { margin-bottom:0 }
+  .page > img.bg { width:100%; display:block; pointer-events:none }
+  .page .plabel {
+    position:absolute; top:0; left:0; background:rgba(0,0,0,.55); color:#fff;
+    font-size:11px; padding:3px 8px; border-radius:0 0 8px 0; z-index:5; pointer-events:none;
+  }
+  .ov { position:absolute; cursor:grab; touch-action:none; }
+  .ov img { width:100%; display:block; pointer-events:none }
+  .ov.sel { outline:2px dashed #e91e63; outline-offset:2px }
+  .ov.dragging { filter:drop-shadow(0 4px 10px rgba(0,0,0,.45)); z-index:20 }
+
+  textarea {
+    width:100%; min-height:110px; padding:10px; border:1px solid #c9ced6;
+    border-radius:8px; font-size:16px; font-family:inherit; line-height:1.6; resize:vertical;
+  }
+  .row { display:flex; align-items:center; gap:10px; margin-top:10px }
+  .row > label { margin:0; flex:1 }
+  .stepper { display:flex; align-items:center; gap:6px }
+  .stepper button { width:42px; height:42px; border:1px solid #c9ced6; background:#fff;
+                    border-radius:8px; font-size:19px; cursor:pointer; font-family:inherit }
+  .stepper span { min-width:50px; text-align:center; font-weight:700 }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px }
+  .chips button { flex:1; min-width:88px; min-height:40px; border:1px solid #c9ced6;
+                  background:#fff; border-radius:8px; font-size:13px; font-family:inherit; cursor:pointer }
+  .chips button.on { background:#dbeafe; border-color:#60a5fa; font-weight:700 }
+  #savebar { position:sticky; bottom:0; background:rgba(240,242,245,.97);
+             border-top:1px solid var(--line); padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+             margin:0 -16px; display:flex; gap:8px }
+  #savebar .btn { margin:0 }
+  .spin { width:36px;height:36px;border:4px solid #d1d5db;border-top-color:var(--blue);
+          border-radius:50%;animation:sp 1s linear infinite;margin:0 auto 12px }
+  @keyframes sp { to { transform:rotate(360deg) } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>จัดหน้าเอกสาร</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div id="loading" class="card" style="text-align:center">
+    <div class="spin"></div>
+    <div id="step">กำลังเตรียมเอกสาร...</div>
+    <p class="tiny" style="margin-top:10px">ขั้นตอนให้ AI อ่านหนังสืออาจใช้เวลา ๒๐–๔๐ วินาที</p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <div style="display:flex; align-items:baseline; gap:8px">
+        <span class="tiny">เลขรับที่จะลง</span>
+        <span id="rno" style="font-size:26px;font-weight:700;color:var(--purple)"></span>
+      </div>
+      <p class="tiny" id="meta" style="margin-top:6px; line-height:1.6"></p>
+      <div id="warn" class="err hidden" style="margin-top:8px"></div>
+    </div>
+
+    <div class="stage"><div id="pages"></div></div>
+
+    <div class="card" id="selBox">
+      <h2 id="selTitle">คำเกษียณ</h2>
+      <textarea id="btext"></textarea>
+      <div class="row">
+        <label>ขนาดตัวอักษร</label>
+        <div class="stepper"><button id="bsm">−</button><span id="bsv">100%</span><button id="bsp">+</button></div>
+      </div>
+      <div class="row">
+        <label>ความกว้างก่อนตัดบรรทัด</label>
+        <div class="stepper"><button id="bwm">−</button><span id="bwv">100%</span><button id="bwp">+</button></div>
+      </div>
+      <div class="chips">
+        <button id="bbg">พื้นหลังทึบ</button>
+        <button id="bbd">ตีกรอบ</button>
+        <button id="bdel" style="color:#b91c1c">ลบกล่องนี้</button>
+      </div>
+      <button class="btn grey small" id="badd" style="margin-top:10px">➕ เพิ่มกล่องข้อความ</button>
+    </div>
+
+    <div class="card">
+      <h2>🖋 วัน-เวลาบนตรายาง</h2>
+      <label for="d">วันที่</label><input id="d" type="text">
+      <label for="t">เวลา</label><input id="t" type="text">
+      <div class="row">
+        <label>ขนาดตรายาง</label>
+        <div class="stepper"><button id="ssm">−</button><span id="ssv">100%</span><button id="ssp">+</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="savebar" class="hidden">
+    <button class="btn grey" id="skip" style="flex:0 0 38%">🚫 ไม่รับ</button>
+    <button class="btn" id="save" style="flex:1">✅ ยืนยัน &amp; สร้างไฟล์</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+// อ่านคำตอบจากเซิร์ฟเวอร์อย่างปลอดภัย
+// ถ้าเซิร์ฟเวอร์พังแล้วส่ง HTML กลับมา r.json() จะพังและ Safari ขึ้นข้อความว่า
+// "The string did not match the expected pattern" ซึ่งไม่บอกอะไรเลย จึงดักไว้เอง
+async function readJSON(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const brief = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`เซิร์ฟเวอร์ผิดพลาด (${r.status})${brief ? ': ' + brief : ''}`);
+  }
+}
+
+const JOB = new URLSearchParams(location.search).get('job');
+let D = null, sel = null;          // D = ข้อมูลงาน, sel = กล่องที่เลือกอยู่
+
+function show(kind, html) {
+  const m = $('msg'); m.className = kind; m.innerHTML = html;
+  m.classList.remove('hidden'); window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ---------- รอจนกว่างานจะพร้อม ----------
+async function poll() {
+  const r = await fetch('/api/doc/' + JOB);
+  if (r.status === 401) { location.href = '/login'; return; }
+  if (!r.ok) { $('loading').classList.add('hidden'); show('err', 'ไม่พบงานนี้ (อาจหมดอายุ)'); return; }
+  const d = await readJSON(r);
+  if (d.status === 'analyzing') { $('step').textContent = d.step || '...'; setTimeout(poll, 1500); return; }
+  if (d.status === 'error') { $('loading').classList.add('hidden'); show('err', 'เปิดเอกสารไม่สำเร็จ: ' + d.error); return; }
+  D = d; build();
+}
+
+// ---------- สร้างหน้าจอ ----------
+function build() {
+  $('loading').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('savebar').classList.remove('hidden');
+  $('rno').textContent = D.receipt_no;
+  $('meta').innerHTML =
+    `${esc(D.emoji)} <b>${esc(D.doc_no)}</b><br>เรื่อง: ${esc(D.doc_title)}<br>ลงวันที่ ${esc(D.doc_date)} · จาก ${esc(D.sender)}`;
+  if (D.category && D.category !== 'auto') {
+    $('warn').innerHTML = `⚠️ บรรทัด "เรียน" คือ <b>${esc(D.recipient || '(อ่านไม่ออก)')}</b> — ` +
+      `อาจไม่ใช่หนังสือของโรงเรียนเรา ตรวจสอบก่อนลงรับ`;
+    $('warn').classList.remove('hidden');
+  }
+  $('d').value = D.date; $('t').value = D.time;
+  $('ssv').textContent = D.stamp.size_pct + '%';
+
+  // หน้าเอกสาร + หน้ากระดาษเปล่าท้ายเล่มไว้วางคำเกษียณ
+  const box = $('pages'); box.innerHTML = '';
+  D.pages.forEach((p, i) => box.appendChild(mkPage(i, p.name, p.png, p.w, p.h)));
+  const last = D.pages[D.pages.length - 1];
+  box.appendChild(mkPage(D.pages.length, 'หน้ากระดาษเปล่า (ต่อท้าย)', null, last.w, last.h));
+
+  addOverlay('stamp', D.stamp);
+  D.boxes.forEach(b => addOverlay(b.id, b));
+  select(D.boxes[0] ? D.boxes[0].id : 'stamp');
+}
+
+function mkPage(i, name, png, w, h) {
+  const el = document.createElement('div');
+  el.className = 'page'; el.dataset.index = i;
+  el.style.aspectRatio = `${w} / ${h}`;
+  el.innerHTML = `<span class="plabel">${name}</span>` + (png ? `<img class="bg" src="${png}">` : '');
+  return el;
+}
+
+function pageEl(i) { return $('pages').querySelector(`.page[data-index="${i}"]`); }
+function pageSize(i) { const p = D.pages[Math.min(i, D.pages.length - 1)]; return p; }
+
+function addOverlay(id, o) {
+  const el = document.createElement('div');
+  el.className = 'ov'; el.dataset.id = id;
+  el.innerHTML = `<img src="${o.png}">`;
+  el.addEventListener('pointerdown', onDown);
+  pageEl(o.page).appendChild(el);
+  o._el = el;
+  posOverlay(o);
+}
+
+function posOverlay(o) {
+  const ps = pageSize(o.page);
+  o._el.style.width = (o.w / ps.w * 100) + '%';
+  o._el.style.left = (o.left_cm * D.cm / ps.w * 100) + '%';
+  o._el.style.top  = (o.top_cm  * D.cm / ps.h * 100) + '%';
+}
+
+function objOf(id) { return id === 'stamp' ? D.stamp : D.boxes.find(b => b.id === id); }
+
+// ---------- ลากด้วยนิ้ว (ข้ามหน้าได้) ----------
+let drag = null;
+function onDown(e) {
+  const id = e.currentTarget.dataset.id;
+  select(id);
+  e.preventDefault();
+  e.currentTarget.setPointerCapture(e.pointerId);
+  e.currentTarget.classList.add('dragging');
+  drag = { id, x: e.clientX, y: e.clientY };
+  e.currentTarget.addEventListener('pointermove', onMove);
+  const up = (ev) => {
+    ev.currentTarget.classList.remove('dragging');
+    ev.currentTarget.removeEventListener('pointermove', onMove);
+    drag = null;
+  };
+  e.currentTarget.addEventListener('pointerup', up, { once: true });
+  e.currentTarget.addEventListener('pointercancel', up, { once: true });
+}
+
+function onMove(e) {
+  if (!drag) return;
+  const o = objOf(drag.id);
+  const rect = o._el.parentElement.getBoundingClientRect();
+  const cmPerPx = pageSize(o.page).w / D.cm / rect.width;
+  o.left_cm += (e.clientX - drag.x) * cmPerPx;
+  o.top_cm  += (e.clientY - drag.y) * cmPerPx;
+  drag.x = e.clientX; drag.y = e.clientY;
+
+  // ลากข้ามไปหน้าอื่น — ดูว่าปลายนิ้วอยู่เหนือหน้าไหน
+  for (const p of $('pages').children) {
+    const r = p.getBoundingClientRect();
+    if (e.clientY >= r.top && e.clientY <= r.bottom) {
+      const ni = +p.dataset.index;
+      if (ni !== o.page) {
+        o.page = ni; p.appendChild(o._el);
+        o.top_cm = (e.clientY - r.top) / r.height * pageSize(ni).h / D.cm;
+      }
+      break;
+    }
+  }
+  clamp(o); posOverlay(o);
+}
+
+function clamp(o) {
+  const ps = pageSize(o.page);
+  o.left_cm = Math.max(0, Math.min(o.left_cm, (ps.w - o.w) / D.cm));
+  o.top_cm  = Math.max(0, Math.min(o.top_cm,  (ps.h - o.h) / D.cm));
+}
+
+// ---------- เลือกกล่อง ----------
+function select(id) {
+  sel = id;
+  for (const el of document.querySelectorAll('.ov')) el.classList.toggle('sel', el.dataset.id === id);
+  const isStamp = id === 'stamp';
+  $('selBox').classList.toggle('hidden', isStamp);
+  if (isStamp) { $('selTitle').textContent = 'ตรายาง'; return; }
+  const b = objOf(id);
+  const n = D.boxes.findIndex(x => x.id === id) + 1;
+  $('selTitle').textContent = `คำเกษียณ กล่องที่ ${n}`;
+  $('btext').value = b.text;
+  $('bsv').textContent = b.size_pct + '%';
+  $('bwv').textContent = b.wrap_pct + '%';
+  $('bbg').classList.toggle('on', !!b.bg);
+  $('bbd').classList.toggle('on', !!b.border);
+}
+
+// ---------- วาดกล่องใหม่หลังแก้ ----------
+let tm = null;
+function reBox(delay = 400) {
+  const b = objOf(sel); if (!b || sel === 'stamp') return;
+  clearTimeout(tm);
+  tm = setTimeout(async () => {
+    const r = await fetch(`/api/doc/${JOB}/box`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: b.text, size_pct: b.size_pct, wrap_pct: b.wrap_pct,
+                             indent_pct: b.indent_pct, bg: b.bg, border: b.border, page: b.page }),
+    });
+    if (!r.ok) return;
+    const d = await readJSON(r);
+    Object.assign(b, d);
+    b._el.querySelector('img').src = d.png;
+    clamp(b); posOverlay(b);
+  }, delay);
+}
+
+$('btext').addEventListener('input', () => { objOf(sel).text = $('btext').value; reBox(); });
+function bstep(field, lbl, delta, lo, hi) {
+  const b = objOf(sel);
+  b[field] = Math.max(lo, Math.min(hi, b[field] + delta));
+  $(lbl).textContent = b[field] + '%'; reBox(0);
+}
+$('bsm').onclick = () => bstep('size_pct', 'bsv', -5, 20, 300);
+$('bsp').onclick = () => bstep('size_pct', 'bsv',  5, 20, 300);
+$('bwm').onclick = () => bstep('wrap_pct', 'bwv', -10, 30, 250);
+$('bwp').onclick = () => bstep('wrap_pct', 'bwv',  10, 30, 250);
+$('bbg').onclick = () => { const b = objOf(sel); b.bg = !b.bg; $('bbg').classList.toggle('on', b.bg); reBox(0); };
+$('bbd').onclick = () => { const b = objOf(sel); b.border = !b.border; $('bbd').classList.toggle('on', b.border); reBox(0); };
+
+$('bdel').onclick = () => {
+  if (D.boxes.length <= 1) { alert('ต้องเหลือกล่องคำเกษียณอย่างน้อย ๑ กล่อง'); return; }
+  const b = objOf(sel); b._el.remove();
+  D.boxes = D.boxes.filter(x => x.id !== sel);
+  select(D.boxes[0].id);
+};
+
+$('badd').onclick = async () => {
+  const src = objOf(sel) || D.boxes[0];
+  const id = 'b' + (Date.now() % 100000);
+  const nb = { id, text: 'พิมพ์ข้อความที่นี่', size_pct: 100, wrap_pct: 100, indent_pct: 100,
+               bg: false, border: false, page: src.page,
+               left_cm: src.left_cm, top_cm: src.top_cm + 2 };
+  const r = await fetch(`/api/doc/${JOB}/box`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nb) });
+  Object.assign(nb, await readJSON(r));
+  D.boxes.push(nb); addOverlay(id, nb); select(id);
+};
+
+// ---------- ตรายาง ----------
+async function reStamp() {
+  const r = await fetch(`/api/doc/${JOB}/stamp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date: $('d').value, time: $('t').value, size_pct: D.stamp.size_pct }) });
+  if (!r.ok) return;
+  const d = await readJSON(r);
+  Object.assign(D.stamp, { png: d.png, w: d.w, h: d.h });
+  D.stamp._el.querySelector('img').src = d.png;
+  clamp(D.stamp); posOverlay(D.stamp);
+}
+let st = null;
+for (const f of ['d', 't']) $(f).addEventListener('input', () => { clearTimeout(st); st = setTimeout(reStamp, 400); });
+$('ssm').onclick = () => { D.stamp.size_pct = Math.max(20, D.stamp.size_pct - 5); $('ssv').textContent = D.stamp.size_pct + '%'; reStamp(); };
+$('ssp').onclick = () => { D.stamp.size_pct = Math.min(300, D.stamp.size_pct + 5); $('ssv').textContent = D.stamp.size_pct + '%'; reStamp(); };
+
+// ---------- บันทึก / ไม่รับ ----------
+function payload() {
+  const strip = (o) => ({ page: o.page, left_cm: o.left_cm, top_cm: o.top_cm,
+                          size_pct: o.size_pct, wrap_pct: o.wrap_pct, indent_pct: o.indent_pct,
+                          bg: o.bg, border: o.border, text: o.text });
+  return { date: $('d').value, time: $('t').value,
+           stamp: strip(D.stamp), boxes: D.boxes.map(strip) };
+}
+
+$('save').onclick = async () => {
+  const b = $('save'); b.disabled = true; b.textContent = 'กำลังสร้างไฟล์...';
+  try {
+    const r = await fetch(`/api/doc/${JOB}/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload()) });
+    const d = await readJSON(r);
+    if (!d.ok) throw new Error(d.detail || 'บันทึกไม่สำเร็จ');
+    $('app').classList.add('hidden'); $('savebar').classList.add('hidden');
+    show('ok', `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>` +
+      (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +
+      `<a class="btn" href="${d.download}" download style="margin-top:12px;text-decoration:none;text-align:center;line-height:28px">⬇️ ดาวน์โหลด PDF</a>` +
+      `<a class="btn grey" href="/" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">กลับหน้าแรก</a>`);
+  } catch (e) {
+    show('err', 'บันทึกไม่สำเร็จ: ' + e.message);
+    b.disabled = false; b.textContent = '✅ ยืนยัน & สร้างไฟล์';
+  }
+};
+
+$('skip').onclick = async () => {
+  if (!confirm('ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนและไม่ส่ง LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก')) return;
+  await fetch(`/api/doc/${JOB}/skip`, { method: 'POST' });
+  location.href = '/';
+};
+
+if (!JOB) show('err', 'ไม่ได้ระบุงาน — <a href="/">กลับหน้าแรก</a>');
+else poll();
+</script>
+</body>
+</html>

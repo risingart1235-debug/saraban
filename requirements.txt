@@ -1,0 +1,17 @@
+# ===== เว็บ =====
+fastapi
+uvicorn[standard]
+python-multipart
+
+# ===== อ่าน/สร้างเอกสาร =====
+pymupdf            # อ่าน PDF -> รูป (แทน pdf2image+poppler ไม่ต้องลงโปรแกรมเสริม)
+pillow             # วาดตรายาง/คำเกษียณ
+pypdf2             # รวมหน้า PDF
+openpyxl           # ทะเบียนหนังสือรับ (.xlsx)
+
+# ===== ดึงข้อมูล/AI/แจ้งเตือน =====
+requests
+beautifulsoup4
+google-genai       # Gemini อ่านหนังสือ + เกษียณ
+# pythainlp        # ไม่จำเป็นแล้ว — ใช้ thaiwords.py แทน (เบากว่า ๑๐ เท่า)
+#                   ติดตั้งไว้ก็ได้ ถ้าไฟล์คลังคำหายจะถอยไปใช้ตัวนี้

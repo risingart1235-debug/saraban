@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ระบบลงรับหนังสือราชการ</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .doc { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:8px;
+         background:#fff; cursor:pointer; text-align:left; width:100%; font-family:inherit; font-size:15px }
+  .doc:active { background:#eef2ff }
+  .doc b { display:block; margin-bottom:3px }
+  .spin { width:22px;height:22px;border:3px solid #d1d5db;border-top-color:#fff;
+          border-radius:50%;animation:sp .9s linear infinite;display:inline-block;vertical-align:-4px }
+  @keyframes sp { to { transform:rotate(360deg) } }
+
+  /* ---- เมนูโปรไฟล์มุมขวาบน ---- */
+  #profBtn { display:flex; align-items:center; gap:5px; white-space:nowrap; font-size:14px }
+  #dot { color:#ff6b6b; font-size:22px; line-height:0 }   /* จุดแดงเตือนว่ายังไม่เปลี่ยนรหัส */
+
+  #backdrop { position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:60 }
+
+  #profMenu {
+    position:fixed; top:56px; right:10px; z-index:70;
+    width:min(320px, calc(100vw - 20px));
+    max-height:calc(100vh - 70px); overflow-y:auto;
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    box-shadow:0 10px 30px rgba(0,0,0,.28);
+  }
+  #profMenu .phead { padding:14px 16px; border-bottom:1px solid var(--line); background:#f8fafc;
+                     border-radius:14px 14px 0 0 }
+  #profMenu .pname { font-weight:700; font-size:16px }
+  #profMenu .prole { margin-top:2px }
+  #profMenu .pbody { padding:14px 16px }
+  #profMenu .psec { font-weight:700; color:var(--blue); margin-bottom:8px; font-size:15px }
+  #profMenu label { margin-top:8px }
+  #profMenu .pout {
+    width:100%; min-height:50px; border:0; border-top:1px solid var(--line);
+    background:#fff5f5; color:#b91c1c; font-family:inherit; font-size:15px;
+    cursor:pointer; border-radius:0 0 14px 14px;
+  }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>📚 ลงรับหนังสือราชการ</h1>
+  <button id="profBtn" aria-haspopup="true" aria-expanded="false">
+    <span id="dot" class="hidden">•</span> 👤 <span id="who"></span> ▾
+  </button>
+</header>
+
+<!-- เมนูโปรไฟล์ (ซ่อนอยู่จนกว่าจะกดปุ่มมุมขวาบน) -->
+<div id="backdrop" class="hidden"></div>
+<div id="profMenu" class="hidden">
+  <div class="phead">
+    <div class="pname" id="pName">—</div>
+    <div class="prole tiny" id="pRole"></div>
+  </div>
+
+  <div class="pbody">
+    <div id="pwWarn" class="err hidden" style="margin-bottom:10px">
+      ⚠️ ยังใช้รหัสผ่านชั่วคราวอยู่ — กรุณาตั้งรหัสใหม่
+    </div>
+    <div class="psec">🔑 เปลี่ยนรหัสผ่าน</div>
+    <div id="pwMsg" class="hidden"></div>
+    <label for="pwOld">รหัสผ่านเดิม</label>
+    <input id="pwOld" type="password" autocomplete="current-password">
+    <label for="pwNew">รหัสผ่านใหม่ (อย่างน้อย ๘ ตัวอักษร)</label>
+    <input id="pwNew" type="password" autocomplete="new-password">
+    <label for="pwNew2">พิมพ์รหัสใหม่อีกครั้ง</label>
+    <input id="pwNew2" type="password" autocomplete="new-password">
+    <button class="btn grey small" id="pwSave" style="margin-top:12px">บันทึกรหัสใหม่</button>
+  </div>
+
+  <button class="pout" id="out">🚪 ออกจากระบบ</button>
+</div>
+
+<div class="wrap">
+  <a id="adminBtn" href="/admin" class="card hidden"
+     style="display:block; text-decoration:none; border-color:#f59e0b; background:#fffbeb">
+    <h2 style="color:#92400e">👥 จัดการผู้ใช้ <span id="pbadge"></span></h2>
+    <p class="hint" style="margin:0">อนุมัติคนที่สมัครเข้ามาใหม่ / ระงับการใช้งาน</p>
+  </a>
+
+  <a id="driveBtn" href="#" target="_blank" rel="noopener" class="card hidden"
+     style="display:block; text-decoration:none; border-color:#34a853; background:#f0fdf4">
+    <h2 style="color:#166534">📁 เปิดโฟลเดอร์ใน Google Drive</h2>
+    <p class="hint" style="margin:0">ดูไฟล์ที่ลงรับแล้วทั้งหมด · เปิดจากมือถือได้เลย</p>
+  </a>
+
+  <a href="/fix" class="card" style="display:block; text-decoration:none">
+    <h2>🔧 แก้ไข / ถอยเลขรับ</h2>
+    <p class="hint" style="margin:0">ลงรับผิด? ถอยเลขคืน แล้วดึงเรื่องเดิมมาทำใหม่ได้</p>
+  </a>
+
+  <div class="card">
+    <h2>โหมดที่ ๑ — ตรวจสอบจากเว็บ สพป.</h2>
+    <p class="hint">ดึงหนังสือใหม่จากระบบ สพป. ให้ AI อ่านและเกษียณ แล้วส่งเข้ากลุ่ม LINE</p>
+    <a href="/news" class="btn" style="text-decoration:none;text-align:center;line-height:28px">
+      📰 เปิดรายการหนังสือ
+    </a>
+    <p class="tiny" style="margin-top:8px">
+      แยกตามวันที่เว็บอัปโหลด · บอกสถานะ รับแล้ว / ข้าม / ยังไม่ลงรับ
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>โหมดที่ ๒ — นำเข้าไฟล์ (AI)</h2>
+    <p class="hint">เลือก PDF หรือรูปจากเครื่อง/มือถือ ให้ AI อ่านและเกษียณให้</p>
+    <input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png" class="hidden">
+    <button class="btn blue" id="pick">📂 เลือกไฟล์</button>
+  </div>
+
+  <div class="card">
+    <h2>โหมดที่ ๓ — ลงเลขรับบนกระดาษเปล่า</h2>
+    <p class="hint">
+      ได้กระดาษ A4 ที่มีแต่ตรายางเลขรับ เอาไปปริ้นทับเอกสารที่ส่งมาเป็นกระดาษได้เลย<br>
+      รันเลขต่อจากทะเบียน • ไม่เรียก AI • ไม่ส่ง LINE
+    </p>
+    <a href="/stamp" class="btn purple" style="text-decoration:none; text-align:center; line-height:28px">
+      🔢 ลงตรายางเลขรับ
+    </a>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+
+// ---------- เมนูโปรไฟล์ ----------
+function openMenu(open) {
+  $('profMenu').classList.toggle('hidden', !open);
+  $('backdrop').classList.toggle('hidden', !open);
+  $('profBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+$('profBtn').onclick = () => openMenu($('profMenu').classList.contains('hidden'));
+$('backdrop').onclick = () => openMenu(false);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') openMenu(false); });
+
+fetch('/api/me').then(r => r.json()).then(d => {
+  $('who').textContent = d.display || '';
+  $('pName').textContent = d.display || d.user || '';
+  $('pRole').textContent = (d.is_admin ? 'ผู้ดูแลระบบ' : 'ผู้ใช้งาน') + ' · ' + (d.user || '');
+  if (d.must_change) {
+    $('pwWarn').classList.remove('hidden');
+    $('dot').classList.remove('hidden');
+    openMenu(true);                 // ยังใช้รหัสชั่วคราว -> เปิดเมนูให้เลย
+  }
+  if (d.drive_url) {
+    const b = $('driveBtn');
+    b.href = d.drive_url;
+    b.classList.remove('hidden');
+  }
+  if (d.is_admin) {
+    $('adminBtn').classList.remove('hidden');
+    if (d.pending > 0) {
+      $('pbadge').innerHTML =
+        `<span style="background:#ef4444;color:#fff;border-radius:999px;padding:2px 10px;font-size:13px">รออนุมัติ ${d.pending} คน</span>`;
+    }
+  }
+}).catch(() => {});
+
+$('pwSave').onclick = async () => {
+  const m = $('pwMsg'), a = $('pwNew').value, b = $('pwNew2').value;
+  const fail = (t) => { m.className = 'err'; m.textContent = t; m.classList.remove('hidden'); };
+  if (a !== b) return fail('รหัสใหม่สองช่องไม่ตรงกัน');
+  if (a.length < 8) return fail('รหัสใหม่ต้องยาวอย่างน้อย ๘ ตัวอักษร');
+  const r = await fetch('/api/me/password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old: $('pwOld').value, new: a }) });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); return fail(d.detail || 'เปลี่ยนไม่สำเร็จ'); }
+  m.className = 'ok';
+  m.textContent = 'เปลี่ยนรหัสผ่านแล้ว — อุปกรณ์อื่นที่ล็อกอินค้างไว้ถูกตัดออกทั้งหมด';
+  m.classList.remove('hidden');
+  $('pwOld').value = $('pwNew').value = $('pwNew2').value = '';
+  $('pwWarn').classList.add('hidden');
+  $('dot').classList.add('hidden');
+  setTimeout(() => openMenu(false), 1800);      // ปิดเมนูให้เองหลังสำเร็จ
+};
+
+$('out').onclick = async () => {
+  await fetch('/logout', { method: 'POST' });
+  location.href = '/login';
+};
+
+// ---------- โหมดที่ ๒ ----------
+$('pick').onclick = () => $('file').click();
+$('file').onchange = async () => {
+  const f = $('file').files[0]; if (!f) return;
+  const b = $('pick'); b.disabled = true; b.innerHTML = '<span class="spin"></span> กำลังอัปโหลด...';
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch('/api/doc/upload', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!d.job_id) throw new Error(d.detail || 'อัปโหลดไม่สำเร็จ');
+    location.href = '/doc?job=' + d.job_id;
+  } catch (e) {
+    alert(e.message);
+    b.disabled = false; b.textContent = '📂 เลือกไฟล์';
+  }
+};
+</script>
+</body>
+</html>

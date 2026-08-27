@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>แก้ไข / ถอยเลขรับ</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .rec { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:8px; background:#fff }
+  .rec .no { font-size:22px; font-weight:700; color:var(--purple); margin-right:8px }
+  .rec .top { display:flex; align-items:baseline; gap:4px }
+  .rec .ttl { flex:1; font-weight:700; font-size:14px }
+  .rec button { margin-top:8px; width:100%; min-height:42px; border:1px solid #fca5a5;
+                background:#fef2f2; color:#b91c1c; border-radius:8px; font-size:14px;
+                font-family:inherit; cursor:pointer }
+  .latest { border-color:#f59e0b; background:#fffbeb }
+  .badge { font-size:11px; background:#fde68a; color:#92400e; padding:2px 8px; border-radius:999px }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>🔧 แก้ไข / ถอยเลขรับ</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div class="card">
+    <h2>เลขรับถัดไปตอนนี้</h2>
+    <div id="next" style="font-size:30px;font-weight:700;color:var(--purple)">—</div>
+    <p class="tiny" id="storekind"></p>
+  </div>
+
+  <div class="card">
+    <h2>รายการที่ลงรับล่าสุด</h2>
+    <p class="hint">
+      ถอยรายการไหน เลขรับนั้นจะถูกลบออกจากทะเบียน<br>
+      <b>ถ้าเป็นรายการล่าสุด</b> เลขจะถูกนำกลับมาใช้ใหม่ได้ทันที<br>
+      <b>ถ้าเป็นรายการเก่า</b> จะเว้นเลขนั้นว่างไว้ (เลขถัดไปยังนับต่อเหมือนเดิม)
+    </p>
+    <div id="list"><p class="tiny">กำลังโหลด...</p></div>
+  </div>
+
+  <div class="card">
+    <h2>ดึงเรื่องเดิมกลับมาทำใหม่</h2>
+    <p class="hint">
+      ใส่เลข ID ของหนังสือ (เลข ๖ หลักที่ขึ้นในบันทึกตอนดึง เช่น 183725)<br>
+      ถอนแล้วเรื่องนั้นจะกลับมาขึ้นในรายการ "หนังสือใหม่" อีกครั้ง
+    </p>
+    <label for="bid">เลข ID หนังสือ</label>
+    <input id="bid" type="text" inputmode="numeric" placeholder="เช่น 183725">
+    <button class="btn grey small" id="unmark" style="margin-top:10px">ถอนออกจากประวัติ</button>
+    <div id="hits" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+
+function show(kind, html) {
+  const m = $('msg'); m.className = kind; m.innerHTML = html;
+  m.classList.remove('hidden'); window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function load() {
+  const r = await fetch('/api/fix/recent');
+  if (r.status === 401) { location.href = '/login'; return; }
+  const d = await r.json();
+  $('next').textContent = d.next_no;
+  $('storekind').textContent = 'ที่เก็บข้อมูล: ' +
+    (d.store === 'sheets' ? 'Google Sheets (ใช้ร่วมกันทุกเครื่อง)' : 'ไฟล์ในเครื่องนี้');
+  $('list').innerHTML = d.rows.length
+    ? d.rows.map((x, i) => `
+      <div class="rec ${i === 0 ? 'latest' : ''}">
+        <div class="top">
+          <span class="no">${esc(x.receipt_no)}</span>
+          <span class="ttl">${esc(x.doc_title || '(ไม่มีเรื่อง)')}</span>
+          ${i === 0 ? '<span class="badge">ล่าสุด</span>' : ''}
+        </div>
+        <p class="tiny">${esc(x.doc_no || '-')} · ลงวันที่ ${esc(x.doc_date || '-')} · ${esc(x.sender || '-')}
+           · ลงรับ ${x.receive_date || '-'}</p>
+        <button onclick="undo('${esc(x.receipt_no)}')">🗑 ถอยเลข ${esc(x.receipt_no)} ออกจากทะเบียน</button>
+      </div>`).join('')
+    : '<p class="tiny">ยังไม่มีรายการในทะเบียน</p>';
+}
+
+async function undo(no) {
+  if (!confirm(`ยืนยันถอยเลขรับ ${no} ออกจากทะเบียน?\n\nแถวนี้จะถูกลบถาวร`)) return;
+  const r = await fetch('/api/fix/undo', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ receipt_no: no }) });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    show('err', e.detail || 'ถอยไม่สำเร็จ'); return;
+  }
+  const d = await r.json();
+  show('ok', `<b>ถอยเลขรับ ${no} เรียบร้อย</b><br>` +
+    (d.deleted.reusable
+      ? `เลข ${no} กลับมาใช้ใหม่ได้แล้ว — เลขรับถัดไปคือ ${d.next_no}`
+      : `เว้นเลข ${no} ว่างไว้ — เลขรับถัดไปยังเป็น ${d.next_no}`) +
+    `<br><span class="tiny">ถ้าเป็นเรื่องที่ดึงจากเว็บ สพป. อย่าลืมถอน ID ออกจากประวัติด้วย (ช่องล่าง)</span>`);
+  load();
+}
+
+$('unmark').onclick = async () => {
+  const id = $('bid').value.trim();
+  if (!id) { show('err', 'กรุณาใส่เลข ID หนังสือก่อน'); return; }
+  const r = await fetch('/api/fix/undo', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id: id }) });
+  const d = await r.json();
+  show(d.unmarked ? 'ok' : 'err', d.unmarked
+    ? `<b>ถอน ID ${id} ออกจากประวัติแล้ว</b><br>กลับไปกด "ตรวจหนังสือใหม่" จะเห็นเรื่องนี้อีกครั้ง`
+    : `ไม่พบ ID ${id} ในประวัติ (อาจถอนไปแล้ว หรือพิมพ์ผิด)`);
+};
+
+$('bid').addEventListener('input', async () => {
+  const q = $('bid').value.trim();
+  if (q.length < 3) { $('hits').innerHTML = ''; return; }
+  const d = await (await fetch('/api/fix/history?q=' + encodeURIComponent(q))).json();
+  $('hits').innerHTML = d.ids.length
+    ? `<p class="tiny">พบในประวัติ: ${d.ids.slice(0, 8).join(', ')}</p>`
+    : '<p class="tiny">ไม่พบเลขนี้ในประวัติ</p>';
+});
+
+load();
+</script>
+</body>
+</html>

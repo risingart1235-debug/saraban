@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>สมัครสมาชิก — ลงรับหนังสือราชการ</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap" style="max-width:420px; padding-top:36px">
+  <div style="text-align:center; margin-bottom:18px">
+    <div style="font-size:40px">📝</div>
+    <h1 style="color:var(--blue); font-size:20px; margin:8px 0 2px">สมัครเข้าใช้ระบบ</h1>
+    <p class="tiny">โรงเรียนบ้านโพนทองประชาอุทิศ</p>
+  </div>
+
+  <div class="card">
+    <div id="err" class="err hidden"></div>
+    <div id="ok" class="ok hidden"></div>
+
+    <form id="f">
+      <label for="dn">ชื่อ-สกุล (ชื่อที่จะแสดงในระบบ)</label>
+      <input id="dn" type="text" placeholder="เช่น นางสาวสมศรี ใจดี">
+
+      <label for="u">ชื่อผู้ใช้ (ภาษาอังกฤษหรือไทยก็ได้)</label>
+      <input id="u" type="text" autocomplete="username" autocapitalize="none" required>
+      <p class="tiny">อย่างน้อย ๓ ตัวอักษร</p>
+
+      <label for="p">รหัสผ่าน</label>
+      <input id="p" type="password" autocomplete="new-password" required>
+      <p class="tiny">อย่างน้อย ๖ ตัวอักษร</p>
+
+      <label for="p2">ยืนยันรหัสผ่านอีกครั้ง</label>
+      <input id="p2" type="password" autocomplete="new-password" required>
+
+      <button class="btn" type="submit" style="margin-top:18px">สมัครสมาชิก</button>
+    </form>
+
+    <p class="tiny" style="margin-top:14px; line-height:1.6">
+      ℹ️ สมัครแล้ว<b>ยังเข้าใช้ไม่ได้ทันที</b> — ต้องรอผู้ดูแล (ธุรการ) กดอนุมัติก่อน
+      เมื่ออนุมัติแล้วจึงเข้าสู่ระบบด้วยชื่อผู้ใช้และรหัสที่ตั้งไว้ได้เลย
+    </p>
+  </div>
+
+  <a href="/login" class="btn grey" style="text-decoration:none; text-align:center; line-height:24px">
+    มีบัญชีอยู่แล้ว — เข้าสู่ระบบ
+  </a>
+</div>
+
+<script>
+const f = document.getElementById('f');
+const err = document.getElementById('err'), ok = document.getElementById('ok');
+
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  err.classList.add('hidden'); ok.classList.add('hidden');
+
+  const p = document.getElementById('p').value;
+  if (p !== document.getElementById('p2').value) {
+    err.textContent = 'รหัสผ่านสองช่องไม่ตรงกัน';
+    err.classList.remove('hidden');
+    return;
+  }
+
+  const btn = f.querySelector('button');
+  btn.disabled = true; btn.textContent = 'กำลังสมัคร...';
+  try {
+    const body = new URLSearchParams({
+      username: document.getElementById('u').value,
+      password: p,
+      display: document.getElementById('dn').value,
+    });
+    const r = await fetch('/register', { method: 'POST', body });
+    const d = await r.json();
+    if (d.ok) {
+      f.classList.add('hidden');
+      ok.innerHTML = '<b>' + d.message + '</b>';
+      ok.classList.remove('hidden');
+    } else {
+      err.textContent = d.error || 'สมัครไม่สำเร็จ';
+      err.classList.remove('hidden');
+    }
+  } catch (ex) {
+    err.textContent = 'ติดต่อเซิร์ฟเวอร์ไม่ได้: ' + ex.message;
+    err.classList.remove('hidden');
+  }
+  btn.disabled = false; btn.textContent = 'สมัครสมาชิก';
+});
+</script>
+</body>
+</html>

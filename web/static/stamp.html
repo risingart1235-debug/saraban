@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ลงตรายางเลขรับ</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* กระดาษ A4 — สูง 297/210 เท่าของความกว้างเสมอ ย่อ/ขยายตามจอเองโดยไม่ต้องคำนวณใหม่ */
+  #paper {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 210 / 297;
+    background: #fff;
+    border: 1px solid var(--line);
+    box-shadow: 0 2px 10px rgba(0,0,0,.16);
+    overflow: hidden;
+    margin: 0 auto;
+    touch-action: none;          /* กันหน้าจอเลื่อนตามนิ้วตอนลากตรายาง */
+    user-select: none;
+  }
+  #stampImg {
+    position: absolute;
+    cursor: grab;
+    touch-action: none;
+    /* ขนาดกับตำแหน่งเป็น % ของกระดาษ พอจอเปลี่ยนขนาดก็ยังตรงที่เดิม */
+  }
+  #stampImg.dragging { cursor: grabbing; filter: drop-shadow(0 3px 8px rgba(0,0,0,.35)); }
+  #stampImg::after { content: ""; }
+
+  .stage { background: #8f9499; padding: 14px; border-radius: 12px; margin-bottom: 14px; }
+
+  .row { display: flex; align-items: center; gap: 10px; }
+  .row > label { margin: 0; flex: 1; }
+  .stepper { display: flex; align-items: center; gap: 6px; }
+  .stepper button {
+    width: 44px; height: 44px; border: 1px solid #c9ced6; background: #fff;
+    border-radius: 8px; font-size: 20px; cursor: pointer; font-family: inherit;
+  }
+  .stepper span { min-width: 52px; text-align: center; font-weight: 700; }
+
+  #pos { font-weight: 700; color: var(--teal); font-size: 15px; line-height: 1.6; }
+  #pos.warn { color: var(--red); }
+
+  /* แถบบันทึกติดล่างจอเสมอ — บทเรียนจากเวอร์ชันเดสก์ท็อปที่ปุ่มเคยหลุดจอ */
+  #savebar {
+    position: sticky; bottom: 0;
+    background: rgba(240,242,245,.97);
+    border-top: 1px solid var(--line);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    margin: 0 -16px;
+  }
+  #big { font-size: 30px; font-weight: 700; color: var(--purple); }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>ลงตรายางเลขรับ</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div id="app" class="hidden">
+    <div class="card" style="display:flex; align-items:center; gap:12px">
+      <div>
+        <div class="tiny">เลขรับที่จะลง</div>
+        <div id="big">—</div>
+      </div>
+      <div class="tiny" style="flex:1; text-align:right">
+        กระดาษ A4 เปล่า<br>ไว้ปริ้นทับเอกสารกระดาษ
+      </div>
+    </div>
+
+    <div class="stage">
+      <div id="paper"><img id="stampImg" alt="ตรายางเลขรับ"></div>
+    </div>
+
+    <div class="card">
+      <div id="pos"></div>
+      <button class="btn grey small" id="reset" style="margin-top:8px">↺ ตำแหน่งมาตรฐาน (มุมขวาบน)</button>
+      <p class="tiny" style="margin-top:8px">✨ ลากตรายางด้วยนิ้วได้เลย โปรแกรมจะจำตำแหน่งไว้ให้ครั้งหน้า</p>
+    </div>
+
+    <div class="card">
+      <h2>🖋 วัน-เวลาบนตรายาง</h2>
+      <label for="d">วันที่</label>
+      <input id="d" type="text" inputmode="text">
+      <p class="tiny">พิมพ์ 15/7/2569 ก็ได้ เดี๋ยวแปลงให้</p>
+      <label for="t">เวลา</label>
+      <input id="t" type="text">
+      <button class="btn grey small" id="now" style="margin-top:10px">↺ ใช้วัน-เวลาจริงตอนนี้</button>
+
+      <div class="row" style="margin-top:16px">
+        <label>ขนาดตรายาง</label>
+        <div class="stepper">
+          <button id="sm">−</button><span id="sv">100%</span><button id="sp">+</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📝 ข้อมูลลงทะเบียน</h2>
+      <p class="hint">ไม่พิมพ์ก็ได้ — ช่องที่เว้นว่างจะไปเติมเองใน Excel ทีหลัง</p>
+      <label for="doc_no">ที่</label>
+      <input id="doc_no" type="text" placeholder="เช่น ศธ ๐๔๑๓๗/๑๒๓">
+      <label for="doc_date">ลงวันที่</label>
+      <input id="doc_date" type="text" placeholder="เช่น ๑๕ ก.ค. ๒๕๖๙ หรือ 15/7/2569">
+      <label for="sender">จาก</label>
+      <input id="sender" type="text" placeholder="เช่น สพป.สกลนคร เขต ๑">
+      <label for="doc_title">เรื่อง</label>
+      <input id="doc_title" type="text" placeholder="ชื่อเรื่องหนังสือ">
+    </div>
+  </div>
+
+  <div id="savebar" class="hidden">
+    <button class="btn" id="save">✅ ลงตรายาง &amp; บันทึก</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// หนีอักขระ HTML ก่อนเอาไปแสดง
+// ชื่อเรื่อง/เลขหนังสือมาจากเว็บ สพป. และคำเกษียณมาจาก AI — เราควบคุมเนื้อหาไม่ได้
+// ถ้ายัดเข้า innerHTML ตรงๆ แล้วบังเอิญมีแท็ก HTML ปน หน้าเว็บจะเพี้ยนหรือถูกแทรกสคริปต์ได้
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+// อ่านคำตอบจากเซิร์ฟเวอร์อย่างปลอดภัย
+// ถ้าเซิร์ฟเวอร์พังแล้วส่ง HTML กลับมา r.json() จะพังและ Safari ขึ้นข้อความว่า
+// "The string did not match the expected pattern" ซึ่งไม่บอกอะไรเลย จึงดักไว้เอง
+async function readJSON(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const brief = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`เซิร์ฟเวอร์ผิดพลาด (${r.status})${brief ? ': ' + brief : ''}`);
+  }
+}
+
+const paper = $('paper'), stampImg = $('stampImg');
+let S = null;            // สถานะงานปัจจุบัน
+
+// ---------- โหลดงานใหม่ ----------
+async function start() {
+  try {
+    const r = await fetch('/api/stamp/new');
+    if (r.status === 401) { location.href = '/login'; return; }
+    S = await readJSON(r);
+    $('big').textContent = S.receipt_no;
+    $('d').value = S.date;
+    $('t').value = S.time;
+    $('sv').textContent = S.size_pct + '%';
+    applyStamp();
+    $('app').classList.remove('hidden');
+    $('savebar').classList.remove('hidden');
+  } catch (e) {
+    show('err', 'เปิดงานไม่สำเร็จ: ' + e.message);
+  }
+}
+
+// ---------- วางตรายางลงกระดาษ (ทุกอย่างเป็น % ของกระดาษ) ----------
+function applyStamp() {
+  stampImg.src = S.stamp.png;
+  stampImg.style.width = (S.stamp.w / S.page.w * 100) + '%';
+  place();
+}
+
+function place() {
+  const xpx = S.pos.left_cm * S.page.cm;
+  const ypx = S.pos.top_cm * S.page.cm;
+  stampImg.style.left = (xpx / S.page.w * 100) + '%';
+  stampImg.style.top  = (ypx / S.page.h * 100) + '%';
+  readout();
+}
+
+function clampPos() {
+  const maxL = (S.page.w - S.stamp.w) / S.page.cm;
+  const maxT = (S.page.h - S.stamp.h) / S.page.cm;
+  S.pos.left_cm = Math.max(0, Math.min(S.pos.left_cm, maxL));
+  S.pos.top_cm  = Math.max(0, Math.min(S.pos.top_cm,  maxT));
+}
+
+function readout() {
+  const top = S.pos.top_cm;
+  const right = (S.page.w - S.pos.left_cm * S.page.cm - S.stamp.w) / S.page.cm;
+  const left = S.pos.left_cm;
+  const bad = top < 0.8 || right < 0.5 || left < 0.5;
+  $('pos').textContent =
+    `ห่างขอบบน ${top.toFixed(1)} ซม. · ห่างขอบขวา ${right.toFixed(1)} ซม.` +
+    (bad ? '  ⚠️ ชิดขอบเกิน เครื่องปริ้นอาจตัด' : '');
+  $('pos').classList.toggle('warn', bad);
+}
+
+// ---------- ลากด้วยนิ้วหรือเมาส์ (Pointer Events ใช้ได้ทั้งคู่) ----------
+let drag = null;
+stampImg.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  stampImg.setPointerCapture(e.pointerId);
+  stampImg.classList.add('dragging');
+  drag = { x: e.clientX, y: e.clientY };
+});
+stampImg.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const rect = paper.getBoundingClientRect();
+  const cmPerPx = S.page.w / S.page.cm / rect.width;   // 1 พิกเซลบนจอ = กี่ ซม. บนกระดาษจริง
+  S.pos.left_cm += (e.clientX - drag.x) * cmPerPx;
+  S.pos.top_cm  += (e.clientY - drag.y) * cmPerPx;
+  drag = { x: e.clientX, y: e.clientY };
+  clampPos();
+  place();
+});
+for (const ev of ['pointerup', 'pointercancel']) {
+  stampImg.addEventListener(ev, () => { drag = null; stampImg.classList.remove('dragging'); });
+}
+
+// ---------- วาดตรายางใหม่เมื่อแก้วัน/เวลา/ขนาด ----------
+let timer = null;
+function refresh(delay = 350) {
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    const r = await fetch('/api/stamp/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receipt_no: S.receipt_no, date: $('d').value,
+        time: $('t').value, size_pct: S.size_pct,
+      }),
+    });
+    if (!r.ok) return;
+    const d = await readJSON(r);
+    S.stamp = d.stamp;
+    clampPos();
+    applyStamp();
+  }, delay);
+}
+
+$('d').addEventListener('input', () => refresh());
+$('t').addEventListener('input', () => refresh());
+$('now').onclick = async () => {
+  const r = await fetch('/api/stamp/new');
+  const d = await readJSON(r);
+  $('d').value = d.date;
+  $('t').value = d.time;
+  refresh(0);
+};
+
+function setSize(v) {
+  S.size_pct = Math.max(20, Math.min(300, v));
+  $('sv').textContent = S.size_pct + '%';
+  refresh(0);
+}
+$('sm').onclick = () => setSize(S.size_pct - 5);
+$('sp').onclick = () => setSize(S.size_pct + 5);
+
+$('reset').onclick = () => {
+  S.pos.left_cm = (S.page.w - S.stamp.w) / S.page.cm - 1.0;
+  S.pos.top_cm = 1.5;
+  clampPos();
+  place();
+};
+
+// ---------- บันทึก ----------
+function show(kind, html) {
+  const m = $('msg');
+  m.className = kind;
+  m.innerHTML = html;
+  m.classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+$('save').onclick = async () => {
+  const btn = $('save');
+  btn.disabled = true;
+  btn.textContent = 'กำลังบันทึก...';
+  try {
+    const r = await fetch('/api/stamp/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        date: $('d').value, time: $('t').value, size_pct: S.size_pct,
+        left_cm: S.pos.left_cm, top_cm: S.pos.top_cm,
+        fields: {
+          doc_no: $('doc_no').value, doc_date: $('doc_date').value,
+          sender: $('sender').value, doc_title: $('doc_title').value,
+        },
+      }),
+    });
+    const d = await readJSON(r);
+    if (!d.ok) throw new Error(d.detail || 'บันทึกไม่สำเร็จ');
+    $('app').classList.add('hidden');
+    $('savebar').classList.add('hidden');
+    show('ok',
+      `<b>ลงตรายางเลขรับ ${esc(d.receipt_no)} เรียบร้อยแล้ว</b><br>` +
+      `ลงทะเบียน Excel แล้ว (${d.filled}/๔ ช่องที่พิมพ์)<br>` +
+      `<a class="btn" href="${d.download}" style="margin-top:12px;text-decoration:none;text-align:center;line-height:28px" download>⬇️ ดาวน์โหลด PDF</a>` +
+      `<a class="btn grey" href="/stamp" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">ลงเลขรับใบถัดไป</a>` +
+      `<p class="tiny" style="margin-top:10px">⚠️ ตอนปริ้นให้ตั้งขนาด 100% หรือ "ขนาดจริง" อย่าใช้ Fit to page ไม่งั้นตรายางจะเลื่อน</p>`);
+  } catch (e) {
+    show('err', 'บันทึกไม่สำเร็จ: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '✅ ลงตรายาง & บันทึก';
+  }
+};
+
+start();
+</script>
+</body>
+</html>
