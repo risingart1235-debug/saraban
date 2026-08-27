@@ -75,16 +75,25 @@ def _hash(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000).hex()
 
 
-def load_users() -> dict:
+class StoreDown(Exception):
+    """ที่เก็บข้อมูลเข้าไม่ถึง (เช่น ต่อ Google Sheets ไม่ได้)"""
+
+
+def load_users(raise_on_error: bool = False) -> dict:
     """อ่านรายชื่อผู้ใช้จากที่เก็บกลาง
 
     โหมด local = users.json ในเครื่อง | โหมด sheets = แท็บ "ผู้ใช้เว็บ"
     บน hosting ต้องเป็น sheets ไม่งั้นผู้ใช้หายทุกครั้งที่เซิร์ฟเวอร์รีสตาร์ท
+
+    raise_on_error=True ใช้ตอนล็อกอิน — ถ้าต่อที่เก็บไม่ได้ต้องบอกตรงๆ
+    ไม่ใช่คืนรายชื่อว่างแล้วไปขึ้นว่า "รหัสผ่านไม่ถูกต้อง" ซึ่งทำให้เข้าใจผิด
     """
     import store as _s
     try:
         return _s.get_store().load_users()
-    except Exception:
+    except Exception as e:
+        if raise_on_error:
+            raise StoreDown(str(e)) from e
         return {}
 
 
@@ -135,7 +144,16 @@ def register_user(username: str, password: str, display: str = "") -> tuple[bool
 
 def verify_user(username: str, password: str) -> tuple[bool, str]:
     """คืน (ผ่านไหม, เหตุผลถ้าไม่ผ่าน)"""
-    u = load_users().get(username)
+    try:
+        users = load_users(raise_on_error=True)
+    except StoreDown as e:
+        # ต่อที่เก็บข้อมูลไม่ได้ — ไม่ใช่ความผิดของคนกรอกรหัส ต้องบอกให้ตรง
+        return False, ("เซิร์ฟเวอร์เชื่อมต่อ Google Sheets ไม่ได้ "
+                       "(ตรวจตัวแปร SARABAN_SA_JSON และ SARABAN_SHEET_ID): " + str(e)[:120])
+    if not users:
+        return False, ("ยังไม่มีบัญชีผู้ใช้ในระบบ — ไปที่หน้า /register "
+                       "เพื่อสมัคร (คนแรกจะเป็นผู้ดูแลอัตโนมัติ)")
+    u = users.get(username)
     # เทียบรหัสเสมอแม้ไม่มีชื่อนี้ เพื่อไม่ให้เดาได้จากเวลาตอบว่าชื่อนี้มีอยู่จริงไหม
     ok_pw = secrets.compare_digest(
         _hash(password, u["salt"]) if u else _hash(password, "x"),
