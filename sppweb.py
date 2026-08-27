@@ -76,7 +76,19 @@ def login(user: str = None, pwd: str = None) -> requests.Session:
 
     form = BeautifulSoup(r.text, "html.parser").find("form")
     if form is None:
-        raise LoginError("หาฟอร์มล็อกอินไม่เจอ (เว็บอาจเปลี่ยนหน้าตา)")
+        # บอกให้ละเอียดว่าได้อะไรกลับมา ไม่งั้นตามหาสาเหตุไม่ถูก
+        # เคสที่เจอบ่อย: เว็บอยู่หลัง Cloudflare แล้วบล็อก IP ของศูนย์ข้อมูล
+        # (เปิดจากคอมที่โรงเรียนได้ แต่เปิดจากเซิร์ฟเวอร์คลาวด์ไม่ได้)
+        body = (r.text or "")
+        low = body.lower()
+        if r.status_code == 403 or "cloudflare" in low or "just a moment" in low \
+                or "attention required" in low or "cf-browser-verification" in low:
+            why = (f"เว็บ สพป. บล็อกการเข้าจากเซิร์ฟเวอร์นี้ (Cloudflare, HTTP {r.status_code}) — "
+                   "มักเกิดเมื่อเรียกจากศูนย์ข้อมูลต่างประเทศ ไม่ใช่จากคอมที่โรงเรียน")
+        else:
+            why = (f"หาฟอร์มล็อกอินไม่เจอ (HTTP {r.status_code}, "
+                   f"เนื้อหา {len(body)} ตัวอักษร, ขึ้นต้นว่า: {body[:80].strip()!r})")
+        raise LoginError(why)
 
     # เก็บทุกช่องในฟอร์มรวมช่องซ่อน (user_os, p) แล้วทับด้วยรหัสของเรา
     data = {x.get("name"): (x.get("value") or "")
