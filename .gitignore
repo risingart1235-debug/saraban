@@ -1,5 +1,6 @@
 # ===== ห้ามขึ้น GitHub เด็ดขาด — มีรหัสผ่านและ API Key =====
 config.json
+_koyeb_*
 users.json
 *.env
 .env
