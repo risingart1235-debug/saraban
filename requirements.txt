@@ -13,5 +13,12 @@ openpyxl           # ทะเบียนหนังสือรับ (.xlsx)
 requests
 beautifulsoup4
 google-genai       # Gemini อ่านหนังสือ + เกษียณ
+
+# ===== เก็บข้อมูลบน Google Sheets / Drive =====
+google-api-python-client   # คุยกับ Sheets และ Drive
+google-auth                # ยืนยันตัวตนด้วย service account
+
+# ===== อื่นๆ =====
+filelock           # กันเดสก์ท็อปกับเว็บเขียนทะเบียนชนกัน (โหมด local)
 # pythainlp        # ไม่จำเป็นแล้ว — ใช้ thaiwords.py แทน (เบากว่า ๑๐ เท่า)
 #                   ติดตั้งไว้ก็ได้ ถ้าไฟล์คลังคำหายจะถอยไปใช้ตัวนี้
