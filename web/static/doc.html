@@ -41,6 +41,19 @@
              border-top:1px solid var(--line); padding:10px 16px calc(10px + env(safe-area-inset-bottom));
              margin:0 -16px; display:flex; gap:8px }
   #savebar .btn { margin:0 }
+  /* ปุ่มพับ/กางชุดแก้ไข — หน้าตาเหมือนการ์ดใบหนึ่ง กดง่ายด้วยนิ้ว */
+  #editToggle {
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    width:100%; min-height:52px; margin-bottom:14px; padding:12px 16px;
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    font-family:inherit; font-size:15px; font-weight:700; color:var(--blue);
+    text-align:left; cursor:pointer;
+  }
+  #editToggle:active { background:#eef2ff }
+  #caret { transition:transform .15s }
+  #editToggle.open #caret { transform:rotate(180deg) }
+  /* เลือกตรายางอยู่ = ช่องแก้ข้อความยังอยู่ที่เดิม แต่หรี่ไว้ให้รู้ว่าแก้ไม่ได้ตอนนี้ */
+  #selBox.dim { opacity:.45 }
   .spin { width:36px;height:36px;border:4px solid #d1d5db;border-top-color:var(--blue);
           border-radius:50%;animation:sp 1s linear infinite;margin:0 auto 12px }
   @keyframes sp { to { transform:rotate(360deg) } }
@@ -71,8 +84,14 @@
       <div id="warn" class="err hidden" style="margin-top:8px"></div>
     </div>
 
-    <div class="stage"><div id="pages"></div></div>
+    <!-- ส่วนใหญ่ค่าที่เตรียมมาให้ใช้ได้เลย ไม่ต้องแก้ จึงพับเก็บไว้ก่อน
+         เอกสารจะได้ไม่ถูกดันลงไปจนต้องเลื่อนจอหา และวางปุ่มไว้เหนือภาพเอกสาร
+         เพราะกดแล้วช่องกรอกต้องโผล่ตรงหน้า ไม่ใช่ไปโผล่ใต้ภาพที่สูงเกินหนึ่งจอ -->
+    <button id="editToggle">
+      <span>✏️ แก้คำเกษียณ / วัน-เวลาตรายาง</span><span id="caret">▾</span>
+    </button>
 
+    <div id="editPanel" class="hidden">
     <div class="card" id="selBox">
       <h2 id="selTitle">คำเกษียณ</h2>
       <textarea id="btext"></textarea>
@@ -101,6 +120,9 @@
         <div class="stepper"><button id="ssm">−</button><span id="ssv">100%</span><button id="ssp">+</button></div>
       </div>
     </div>
+    </div><!-- /editPanel -->
+
+    <div class="stage"><div id="pages"></div></div>
   </div>
 
   <div id="savebar" class="hidden">
@@ -264,13 +286,24 @@ function clamp(o) {
   o.top_cm  = Math.max(0, Math.min(o.top_cm,  (ps.h - o.h) / D.cm));
 }
 
+// ---------- พับ/กางชุดแก้ไข ----------
+function openEditor(open) {
+  $('editPanel').classList.toggle('hidden', !open);
+  $('editToggle').classList.toggle('open', open);
+  $('editToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+$('editToggle').onclick = () => openEditor($('editPanel').classList.contains('hidden'));
+
 // ---------- เลือกกล่อง ----------
 function select(id) {
   sel = id;
   for (const el of document.querySelectorAll('.ov')) el.classList.toggle('sel', el.dataset.id === id);
   const isStamp = id === 'stamp';
-  $('selBox').classList.toggle('hidden', isStamp);
-  if (isStamp) { $('selTitle').textContent = 'ตรายาง'; return; }
+  // หรี่แทนการซ่อน — การ์ดนี้อยู่เหนือภาพเอกสาร ถ้าซ่อนตอนแตะตรายาง
+  // ภาพข้างล่างจะกระโดดขึ้นกลางคันขณะที่นิ้วยังลากอยู่ ทำให้ลากพลาด
+  $('selBox').classList.toggle('dim', isStamp);
+  for (const el of $('selBox').querySelectorAll('textarea, button')) el.disabled = isStamp;
+  if (isStamp) { $('selTitle').textContent = 'ตรายาง (เลือกอยู่)'; return; }
   const b = objOf(id);
   const n = D.boxes.findIndex(x => x.id === id) + 1;
   $('selTitle').textContent = `คำเกษียณ กล่องที่ ${n}`;
@@ -330,6 +363,8 @@ $('badd').onclick = async () => {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nb) });
   Object.assign(nb, await readJSON(r));
   D.boxes.push(nb); addOverlay(id, nb); select(id);
+  // เพิ่งเพิ่มกล่อง ต้องพิมพ์ข้อความต่อทันที พาไปที่ช่องพิมพ์ให้เลย
+  $('selBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
 // ---------- ตรายาง ----------
