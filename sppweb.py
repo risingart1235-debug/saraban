@@ -325,8 +325,12 @@ def _is_news_page(soup) -> bool:
 def _raise_for_response(response, text: str, context: str):
     status = int(getattr(response, "status_code", 0) or 0)
     if _is_cloudflare_block(response, text):
+        # แนบ Ray ID มาด้วย — เป็นรหัสอ้างอิงที่ผู้ดูแลเว็บ สพป. ใช้ค้นหาใน log ได้ว่า
+        # คำขอของเราถูกกฎข้อไหนปัดตก จำเป็นมากเวลาต้องติดต่อขอเปิดสิทธิ์
+        ray = str((getattr(response, "headers", {}) or {}).get("cf-ray", "")).strip()
+        ref = f" [Ray ID: {ray}]" if ray else ""
         raise AccessBlockedError(
-            f"เว็บ สพป. ปฏิเสธการเชื่อมต่อ (Cloudflare/WAF, HTTP {status}) — "
+            f"เว็บ สพป. ปฏิเสธการเชื่อมต่อ (Cloudflare/WAF, HTTP {status}){ref} — "
             "ถ้ารันบนเซิร์ฟเวอร์ให้ขอ allowlist IP หรือใช้ตัวดึงข้อมูลจากเครือข่ายโรงเรียน")
     if status >= 500:
         raise SiteUnavailableError(f"เว็บ สพป. ขัดข้องระหว่าง{context} (HTTP {status})")
