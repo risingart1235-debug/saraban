@@ -373,6 +373,32 @@ class ListTests(unittest.TestCase):
         self.assertEqual(docs[0]["doc_title"], "เรื่องใหม่")
         self.assertEqual(docs[0]["sent_key"], "2026-08-27")
 
+    def _site_with_pager_lagging_behind(self):
+        """เว็บที่แถบเลขหน้าโชว์ถึงหน้า ๒ แต่ของจริงมีถึงหน้า ๔
+
+        เว็บ สพป. เป็นแบบนี้จริง และเลขหน้าที่เกินจะถูก "หนีบ" ให้คืนเนื้อหา
+        หน้าสุดท้ายซ้ำมา (ขอหน้า ๕ ได้หน้า ๔)
+        """
+        landing = list_html("123").replace(
+            "</body>", f'<a href="{sppweb.NEWS_URL}&page=2">2</a></body>')
+        sess = FakeSession()
+        sess.add("GET", sppweb.NEWS_URL, FakeResponse(text=landing))
+        for page, book in ((1, "123"), (2, "124"), (3, "125"), (4, "126")):
+            sess.add("GET", f"{sppweb.NEWS_URL}&page={page}",
+                     FakeResponse(text=list_html(book)))
+        sess.add("GET", f"{sppweb.NEWS_URL}&page=5",
+                 FakeResponse(text=list_html("126")))
+        return sess
+
+    def test_finds_last_page_even_when_pager_lags_several_pages_behind(self):
+        # ของเดิมเขยิบแค่หน้าเดียวแล้วหยุด เลยได้ ๓ ทั้งที่ของจริงคือ ๔
+        self.assertEqual(sppweb.find_last_page(self._site_with_pager_lagging_behind()), 4)
+
+    def test_list_documents_includes_newest_page_beyond_the_pager(self):
+        # เรื่องใหม่สุดอยู่หน้า ๔ ถ้าหาหน้าสุดท้ายพลาด เรื่องนี้จะหายไปเงียบๆ
+        docs = sppweb.list_documents(self._site_with_pager_lagging_behind(), pages=2)
+        self.assertEqual([d["book_id"] for d in docs], ["126", "125"])
+
     def test_list_documents_raises_for_403_instead_of_returning_empty(self):
         sess = FakeSession().add(
             "GET",

@@ -437,13 +437,35 @@ def _book_ids(soup) -> set[str]:
     return out
 
 
-def _scan_last_page(sess):
-    """คืน (เลขหน้าสุดท้าย, soup ของหน้านั้น หรือ None)
+# เว็บอาจเพิ่มหน้าใหม่มาหลายหน้าตั้งแต่รอบก่อน จึงต้องเดินไปข้างหน้าเรื่อยๆ
+# ตั้งเพดานกันวนไม่จบถ้าเว็บตอบแปลกๆ
+MAX_PAGE_PROBE = 12
 
-    คืน soup มาด้วยได้เฉพาะกรณีที่รู้แน่ว่าเป็นหน้าไหน คือตอน probe เจอว่ามีหน้า
-    ถัดไปจริง (soup ตัวนั้นคือหน้า last+1 พอดี) ส่วนหน้า landing ห้ามเอามาใช้ซ้ำ
-    เพราะเว็บอาจแสดงหน้าแรกไม่ใช่หน้าสุดท้าย ถ้าเดาผิดจะทำให้หนังสือใหม่หายไปเงียบๆ
-    ซึ่งร้ายแรงกว่าการยิงเพิ่มอีกหนึ่ง request มาก
+
+def _page_soup(sess, page: int):
+    _, soup = _request_html(
+        sess, "get", f"{NEWS_URL}&page={page}",
+        context=f"เปิดรายการหนังสือหน้า {page}", timeout=20,
+        authenticated=True,
+    )
+    return soup
+
+
+def _scan_last_page(sess):
+    """คืน (เลขหน้าสุดท้ายจริง, {เลขหน้า: soup ที่โหลดมาแล้ว})
+
+    แถบเลขหน้าของเว็บเป็นหน้าต่างเลื่อน โชว์เลขไม่ครบ เลขมากสุดที่เห็นจึง
+    ไม่ใช่หน้าสุดท้ายจริง ต้องเดินไปข้างหน้าจนกว่าจะไม่เจอเรื่องใหม่
+
+    เว็บ "หนีบ" เลขหน้าที่เกินจริง — ขอหน้า ๔๐๙ ทั้งที่มีถึง ๔๐๘ ก็คืนเนื้อหา
+    หน้า ๔๐๘ กลับมา จึงใช้ "ได้ id ชุดเดิม" เป็นสัญญาณว่าสุดทางแล้ว
+
+    เดิมเขยิบแค่หน้าเดียวแล้วหยุด พอเว็บโตเกินไป ๑ หน้า หนังสือใหม่ก็หายเงียบ
+    (เคยทำให้เรื่องของวันนี้ไม่ขึ้นในรายการ) ยิงเพิ่มอีกไม่กี่ request
+    คุ้มกว่าปล่อยให้ตกหล่นมาก
+
+    หน้าที่โหลดระหว่างเดินหา ส่งกลับไปให้ list_documents ใช้ต่อ เพราะมันต้องการ
+    หน้าท้ายๆ ชุดเดียวกันพอดี จะได้ไม่ต้องโหลดซ้ำ
     """
     _, soup = _request_html(
         sess, "get", NEWS_URL, context="ค้นหาหน้าสุดท้าย", timeout=20,
@@ -458,15 +480,19 @@ def _scan_last_page(sess):
             pages.append(int(match.group(1)))
     last = max(pages)
 
-    probe_url = f"{NEWS_URL}&page={last + 1}"
-    _, probe_soup = _request_html(
-        sess, "get", probe_url, context="ตรวจหน้าถัดไป", timeout=20,
-        authenticated=True,
-    )
-    probe_ids = _book_ids(probe_soup)
-    if probe_ids and probe_ids != _book_ids(soup):
-        return last + 1, probe_soup
-    return last, None
+    # เปิดหน้า last ตรงๆ เพื่อให้มีฐานเทียบที่รู้แน่ว่าเป็นหน้าไหน
+    # (หน้า landing เอามาเทียบไม่ได้ เพราะไม่รู้ว่าเว็บกำลังโชว์หน้าไหนอยู่)
+    seen = {last: _page_soup(sess, last)}
+    last_ids = _book_ids(seen[last])
+
+    for _ in range(MAX_PAGE_PROBE):
+        probe_soup = _page_soup(sess, last + 1)
+        probe_ids = _book_ids(probe_soup)
+        if not probe_ids or probe_ids == last_ids:
+            break
+        last += 1
+        seen[last], last_ids = probe_soup, probe_ids
+    return last, seen
 
 
 def find_last_page(sess) -> int:
@@ -520,20 +546,15 @@ def _row_of(link) -> dict:
 
 def list_documents(sess, pages: int = 2) -> list:
     """คืนหนังสือจากหน้าท้ายๆ เรียงใหม่สุดขึ้นก่อน"""
-    last, last_soup = _scan_last_page(sess)
+    last, cached = _scan_last_page(sess)
     count = max(1, int(pages))
     wanted = range(max(1, last - count + 1), last + 1)
     out, seen = [], set()
     for page in wanted:
-        # หน้าสุดท้ายโหลดมาแล้วตอนหาเลขหน้า ใช้ซ้ำเลย ไม่ต้องยิงอีกรอบ
-        if page == last and last_soup is not None:
-            soup = last_soup
-        else:
-            _, soup = _request_html(
-                sess, "get", f"{NEWS_URL}&page={page}",
-                context=f"เปิดรายการหนังสือหน้า {page}", timeout=20,
-                authenticated=True,
-            )
+        # หน้าที่โหลดไปแล้วตอนหาเลขหน้าสุดท้าย ใช้ซ้ำเลย ไม่ต้องยิงอีกรอบ
+        soup = cached.get(page)
+        if soup is None:
+            soup = _page_soup(sess, page)
         if not _is_news_page(soup):
             raise UnexpectedPageError(f"ไม่พบตารางรายการหนังสือในหน้าที่ {page}")
         for link in _doc_links(soup):
