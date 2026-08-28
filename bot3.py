@@ -9,14 +9,17 @@ import json
 import shutil
 import time
 import threading
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageTk
 
+import sppweb
+
 # สมองทั้งหมดอยู่ที่ core.py
 from core import *
-from core import _p, _BASE_DIR, _preload_heavy_libs, _hide_console
+from core import _p, _w, _BASE_DIR, _preload_heavy_libs, _hide_console
 
 _hide_console()   # ซ่อนหน้าต่าง Console สีดำ (เฉพาะเวอร์ชันเดสก์ท็อป)
 
@@ -26,6 +29,12 @@ _hide_console()   # ซ่อนหน้าต่าง Console สีดำ (�
 class SarabanApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self._job_lock = threading.Lock()
+        self._active_job = None
+        self._cookie_lock = threading.Lock()
+        self._cookie_worker_active = False
+        self.spp_session_state = None
+        self.cookie_driver = None
         self.title("ระบบลงรับหนังสืออัจฉริยะ (AI + มุมมองแบ่งหน้า Word Style)")
         self.configure(bg="#f0f0f0")
         self.center_window(560, 520)
@@ -64,15 +73,16 @@ class SarabanApp(tk.Tk):
 
         row1 = tk.Frame(frame1, bg="#f0f0f0")
         row1.pack()                       # ไม่ fill = กล่องจัดกึ่งกลางเอง
-        self.cookie_entry = tk.Entry(row1, width=38)
+        self.cookie_entry = tk.Entry(row1, width=38, show="•")
         self.cookie_entry.pack(side="left")
         tk.Button(row1, text="📋 วาง", font=("Helvetica", 8), bg="#e0e0e0", command=self.paste_cookie).pack(side="left", padx=(3, 0))
 
         # ปุ่มหลักที่ใช้บ่อยที่สุด — ทำให้ใหญ่เต็มแถวและสีเด่น กันกดผิดปุ่ม
-        tk.Button(frame1, text="▶  ดึงข้อมูลเว็บ", font=("Helvetica", 15, "bold"),
-                  bg="#4CAF50", fg="white", activebackground="#43A047", activeforeground="white",
-                  relief="raised", bd=4, height=1, cursor="hand2",
-                  command=self.start_web_mode).pack(fill="x", padx=5, pady=(8, 4))
+        self.web_btn = tk.Button(
+            frame1, text="▶  ดึงข้อมูลเว็บ", font=("Helvetica", 15, "bold"),
+            bg="#4CAF50", fg="white", activebackground="#43A047", activeforeground="white",
+            relief="raised", bd=4, height=1, cursor="hand2", command=self.start_web_mode)
+        self.web_btn.pack(fill="x", padx=5, pady=(8, 4))
 
         row2 = tk.Frame(frame1, bg="#f0f0f0")
         row2.pack()                       # ไม่ fill = ปุ่มคู่นี้จัดกึ่งกลางเอง
@@ -94,13 +104,15 @@ class SarabanApp(tk.Tk):
 
         frame2 = tk.LabelFrame(modes, text=" โหมดที่ ๒: นำเข้าไฟล์ (AI) ", font=("Helvetica", 9), bg="#f0f0f0", padx=6, pady=6)
         frame2.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        tk.Button(frame2, text="📂 เลือกไฟล์จากเครื่อง", bg="#2196F3", fg="white", command=self.start_local_mode).pack(pady=(2, 3))
+        self.local_btn = tk.Button(frame2, text="📂 เลือกไฟล์จากเครื่อง", bg="#2196F3", fg="white", command=self.start_local_mode)
+        self.local_btn.pack(pady=(2, 3))
         tk.Label(frame2, text="AI อ่าน + เกษียณให้\nพร้อมส่งเข้า LINE",
                  font=("Helvetica", 8), bg="#f0f0f0", fg="#777", justify="center").pack()
 
         frame3 = tk.LabelFrame(modes, text=" โหมดที่ ๓: ลงเลขรับบนกระดาษเปล่า ", font=("Helvetica", 9), bg="#f0f0f0", padx=6, pady=6)
         frame3.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        tk.Button(frame3, text="🔢 ลงตรายางเลขรับ", bg="#9C27B0", fg="white", command=self.start_stamp_only_mode).pack(pady=(2, 3))
+        self.stamp_btn = tk.Button(frame3, text="🔢 ลงตรายางเลขรับ", bg="#9C27B0", fg="white", command=self.start_stamp_only_mode)
+        self.stamp_btn.pack(pady=(2, 3))
         tk.Label(frame3, text="A4 เปล่า ไว้ปริ้นทับกระดาษ\nรันเลขต่อจาก Excel",
                  font=("Helvetica", 8), bg="#f0f0f0", fg="#777", justify="center").pack()
 
@@ -189,7 +201,9 @@ class SarabanApp(tk.Tk):
                        command=toggle_show).pack(anchor="w", padx=22, pady=(6, 0))
 
         def do_save():
-            new_cfg = {k: entries[k].get().strip() for _, k in fields}
+            # รักษาค่า store/Sheets/Drive ที่หน้าต่างนี้ไม่ได้แสดงไว้ด้วย
+            new_cfg = dict(cfg)
+            new_cfg.update({k: entries[k].get().strip() for _, k in fields})
             try:
                 save_config(new_cfg)
                 apply_config()
@@ -233,6 +247,51 @@ class SarabanApp(tk.Tk):
         self.status_lbl.config(text=f"สถานะ: {msg}")
         self.log(msg)
         self.update_idletasks()
+
+    def _set_main_buttons(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for name in ("web_btn", "local_btn", "stamp_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                try:
+                    button.config(state=state)
+                except Exception:
+                    pass
+
+    def _claim_job(self, kind):
+        """กันงานเดสก์ท็อปซ้อนกัน เพราะทุกโหมดใช้สถานะหน้าจอร่วมกัน"""
+        with self._job_lock:
+            if self._active_job is not None:
+                return None
+            base = _w("_desktop_jobs")
+            os.makedirs(base, exist_ok=True)
+            job = {
+                "kind": kind,
+                "dir": tempfile.mkdtemp(prefix=f"{kind}-", dir=base),
+            }
+            self._active_job = job
+        self._set_main_buttons(False)
+        return job
+
+    def _finish_job(self, job, cleanup=True):
+        """ปล่อยงานแบบ idempotent; worker เก่าห้ามปล่อยงานใหม่ที่มาแทน"""
+        if not job:
+            return
+        released = False
+        with self._job_lock:
+            if self._active_job is job:
+                self._active_job = None
+                released = True
+        if cleanup:
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+        if released:
+            try:
+                self.after(0, lambda: self._set_main_buttons(True))
+            except Exception:
+                pass
+
+    def _job_path(self, job, name):
+        return os.path.join(job["dir"], name)
 
     def _selenium_auto_login(self, driver, user, pwd):
         """พยายามล็อกอินอัตโนมัติด้วยรหัสที่บันทึกไว้
@@ -297,62 +356,107 @@ class SarabanApp(tk.Tk):
             return False
 
     def _fill_cookie_from_driver(self, driver, quiet=False):
-        """อ่าน session cookie จาก Chrome แล้วเติมลงช่อง Cookie คืนค่า True ถ้าสำเร็จ
-        quiet=True ใช้ตอนเฝ้าดูเป็นรอบๆ จะไม่สแปม log เวลายังไม่เจอคุกกี้"""
+        """ส่ง cookie ทั้งชุดและ User-Agent จาก Chrome แล้วพิสูจน์ว่า login จริง"""
         try:
+            current = driver.current_url or ""
+            if "task=main/receive_mobile" not in current:
+                driver.get(sppweb.NEWS_URL)
+                try:
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    WebDriverWait(driver, 30).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete")
+                except Exception:
+                    pass
             cookies = driver.get_cookies()
-        except Exception:
+            user_agent = driver.execute_script("return navigator.userAgent")
+            sess = sppweb.new_session(cookies=cookies, user_agent=user_agent)
+            if not sppweb.is_logged_in(sess):
+                if not quiet:
+                    self.after(0, lambda: self.set_status(
+                        "ยังไม่ได้ล็อกอินเว็บ สพป. — กรุณาล็อกอินใน Chrome ให้เรียบร้อย"))
+                return False
+            state = sppweb.export_session(sess)
+            phpsessid = sppweb.get_cookie(sess)
+        except sppweb.LoginError:
             return False
-        # หา PHPSESSID ก่อน ถ้าไม่มีลองคุกกี้ที่ชื่อมี SESS (เป็นตัวสำรอง)
-        phpsessid = next((c.get('value') for c in cookies if c.get('name') == 'PHPSESSID'), None)
-        if not phpsessid:
-            phpsessid = next((c.get('value') for c in cookies if 'SESS' in (c.get('name') or '').upper()), None)
-        if not phpsessid:
+        except sppweb.SPPWebError as e:
             if not quiet:
-                names = ", ".join(c.get('name', '?') for c in cookies) or "(ยังไม่มีคุกกี้)"
-                self.after(0, lambda: self.log(f"ยังไม่พบ session cookie | คุกกี้ที่เจอ: {names}"))
+                self.after(0, lambda e=e: self.set_status(f"ตรวจ session จาก Chrome ไม่สำเร็จ: {e}"))
             return False
+        except Exception as e:
+            if not quiet:
+                self.after(0, lambda e=e: self.set_status(f"อ่าน session จาก Chrome ไม่สำเร็จ: {e}"))
+            return False
+
+        self.spp_session_state = state
+
         def _fill():
             self.cookie_entry.delete(0, tk.END)
-            self.cookie_entry.insert(0, phpsessid)
-            self.set_status("ดึง Cookie สำเร็จ! กำลังตรวจข่าวอัตโนมัติ...")
-            self.start_web_mode()   # ได้ Cookie แล้ว → ตรวจข่าวต่อทันที ไม่ต้องกดเอง
+            self.cookie_entry.insert(0, phpsessid or "session-from-chrome")
+            self.set_status("ยืนยัน session จาก Chrome สำเร็จ กำลังตรวจข่าวอัตโนมัติ...")
+            self.start_web_mode()
+
         self.after(0, _fill)
         return True
 
+    def _set_cookie_worker(self, active):
+        with self._cookie_lock:
+            self._cookie_worker_active = bool(active)
+
     def _start_cookie_watcher(self, driver):
-        """หลังเปิด Chrome — รอจนหน้าพร้อม แล้วดึง Cookie ให้อัตโนมัติทันทีที่มี session cookie
-        ไม่ว่าจะอยู่หน้าล็อกอินหรือไม่ (เว็บนี้คุกกี้บนหน้าล็อกอินใช้ได้เลย)
-        ถ้ายังไม่มีคุกกี้จะคอยลองซ้ำจนกว่าจะเจอ"""
+        """รอให้ฟอร์มรหัสผ่านหาย แล้วค่อยตรวจ session จริงจากหน้ารายการข่าว"""
         def _watch():
-            # รอให้หน้าโหลดเสร็จก่อน (document.readyState == complete)
             try:
+                from selenium.webdriver.common.by import By
                 from selenium.webdriver.support.ui import WebDriverWait
                 WebDriverWait(driver, 30).until(
                     lambda d: d.execute_script("return document.readyState") == "complete")
             except Exception:
                 pass
-            time.sleep(2)  # เผื่อเวลาให้เว็บตั้งคุกกี้ครบ
-            self.after(0, lambda: self.set_status("Chrome พร้อมแล้ว — กำลังดึง Cookie อัตโนมัติ..."))
+            self.after(0, lambda: self.set_status(
+                "Chrome พร้อมแล้ว — ล็อกอินให้เรียบร้อย ระบบจะตรวจ session ให้อัตโนมัติ"))
 
-            deadline = time.time() + 300  # เฝ้าดูสูงสุด 5 นาที
-            while time.time() < deadline:
-                # ถ้า Chrome ถูกปิด/เปลี่ยน หรือดึง Cookie ไปแล้ว ให้หยุดเฝ้า
-                if getattr(self, 'cookie_driver', None) is not driver:
-                    return
-                if self._fill_cookie_from_driver(driver, quiet=True):
-                    try: driver.quit()
-                    except: pass
-                    self.cookie_driver = None
-                    return
-                time.sleep(2)  # ยังไม่มีคุกกี้ รอแล้วลองใหม่
-            self.after(0, lambda: self.set_status("ยังไม่พบ Cookie (เกิน 5 นาที) — ลองกด '🍪 ดึง Cookie อัตโนมัติ' อีกครั้ง"))
+            try:
+                deadline = time.time() + 300
+                last_attempt = 0.0
+                while time.time() < deadline:
+                    if getattr(self, 'cookie_driver', None) is not driver:
+                        return
+                    try:
+                        visible_password = any(
+                            element.is_displayed()
+                            for element in driver.find_elements(By.CSS_SELECTOR, "input[type='password']"))
+                    except Exception:
+                        return
+                    if not visible_password and time.time() - last_attempt >= 8:
+                        last_attempt = time.time()
+                        if self._fill_cookie_from_driver(driver, quiet=True):
+                            try:
+                                driver.quit()
+                            except Exception:
+                                pass
+                            self.cookie_driver = None
+                            return
+                    time.sleep(2)
+                self.after(0, lambda: self.set_status(
+                    "ยังยืนยัน session ไม่สำเร็จภายใน 5 นาที — Chrome ยังเปิดอยู่ ล็อกอินแล้วกดดึง Cookie อีกครั้ง"))
+            finally:
+                self._set_cookie_worker(False)
+
         threading.Thread(target=_watch, daemon=True).start()
 
     def open_chrome_for_cookie(self):
         """เปิด Chrome เข้าเว็บ สพป. แล้วลองล็อกอินอัตโนมัติด้วยรหัสที่บันทึกไว้
         ถ้าเข้าไม่ได้ ค่อยให้ผู้ใช้ล็อกอินเอง"""
+        with self._cookie_lock:
+            if self._cookie_worker_active:
+                self.set_status("กำลังเปิด/ตรวจ Chrome อยู่แล้ว กรุณาใช้หน้าต่างเดิม")
+                return
+            self._cookie_worker_active = True
+
         def _run():
+            watcher_started = False
+            driver = None
             try:
                 from selenium import webdriver
                 from selenium.webdriver.chrome.options import Options
@@ -361,8 +465,8 @@ class SarabanApp(tk.Tk):
                     "ต้องติดตั้ง Selenium ก่อน",
                     "ยังไม่ได้ติดตั้งไลบรารี Selenium\n\nเปิด CMD แล้วพิมพ์คำสั่งนี้:\n\npip install selenium"))
                 self.after(0, lambda: self.set_status("ยังไม่ได้ติดตั้ง Selenium (pip install selenium)"))
-                return
-            try:
+            else:
+              try:
                 existing = getattr(self, 'cookie_driver', None)
                 if existing is not None:
                     try: existing.quit()
@@ -377,10 +481,9 @@ class SarabanApp(tk.Tk):
                 except: pass
                 self.after(0, lambda: self.set_status("กำลังเปิดเว็บ สพป. รอหน้าโหลด..."))
                 try:
-                    driver.get("https://office.sakonarea1.go.th/")
-                except Exception:
-                    # บางหน้าโหลดช้า/ค้าง ไม่เป็นไร ปล่อยให้ขั้นตอน 'รอ element' จัดการต่อ
-                    pass
+                    driver.get(sppweb.BASE)
+                except Exception as e:
+                    raise RuntimeError(f"เปิดหน้าเว็บ สพป. ไม่สำเร็จ: {e}") from e
 
                 cfg = load_config()
                 user = cfg.get('login_user', '').strip()
@@ -393,19 +496,27 @@ class SarabanApp(tk.Tk):
                         try: driver.quit()
                         except: pass
                         self.cookie_driver = None
-                        # _fill_cookie_from_driver จะเริ่มตรวจข่าวอัตโนมัติให้แล้ว
                     else:
                         self.after(0, lambda: self.set_status("ล็อกอินอัตโนมัติไม่สำเร็จ — กรุณาล็อกอินเองในหน้า Chrome (ระบบจะดึง Cookie ให้เองเมื่อเข้าระบบเสร็จ)"))
+                        watcher_started = True
                         self._start_cookie_watcher(driver)
                 else:
                     self.after(0, lambda: self.set_status("ไม่มีรหัสบันทึกไว้ — ล็อกอินในหน้า Chrome ได้เลย ระบบจะดึง Cookie ให้เองเมื่อเข้าระบบเสร็จ"))
+                    watcher_started = True
                     self._start_cookie_watcher(driver)
-            except Exception as e:
+              except Exception as e:
+                if driver is not None:
+                    try: driver.quit()
+                    except Exception: pass
                 self.cookie_driver = None
                 self.after(0, lambda e=e: messagebox.showerror(
                     "เปิด Chrome ไม่สำเร็จ",
                     f"{e}\n\nตรวจสอบว่าได้ติดตั้ง Google Chrome ไว้แล้ว"))
                 self.after(0, lambda e=e: self.set_status(f"เปิด Chrome ไม่สำเร็จ: {e}"))
+            finally:
+                if not watcher_started:
+                    self._set_cookie_worker(False)
+
         threading.Thread(target=_run, daemon=True).start()
 
     def grab_cookie_from_chrome(self):
@@ -414,34 +525,60 @@ class SarabanApp(tk.Tk):
         - ถ้ามี Chrome เปิดอยู่แล้ว (ล็อกอินเอง) → อ่าน Cookie จากหน้านั้น"""
         driver = getattr(self, 'cookie_driver', None)
         if driver is None:
-            # ยังไม่ได้เปิด Chrome → จัดการเปิด + ล็อกอิน + ดึง Cookie ให้อัตโนมัติ
             self.open_chrome_for_cookie()
             return
+        with self._cookie_lock:
+            if self._cookie_worker_active:
+                self.set_status("ระบบกำลังตรวจ session จาก Chrome ให้อัตโนมัติอยู่แล้ว")
+                return
+            self._cookie_worker_active = True
+
         def _run():
             try:
-                self.after(0, lambda: self.set_status("กำลังอ่าน Cookie จาก Chrome..."))
+                self.after(0, lambda: self.set_status("กำลังตรวจ session จาก Chrome..."))
                 if self._fill_cookie_from_driver(driver):
                     try: driver.quit()
                     except: pass
                     self.cookie_driver = None
                 else:
                     self.after(0, lambda: messagebox.showwarning(
-                        "ยังไม่พบ Cookie",
-                        "ยังไม่พบ PHPSESSID ในหน้านี้\nกรุณาล็อกอินในหน้า Chrome ให้เรียบร้อยก่อน แล้วลองอีกครั้งครับ"))
-                    self.after(0, lambda: self.set_status("ยังไม่พบ PHPSESSID — กรุณาล็อกอินก่อน"))
+                        "session ยังใช้ไม่ได้",
+                        "กรุณาล็อกอินในหน้า Chrome ให้เรียบร้อย แล้วลองอีกครั้งครับ"))
+                    self.after(0, lambda: self.set_status("session ยังใช้ไม่ได้ — กรุณาล็อกอินก่อน"))
             except Exception as e:
-                self.cookie_driver = None
                 self.after(0, lambda e=e: messagebox.showerror(
-                    "อ่าน Cookie ไม่สำเร็จ",
+                    "ตรวจ session ไม่สำเร็จ",
                     f"{e}\n\n(หน้าต่าง Chrome อาจถูกปิดไปแล้ว ลองเปิดใหม่อีกครั้ง)"))
-                self.after(0, lambda e=e: self.set_status(f"อ่าน Cookie ไม่สำเร็จ: {e}"))
+                self.after(0, lambda e=e: self.set_status(f"ตรวจ session ไม่สำเร็จ: {e}"))
+            finally:
+                self._set_cookie_worker(False)
+
         threading.Thread(target=_run, daemon=True).start()
 
     def start_local_mode(self):
         filepath = filedialog.askopenfilename(filetypes=[("Documents", "*.pdf *.jpg *.jpeg *.png")])
-        if filepath:
-            self.set_status("กำลังส่งให้ AI วิเคราะห์...")
-            threading.Thread(target=self.process_file_thread, args=(filepath, "-", "-", "-", "-", "🔵", "📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)")).start()
+        if not filepath:
+            return
+        job = self._claim_job("local")
+        if job is None:
+            messagebox.showwarning("มีงานกำลังทำอยู่", "กรุณาปิดหรือทำเอกสารปัจจุบันให้เสร็จก่อนครับ")
+            return
+        self.set_status("กำลังส่งให้ AI วิเคราะห์...")
+        threading.Thread(target=self._run_local_job, args=(job, filepath), daemon=True).start()
+
+    def _run_local_job(self, job, filepath):
+        handed_to_preview = False
+        try:
+            handed_to_preview = self.process_file_thread(
+                filepath, "-", "-", "-", "-", "🔵",
+                "📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)", job=job, book_id=None)
+        except Exception as e:
+            self.after(0, lambda e=e: self.log(f"❌ เปิดเอกสารไม่สำเร็จ: {type(e).__name__}: {e}"))
+            self.after(0, lambda e=e: self.set_status(f"เปิดเอกสารไม่สำเร็จ: {e}"))
+            self.after(0, lambda e=e: messagebox.showerror("เปิดเอกสารไม่สำเร็จ", str(e)))
+        finally:
+            if not handed_to_preview:
+                self._finish_job(job)
 
     # ==========================================
     # ๖.๑ โหมดลงตรายางเลขรับบนกระดาษ A4 เปล่า
@@ -455,24 +592,31 @@ class SarabanApp(tk.Tk):
 
     def start_stamp_only_mode(self):
         """เปิดกระดาษ A4 เปล่า → รันเลขรับต่อจาก Excel → ลากวางตรายาง → เซฟ PDF ไว้ปริ้นทับ"""
+        job = self._claim_job("stamp")
+        if job is None:
+            messagebox.showwarning("มีงานกำลังทำอยู่", "กรุณาปิดหรือทำเอกสารปัจจุบันให้เสร็จก่อนครับ")
+            return
+        self.stamp_job = job
         self.log("โหมดลงตรายางเลขรับ: กำลังเตรียมกระดาษ A4 เปล่า...")
         self.set_status("กำลังเตรียมกระดาษเปล่าสำหรับลงตรายาง...")
-        threading.Thread(target=self.stamp_only_thread, daemon=True).start()
+        threading.Thread(target=self.stamp_only_thread, args=(job,), daemon=True).start()
 
-    def stamp_only_thread(self):
+    def stamp_only_thread(self, job):
         try:
             receipt_no_thai = get_next_receipt_no()
-            self.stamp_only_info = {'receipt_no': receipt_no_thai}
+            self.stamp_only_info = {'receipt_no': receipt_no_thai, 'job': job}
             self.after(0, lambda: self.log(f"เลขรับที่จะลง: {receipt_no_thai} (รันต่อจากทะเบียน Excel)"))
             self.after(0, self.show_stamp_only_window)
         except Exception as e:
             self.after(0, lambda e=e: messagebox.showerror("เตรียมกระดาษไม่สำเร็จ", str(e)))
             self.after(0, lambda e=e: self.set_status(f"เตรียมกระดาษไม่สำเร็จ: {e}"))
+            self._finish_job(job)
 
     def show_stamp_only_window(self):
         self.set_status("ลากตรายางไปวางตำแหน่งที่ต้องการ แล้วกดบันทึก")
         win = tk.Toplevel(self)
         self.stamp_only_win = win
+        win.protocol("WM_DELETE_WINDOW", self.cancel_stamp_only)
         win.title(f"ลงตรายางเลขรับ {self.stamp_only_info['receipt_no']} บนกระดาษ A4 เปล่า — ไว้ปริ้นทับเอกสารกระดาษ")
         win.geometry("1000x800")
         try:
@@ -660,9 +804,11 @@ class SarabanApp(tk.Tk):
         self._update_pos_readout()
 
     def cancel_stamp_only(self):
+        job = self.stamp_only_info.get('job') if hasattr(self, 'stamp_only_info') else None
         try: self.stamp_only_win.destroy()
         except Exception: pass
         self.set_status("ยกเลิกการลงตรายางเลขรับ (ยังไม่ได้ใช้เลขรับนี้)")
+        self._finish_job(job)
 
     def finalize_stamp_only(self):
         # อ่านค่าจากช่องพิมพ์ก่อนปิดหน้าต่าง (ปิดแล้ว Entry จะหายไป)
@@ -678,6 +824,7 @@ class SarabanApp(tk.Tk):
 
     def finalize_stamp_only_thread(self):
         info = self.stamp_only_info
+        job = info.get('job')
         receipt_no = info['receipt_no']
         try:
             final_bg = self.stamp_only_bg.copy()
@@ -718,150 +865,95 @@ class SarabanApp(tk.Tk):
         except Exception as e:
             self.after(0, lambda e=e: messagebox.showerror("ลงตรายางไม่สำเร็จ", str(e)))
             self.after(0, lambda e=e: self.set_status(f"ลงตรายางไม่สำเร็จ: {e}"))
+        finally:
+            self._finish_job(job)
 
     def start_web_mode(self):
-        cookie = self.cookie_entry.get().strip()
-        if not cookie:
-            messagebox.showwarning("แจ้งเตือน", "กรุณาใส่ Cookie ก่อนครับ")
+        state = self.spp_session_state
+        if state is None:
+            cookie = self.cookie_entry.get().strip()
+            if not cookie:
+                messagebox.showwarning("แจ้งเตือน", "กรุณาล็อกอินผ่าน Chrome หรือวาง Cookie ก่อนครับ")
+                return
+            state = cookie
+        job = self._claim_job("web")
+        if job is None:
+            messagebox.showwarning("มีงานกำลังทำอยู่", "กรุณาปิดหรือทำเอกสารปัจจุบันให้เสร็จก่อนครับ")
             return
         self.set_status("กำลังตรวจสอบหน้าเว็บ...")
-        threading.Thread(target=self.web_scraping_thread, args=(cookie,)).start()
+        threading.Thread(
+            target=self.web_scraping_thread, args=(state, job), daemon=True).start()
 
-    def web_scraping_thread(self, cookie):
-        headers = {'User-Agent': 'Mozilla/5.0', 'Cookie': f"PHPSESSID={cookie}", 'Referer': 'https://office.sakonarea1.go.th/'}
+    def web_scraping_thread(self, session_state, job):
+        """ดึงเว็บผ่าน sppweb ชุดเดียวกับเซิร์ฟเวอร์ ห้ามมี requests scraper ซ้ำที่นี่"""
+        handed_to_preview = False
         try:
-            # อ่านจากที่เก็บกลาง (โฟลเดอร์เดียวกับทะเบียน) ให้ตรงกับฝั่งเว็บ
-            import sppweb
-            sent_ids = sppweb.load_history()
-            
-            self.after(0, lambda: self.set_status("กำลังค้นหาหน้าล่าสุดจากระบบ..."))
-            res = requests.get(NEWS_URL, headers=headers, timeout=20)
-            res.encoding = 'utf-8'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            # 🌟 ระบบคำนวณหน้าล่าสุด (Pagination Probe) แบบเวอร์ชันก่อนหน้า
-            page_links = soup.find_all('a', href=re.compile(r'page=(\d+)'))
-            pages = [1]
-            for link in page_links:
-                match = re.search(r'page=(\d+)', link['href'])
-                if match: pages.append(int(match.group(1)))
-            
-            initial_max = max(pages)
-            probe_page = initial_max + 1
-            res_probe = requests.get(f"{NEWS_URL}&page={probe_page}", headers=headers, timeout=15)
-            res_probe.encoding = 'utf-8'
-            
-            if BeautifulSoup(res_probe.text, 'html.parser').find('a', onclick=lambda v: v and 'bookdetail' in v):
-                max_page = probe_page
-            else:
-                max_page = initial_max
-
-            # สร้างรายการหน้าที่จะตรวจเช็ค (หน้าก่อนสุดท้าย และ หน้าสุดท้าย)
-            target_pages = [max(1, max_page - 1), max_page]
-            
-            found_new = False
-            for p in target_pages:
-                self.after(0, lambda p=p: self.set_status(f"กำลังตรวจสอบข้อมูล หน้าที่ {p}..."))
-                res_p = requests.get(f"{NEWS_URL}&page={p}", headers=headers, timeout=20)
-                res_p.encoding = 'utf-8'
-                soup_p = BeautifulSoup(res_p.text, 'html.parser')
-                links = soup_p.find_all('a', onclick=lambda v: v and 'bookdetail' in v)
-                
-                for link in links:
-                    match = re.search(r'b_id=(\d+)', link.get('onclick', ''))
-                    if not match: continue
-                    book_id = match.group(1)
-                    
-                    if book_id not in sent_ids:
-                        found_new = True
-                        self.current_book_id = book_id
-                        
-                        row = link.find_parent('tr')
-                        cols = row.find_all('td')
-                        doc_no = cols[1].text.strip() if len(cols) > 1 else "-"
-                        doc_title = cols[2].text.strip() if len(cols) > 2 else "-"
-                        doc_date = cols[4].text.strip() if len(cols) > 4 else "-"
-                        sender_name = cols[5].text.strip().split('[')[0].strip() if len(cols) > 5 else "สพป.สกลนคร เขต 1"
-                        
-                        self.after(0, lambda b=book_id, t=doc_title: self.log(f"พบเรื่องใหม่ (ID: {b}) {t[:40]}"))
-                        self.after(0, lambda b=book_id: self.set_status(f"พบเรื่องใหม่! กำลังเปิดหน้ารายละเอียด (ID: {b})"))
-                        
-                        res_detail = requests.get(f"https://office.sakonarea1.go.th/modules/book/main/bookdetail_school_total.php?b_id={book_id}", headers=headers, timeout=30)
-                        res_detail.encoding = 'utf-8'
-                        soup_detail = BeautifulSoup(res_detail.text, 'html.parser')
-                        
-                        color_emoji = "🟢" 
-                        if "ด่วนที่สุด" in soup_detail.text: color_emoji = "🔴"
-                        elif "ด่วนมาก" in soup_detail.text: color_emoji = "🟠"
-                        elif "ด่วน" in soup_detail.text: color_emoji = "🟡"
-                        
-                        self.after(0, lambda: self.set_status("กำลังตรวจไฟล์แนบในหน้ารายละเอียด..."))
-                        file_tags = soup_detail.find_all('a', href=re.compile(r'\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|jpg|png|jpeg)$', re.IGNORECASE))
-                        attachments_data = []
-                        main_pdf_link = ""
-                        
-                        for tag in file_tags:
-                            raw_href = tag['href'].lstrip('./').lstrip('/')
-                            opt1 = f"https://office.sakonarea1.go.th/modules/bookregister/{raw_href}".replace('bookregister/bookregister/', 'bookregister/')
-                            opt2 = f"https://office.sakonarea1.go.th/modules/book/{raw_href}".replace('book/book/', 'book/')
-                            final_link = opt1 if check_link(opt1, headers) else opt2
-                            link_text = tag.text.strip()
-                            if not link_text: link_text = "เอกสารแนบ"
-                            link_text = re.sub(r'^\d+\.\s*', '', link_text)
-                            
-                            if final_link not in [l for _, l in attachments_data]:
-                                attachments_data.append((link_text, final_link))
-                            if not main_pdf_link and final_link.lower().endswith('.pdf'):
-                                main_pdf_link = final_link
-                                
-                        if main_pdf_link:
-                            self.after(0, lambda n=len(attachments_data): self.set_status(f"กำลังดาวน์โหลดไฟล์ PDF (ไฟล์แนบ {n} รายการ)..."))
-                            pdf_data = requests.get(main_pdf_link, headers=headers, timeout=120).content
-                            with open(_p("temp.pdf"), "wb") as f: f.write(pdf_data)
-                            
-                            self.after(0, lambda: self.set_status("ดาวน์โหลดสำเร็จ กำลังส่งให้ AI..."))
-                            
-                            attach_lines = []
-                            for i, (name, lnk) in enumerate(attachments_data):
-                                attach_lines.append(f"📥 {to_thai_digits(i+1)}. {name}\n👉 {lnk}")
-                            attach_str = "\n".join(attach_lines) if attach_lines else f"📥 โหลดไฟล์: {NEWS_URL}"
-                            
-                            # ออกจาก Thread (return) เพราะเจอไฟล์แล้วให้เปิดหน้าต่าง UI
-                            self.process_file_thread(_p("temp.pdf"), doc_no, doc_title, doc_date, sender_name, color_emoji, attach_str)
-                            return 
-                        else:
-                            with open(history_file, 'a') as f: f.write(book_id + '\n')
-                            self.after(0, lambda b=book_id: self.log(f"ID {b} ไม่มีไฟล์ PDF แนบ — ข้ามไปเรื่องถัดไป"))
-                            sent_ids.append(book_id)
-                        
-            if not found_new:
+            sess = sppweb.new_session(session_state)
+            sppweb.assert_authenticated(sess)
+            self.after(0, lambda: self.set_status("กำลังค้นหาหนังสือใหม่จากหน้าล่าสุด..."))
+            documents = sppweb.list_new_documents(sess, pages=8)
+            self.spp_session_state = sppweb.export_session(sess)
+            if not documents:
                 self.after(0, lambda: self.set_status("ตรวจสอบเรียบร้อย ไม่มีหนังสือเข้าใหม่ครับ"))
+                return
+
+            # ทำเรื่องเก่าสุดที่ยังค้างก่อน เพื่อให้เลขรับเรียงตามลำดับ
+            for doc in reversed(documents):
+                book_id = doc["book_id"]
+                self.after(0, lambda b=book_id, t=doc["doc_title"]:
+                           self.log(f"พบเรื่องใหม่ (ID: {b}) {t[:40]}"))
+                self.after(0, lambda b=book_id:
+                           self.set_status(f"กำลังเปิดรายละเอียดหนังสือ ID {b}..."))
+                detail = sppweb.fetch_detail(sess, book_id)
+                if not detail["main_pdf"]:
+                    self.after(0, lambda b=book_id:
+                               self.log(f"⚠️ ID {b} ยังไม่มี PDF แนบ — ยังไม่บันทึกว่าข้าม"))
+                    continue
+
+                source_pdf = self._job_path(job, "source.pdf")
+                self.after(0, lambda n=len(detail["attachments"]):
+                           self.set_status(f"กำลังดาวน์โหลด PDF (ไฟล์แนบ {n} รายการ)..."))
+                sppweb.download(sess, detail["main_pdf"], source_pdf, expected_type="pdf")
+                self.spp_session_state = sppweb.export_session(sess)
+                self.after(0, lambda: self.set_status("ดาวน์โหลดสำเร็จ กำลังส่งให้ AI..."))
+                handed_to_preview = self.process_file_thread(
+                    source_pdf,
+                    doc["doc_no"], doc["doc_title"], doc["doc_date"], doc["sender"],
+                    detail["emoji"], sppweb.attach_text(detail["attachments"]),
+                    job=job, book_id=book_id,
+                )
+                return
+
+            self.after(0, lambda: self.set_status(
+                "พบหนังสือใหม่ แต่ยังไม่มีไฟล์ PDF แนบ กรุณาลองใหม่ภายหลัง"))
         except Exception as e:
-            # ต้องผูก e=e ไว้กับ lambda — ถ้าไม่ผูก Python จะลบตัวแปร e ทิ้งท้ายบล็อก except
-            # แล้ว callback จะพัง NameError เงียบๆ ทำให้ log ค้างโดยไม่บอกสาเหตุ
             try:
                 import traceback
-                with open(os.path.join(_BASE_DIR, "ai_error.log"), "a", encoding="utf-8") as logf:
+                with open(_w("ai_error.log"), "a", encoding="utf-8") as logf:
                     logf.write("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] ดึงข้อมูลเว็บ" + os.linesep)
                     logf.write(traceback.format_exc())
             except Exception:
                 pass
             self.after(0, lambda e=e: self.log(f"❌ ดึงข้อมูลไม่สำเร็จ: {type(e).__name__}: {e}"))
             self.after(0, lambda e=e: self.set_status(f"❌ ดึงข้อมูลไม่สำเร็จ: {e}"))
+        finally:
+            if not handed_to_preview:
+                self._finish_job(job)
 
-    def _mark_history_skip(self):
+    def _mark_history_skip(self, book_id=None):
         """บันทึกว่า "ข้าม" เรื่องนี้ ลงที่เก็บกลาง เพื่อไม่ให้ดึงซ้ำ
         (ใช้เฉพาะโหมดดึงจากเว็บ — โหมดนำเข้าไฟล์เองไม่มี book_id ก็ข้ามไป)"""
-        bid = getattr(self, 'current_book_id', None)
-        if bid:
-            try:
-                import store
-                store.get_store().mark_skipped(bid)
-            except Exception:
-                pass
-            self.current_book_id = None
+        if not book_id:
+            return True
+        try:
+            import store
+            store.get_store().mark_skipped(str(book_id))
+            return True
+        except Exception as e:
+            self.after(0, lambda e=e: self.log(f"❌ บันทึกสถานะข้ามไม่สำเร็จ: {e}"))
+            return False
 
-    def _ask_register_decision(self, recipient_line, category):
+    def _ask_register_decision(self, recipient_line, category, document_path):
         """เด้งหน้าต่างให้ผู้ใช้ตัดสินใจ (ทำงานข้ามเธรดอย่างปลอดภัย)
         คืนค่า 'ai' = ส่งให้ AI และลงรับต่อ, 'skip' = ไม่ลงรับ"""
         ev = threading.Event()
@@ -896,7 +988,7 @@ class SarabanApp(tk.Tk):
 
             def view_doc():
                 try:
-                    os.startfile(_p("temp_work.pdf"))
+                    os.startfile(document_path)
                 except Exception as e:
                     messagebox.showerror("เปิดเอกสารไม่ได้", str(e), parent=win)
 
@@ -914,9 +1006,10 @@ class SarabanApp(tk.Tk):
         ev.wait()
         return result['choice']
 
-    def process_file_thread(self, filepath, doc_no, doc_title, doc_date, sender, emoji, attach):
+    def process_file_thread(self, filepath, doc_no, doc_title, doc_date, sender, emoji, attach,
+                            *, job, book_id=None):
         ext = filepath.lower().split('.')[-1]
-        temp_pdf = _p("temp_work.pdf")
+        temp_pdf = self._job_path(job, "temp_work.pdf")
         if ext in ['jpg', 'jpeg', 'png']: Image.open(filepath).convert('RGB').save(temp_pdf)
         else: shutil.copy(filepath, temp_pdf)
 
@@ -928,10 +1021,12 @@ class SarabanApp(tk.Tk):
         if category == 'check':
             # อ่านได้และเป็นกลุ่มเฉพาะ → ถาม "ก่อน" เพื่อไม่ให้เปลือง AI call
             self.after(0, lambda: self.set_status("เอกสารนี้ต้องตรวจสอบก่อนลงรับ — รอการยืนยัน..."))
-            if self._ask_register_decision(recipient_line, 'check') != 'ai':
-                self._mark_history_skip()
-                self.after(0, lambda: self.set_status("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"))
-                return
+            if self._ask_register_decision(recipient_line, 'check', temp_pdf) != 'ai':
+                saved = self._mark_history_skip(book_id)
+                msg = ("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"
+                       if book_id and saved else "⏭ ไม่ลงรับเอกสารนี้")
+                self.after(0, lambda msg=msg: self.set_status(msg))
+                return False
             decided = True
         elif category == 'auto':
             decided = True
@@ -945,10 +1040,13 @@ class SarabanApp(tk.Tk):
             ai_rec = ai_recipient if (ai_recipient and ai_recipient != "-") else None
             if classify_recipient(ai_rec) != 'auto':
                 self.after(0, lambda: self.set_status("เอกสารนี้อาจต้องตรวจก่อนลงรับ — รอการยืนยัน..."))
-                if self._ask_register_decision(ai_rec, classify_recipient(ai_rec)) != 'ai':
-                    self._mark_history_skip()
-                    self.after(0, lambda: self.set_status("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"))
-                    return
+                if self._ask_register_decision(
+                        ai_rec, classify_recipient(ai_rec), temp_pdf) != 'ai':
+                    saved = self._mark_history_skip(book_id)
+                    msg = ("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"
+                           if book_id and saved else "⏭ ไม่ลงรับเอกสารนี้")
+                    self.after(0, lambda msg=msg: self.set_status(msg))
+                    return False
         doc_no = doc_no if doc_no != "-" else ai_no
         doc_title = doc_title if doc_title != "-" else ai_title
         doc_date = doc_date if doc_date != "-" else ai_date
@@ -962,23 +1060,28 @@ class SarabanApp(tk.Tk):
 
         receipt_no_thai = get_next_receipt_no()
         
+        page1_path = self._job_path(job, "page1.jpg")
+        page_sig_path = self._job_path(job, "page_sig.jpg")
         self.doc_info = {
             'pdf_path': temp_pdf, 'ai_text': ai_text, 'sig_page': sig_page, 'total_pages': total_pages,
             'doc_no': doc_no, 'doc_title': doc_title, 'doc_date': doc_date, 'sender': sender,
-            'emoji': emoji, 'attach': attach, 'receipt_no': receipt_no_thai
+            'emoji': emoji, 'attach': attach, 'receipt_no': receipt_no_thai,
+            'book_id': str(book_id) if book_id else None, 'job': job,
+            'page1_path': page1_path, 'page_sig_path': page_sig_path,
         }
         
         images = convert_from_path(temp_pdf, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
-        images[0].save(_p("page1.jpg"), "JPEG")
+        images[0].save(page1_path, "JPEG")
         if sig_page > 1:
             img_sig = convert_from_path(temp_pdf, first_page=sig_page, last_page=sig_page, poppler_path=POPPLER_PATH)
-            img_sig[0].save(_p("page_sig.jpg"), "JPEG")
+            img_sig[0].save(page_sig_path, "JPEG")
 
         # ล้าง cache รูปต้นฉบับของเอกสารเดิม (เริ่มเอกสารใหม่)
         self._p1_orig_cache = None
         self._psig_orig_cache = None
 
         self.after(0, self.show_preview_window)
+        return True
 
     # ==========================================
     # ๗. หน้าต่าง Live Editor (มุมมองแบบ MS Word Multi-page)
@@ -986,6 +1089,7 @@ class SarabanApp(tk.Tk):
     def show_preview_window(self):
         self.set_status("เปิดหน้าต่างแก้ไขและปรับแต่ง...")
         self.preview_win = tk.Toplevel(self)
+        self.preview_win.protocol("WM_DELETE_WINDOW", self.reject_document)
         self.preview_win.title("จัดหน้าเอกสาร (ลากย้ายอิสระ, ย่อ/ขยาย %, มุมมองแบ่งหน้า)")
         self.preview_win.geometry("1150x820")
         try:
@@ -1176,7 +1280,7 @@ class SarabanApp(tk.Tk):
         off_y_pct = self.doc_y_off.get() / 100.0
         
         if getattr(self, '_p1_orig_cache', None) is None:
-            self._p1_orig_cache = Image.open(_p("page1.jpg")).convert('RGBA')
+            self._p1_orig_cache = Image.open(self.doc_info['page1_path']).convert('RGBA')
         p1_orig = self._p1_orig_cache
         paper1_w, paper1_h = p1_orig.width, p1_orig.height
         cw = max(1, int(paper1_w * scale_w))
@@ -1193,7 +1297,7 @@ class SarabanApp(tk.Tk):
         self.psig_h = 0
         if self.doc_info['sig_page'] > 1:
             if getattr(self, '_psig_orig_cache', None) is None:
-                self._psig_orig_cache = Image.open(_p("page_sig.jpg")).convert('RGBA')
+                self._psig_orig_cache = Image.open(self.doc_info['page_sig_path']).convert('RGBA')
             ps_orig = self._psig_orig_cache
             papers_w, papers_h = ps_orig.width, ps_orig.height
             cw2 = max(1, int(papers_w * scale_w))
@@ -1304,132 +1408,186 @@ class SarabanApp(tk.Tk):
     def reject_document(self):
         """ไม่รับเอกสารนี้จากหน้ารีวิว — ปิดหน้าต่าง ไม่ลงทะเบียน ไม่ส่ง LINE
         และบันทึกลง history กันดึงซ้ำ"""
+        doc = getattr(self, 'doc_info', {}) or {}
+        book_id = doc.get('book_id')
+        job = doc.get('job')
+        repeat_note = "\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก" if book_id else ""
         if not messagebox.askyesno(
                 "ยืนยันไม่รับเอกสาร",
-                "ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนรับ และไม่ส่งเข้า LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก"):
+                "ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนรับ และไม่ส่งเข้า LINE" + repeat_note):
             return
         try:
             self.preview_win.destroy()
         except Exception:
             pass
-        self._mark_history_skip()
-        for temp_file in [_p("temp_work.pdf"), _p("temp.pdf"), _p("page1.jpg"), _p("page_sig.jpg")]:
-            try:
-                if os.path.exists(temp_file): os.remove(temp_file)
-            except Exception:
-                pass
-        self.set_status("🚫 ไม่รับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)")
+        saved = self._mark_history_skip(book_id)
+        if book_id and saved:
+            self.set_status("🚫 ไม่รับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)")
+        elif book_id:
+            self.set_status("⚠️ ไม่รับเอกสาร แต่บันทึกสถานะข้ามไม่สำเร็จ")
+        else:
+            self.set_status("🚫 ยกเลิกเอกสารนำเข้าแล้ว")
+        self._finish_job(job)
 
     # ==========================================
     # ๘. ตัดแบ่งหน้าและสร้าง PDF (Exporting)
     # ==========================================
     def finalize_document(self):
+        # อ่าน Tk variables บน UI thread ให้หมดก่อนส่งงานหนักไป background thread
+        snapshot = {
+            'doc': dict(self.doc_info),
+            'background': self.original_bg.copy(),
+            'stamp_pct': self.stamp_pct.get(),
+            'stamp_x': self.stamp_orig_x,
+            'stamp_y': self.stamp_orig_y,
+            'boxes': [{
+                'text': box['text'], 'x': box['x'], 'y': box['y'],
+                'pct': box['pct'].get(), 'wrap_pct': box['wrap_pct'].get(),
+                'indent_pct': box['indent_pct'].get(),
+                'draw_bg': box['draw_bg'].get(),
+                'draw_border': box['draw_border'].get(),
+            } for box in self.kasien_boxes],
+            'W': self.W, 'page_top': self.page_top, 'p1_h': self.p1_h,
+            'psig_h': self.psig_h, 'gap': self.gap,
+            'blank_start_y': self.blank_start_y, 'blank_h': self.blank_h,
+        }
         self.preview_win.destroy()
         self.set_status("กำลังประมวลผลและสร้างไฟล์...")
-        threading.Thread(target=self.finalize_thread).start()
+        threading.Thread(target=self.finalize_thread, args=(snapshot,), daemon=True).start()
 
-    def finalize_thread(self):
-        # จองเลขรับจริง "ตอนนี้" ก่อนวาดตรายาง
-        # เลขที่โชว์ตอนเปิดหน้าต่างเป็นแค่การดูล่วงหน้า ระหว่างที่ผู้ใช้จัดหน้าอยู่
-        # ฝั่งเว็บหรืออีกเครื่องอาจลงรับไปแล้ว ถ้ายึดเลขเดิมจะได้เลขซ้ำกัน
+    def finalize_thread(self, snapshot):
+        doc = snapshot['doc']
+        job = doc.get('job')
+        registered = False
+        history_marked = False
+        final_pdf_path = None
         try:
-            self.doc_info['receipt_no'] = register_document(
-                self.doc_info['doc_no'], self.doc_info['doc_date'],
-                self.doc_info['sender'], self.doc_info['doc_title'])
+            # ถ้าจองเลขไม่ได้ ต้องหยุดทันที ห้ามใช้เลข preview ต่อ
+            doc['receipt_no'] = register_document(
+                doc['doc_no'], doc['doc_date'], doc['sender'], doc['doc_title'])
+            registered = True
+
+            # กันหนังสือเดิมถูกหยิบไปลงรับเลขใหม่ หากขั้นส่ง LINE/สร้างไฟล์ภายหลังพลาด
+            if doc.get('book_id'):
+                import store
+                store.get_store().mark_registered(doc['book_id'], doc['receipt_no'])
+                history_marked = True
+
+            final_bg = snapshot['background'].copy()
+            stamp_rgba = render_transparent_stamp(doc['receipt_no'], snapshot['stamp_pct'])
+            final_bg.paste(
+                stamp_rgba, (int(snapshot['stamp_x']), int(snapshot['stamp_y'])), stamp_rgba)
+
+            has_blank_page = False
+            for box in snapshot['boxes']:
+                max_w_orig = max(10, int(snapshot['W'] * 0.42 * box['wrap_pct'] / 100.0))
+                kasien_rgba = render_transparent_kasien(
+                    box['text'], max_w_orig, box['pct'], box['indent_pct'],
+                    box['draw_bg'], box['draw_border'])
+                final_bg.paste(kasien_rgba, (int(box['x']), int(box['y'])), kasien_rgba)
+                if box['y'] + kasien_rgba.height > snapshot['blank_start_y']:
+                    has_blank_page = True
+
+            p1_path = self._job_path(job, "p1.pdf")
+            psig_path = self._job_path(job, "psig.pdf")
+            blank_path = self._job_path(job, "blank.pdf")
+            final_jpg = self._job_path(job, "page1_final.jpg")
+            p1_crop = final_bg.crop((
+                20, snapshot['page_top'], 20 + snapshot['W'],
+                snapshot['page_top'] + snapshot['p1_h']))
+            p1_crop.convert('RGB').save(p1_path, "PDF", resolution=100.0)
+
+            if snapshot['psig_h'] > 0:
+                psig_top = snapshot['page_top'] + snapshot['p1_h'] + snapshot['gap']
+                psig_crop = final_bg.crop((
+                    20, psig_top, 20 + snapshot['W'], psig_top + snapshot['psig_h']))
+                psig_crop.convert('RGB').save(psig_path, "PDF", resolution=100.0)
+            if has_blank_page:
+                blank_crop = final_bg.crop((
+                    20, snapshot['blank_start_y'], 20 + snapshot['W'],
+                    snapshot['blank_start_y'] + snapshot['blank_h']))
+                blank_crop.convert('RGB').save(blank_path, "PDF", resolution=100.0)
+
+            merger = PdfMerger()
+            try:
+                sig_page, total = doc['sig_page'], doc['total_pages']
+                merger.append(p1_path)
+                if sig_page == 1:
+                    if total > 1:
+                        merger.append(doc['pdf_path'], pages=(1, total))
+                else:
+                    if sig_page > 2:
+                        merger.append(doc['pdf_path'], pages=(1, sig_page - 1))
+                    merger.append(psig_path)
+                    if total > sig_page:
+                        merger.append(doc['pdf_path'], pages=(sig_page, total))
+                if has_blank_page:
+                    merger.append(blank_path)
+
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                save_folder = os.path.join(OUTPUT_ROOT, today_str)
+                os.makedirs(save_folder, exist_ok=True)
+                safe_name = re.sub(r'[<>:"/\\|?*]+', '_', str(doc['doc_no'])).strip(' ._')
+                if not safe_name or safe_name == "-":
+                    safe_name = "เอกสารนำเข้า"
+                final_pdf_path = os.path.join(
+                    save_folder, f"{safe_name}_รับ_{doc['receipt_no']}.pdf")
+                merger.write(final_pdf_path)
+            finally:
+                merger.close()
+
+            # LINE เป็นงานเสริม ความล้มเหลวตรงนี้ต้องไม่ย้อนสถานะทะเบียน/ไฟล์
+            try:
+                p1_crop.convert('RGB').save(final_jpg, "JPEG")
+                img_url = upload_to_imgbb(final_jpg)
+                kasien_parts = [
+                    " ".join(box['text'].split()) for box in snapshot['boxes'][:2]
+                    if box['text'].strip()]
+                ai_text_line = " | ".join(kasien_parts)
+                doc_date = doc['doc_date']
+                formatted_line_date = (
+                    format_scraped_date(doc_date)
+                    if "ม.ค." not in doc_date and "ก.พ." not in doc_date and doc_date != "-"
+                    else to_thai_digits(doc_date))
+                msg = (
+                    f"📌 เลขที่รับ {doc['receipt_no']}\n"
+                    f"{doc['emoji']} {to_thai_digits(doc['doc_no'])}\n"
+                    f"🆕เรื่อง: {doc['doc_title']}\n"
+                    f"🌟หนังสือลงวันที่ : {formatted_line_date}\n"
+                    f"⚠️คำเกษียนหนังสือ:{ai_text_line}\n"
+                    f"{doc['attach']}")
+                if send_line_with_image(msg, img_url):
+                    self.after(0, lambda: self.log("ส่งเข้ากลุ่ม LINE แล้ว"))
+                else:
+                    self.after(0, lambda: self.log(
+                        "⚠️ ส่ง LINE ไม่สำเร็จ (PDF และทะเบียนบันทึกแล้ว)"))
+            except Exception as line_error:
+                self.after(0, lambda e=line_error: self.log(
+                    f"⚠️ ส่ง LINE ไม่สำเร็จ แต่ PDF และทะเบียนบันทึกแล้ว: {e}"))
+
+            self.after(0, lambda p=final_pdf_path:
+                       self.set_status(f"✅ เสร็จสิ้น บันทึกไฟล์: {p}"))
+            self.after(0, lambda p=final_pdf_path, n=doc['receipt_no']:
+                       messagebox.showinfo("สำเร็จ", f"ลงทะเบียนเลขรับ {n} และบันทึกไฟล์แล้ว\n\n{p}"))
         except Exception as e:
-            print(f"⚠️ Excel Error: {e}")
-
-        final_bg = self.original_bg.copy()
-
-        stamp_rgba = render_transparent_stamp(self.doc_info['receipt_no'], self.stamp_pct.get())
-        final_bg.paste(stamp_rgba, (int(self.stamp_orig_x), int(self.stamp_orig_y)), stamp_rgba)
-        
-        has_blank_page = False
-        for box in self.kasien_boxes:
-            wrap = box['wrap_pct'].get() / 100.0
-            max_w_orig = max(10, int(self.W * 0.42 * wrap))
-            kasien_rgba = render_transparent_kasien(box['text'], max_w_orig, box['pct'].get(), box['indent_pct'].get(), box['draw_bg'].get(), box['draw_border'].get())
-            final_bg.paste(kasien_rgba, (int(box['x']), int(box['y'])), kasien_rgba)
-            if box['y'] + kasien_rgba.height > self.blank_start_y:
-                has_blank_page = True
-        
-        p1_crop = final_bg.crop((20, self.page_top, 20 + self.W, self.page_top + self.p1_h))
-        p1_crop.convert('RGB').save(_p("p1.pdf"), "PDF", resolution=100.0)
-        
-        if self.psig_h > 0:
-            psig_top = self.page_top + self.p1_h + self.gap
-            psig_crop = final_bg.crop((20, psig_top, 20 + self.W, psig_top + self.psig_h))
-            psig_crop.convert('RGB').save(_p("psig.pdf"), "PDF", resolution=100.0)
-            
-        if has_blank_page:
-            blank_crop = final_bg.crop((20, self.blank_start_y, 20 + self.W, self.blank_start_y + self.blank_h))
-            blank_crop.convert('RGB').save(_p("blank.pdf"), "PDF", resolution=100.0)
-            
-        merger = PdfMerger()
-        pdf_path = self.doc_info['pdf_path']
-        sig_page = self.doc_info['sig_page']
-        total = self.doc_info['total_pages']
-        
-        if sig_page == 1:
-            merger.append(_p("p1.pdf"))
-            if total > 1: merger.append(pdf_path, pages=(1, total))
-        else:
-            merger.append(_p("p1.pdf"))
-            if sig_page > 2: merger.append(pdf_path, pages=(1, sig_page - 1))
-            merger.append(_p("psig.pdf"))
-            if total > sig_page: merger.append(pdf_path, pages=(sig_page, total))
-
-        if has_blank_page: merger.append(_p("blank.pdf"))
-            
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        save_folder = os.path.join(OUTPUT_ROOT, today_str)
-        if not os.path.exists(save_folder): os.makedirs(save_folder)
-        
-        safe_name = self.doc_info['doc_no'].replace("/", "_").replace(":", "").strip()
-        if not safe_name or safe_name == "-": safe_name = f"เอกสารนำเข้า_{self.doc_info['receipt_no']}"
-        final_pdf_path = os.path.join(save_folder, f"{safe_name}.pdf")
-        
-        merger.write(final_pdf_path)
-        merger.close()
-        
-        # (เลขรับถูกจองและเขียนลงทะเบียนไปแล้วตั้งแต่ต้น finalize_thread)
-        
-        p1_crop.convert('RGB').save(_p("page1_final.jpg"), "JPEG")
-        img_url = upload_to_imgbb(_p("page1_final.jpg"))
-        
-        kasien_parts = [" ".join(b['text'].split()) for b in self.kasien_boxes[:2] if b['text'].strip()]
-        ai_text_line = " | ".join(kasien_parts)
-        
-        doc_date = self.doc_info['doc_date']
-        if "ม.ค." not in doc_date and "ก.พ." not in doc_date and doc_date != "-":
-            formatted_line_date = format_scraped_date(doc_date)
-        else:
-            formatted_line_date = to_thai_digits(doc_date)
-            
-        msg = (
-            f"📌 เลขที่รับ {self.doc_info['receipt_no']}\n"
-            f"{self.doc_info['emoji']} {to_thai_digits(self.doc_info['doc_no'])}\n"
-            f"🆕เรื่อง: {self.doc_info['doc_title']}\n"
-            f"🌟หนังสือลงวันที่ : {formatted_line_date}\n"
-            f"⚠️คำเกษียนหนังสือ:{ai_text_line}\n"
-            f"{self.doc_info['attach']}"
-        )
-        if send_line_with_image(msg, img_url):
-            self.after(0, lambda: self.log("ส่งเข้ากลุ่ม LINE แล้ว"))
-        else:
-            self.after(0, lambda: self.log("⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์ PDF กับทะเบียน Excel บันทึกเรียบร้อยแล้ว)"))
-        
-        if hasattr(self, 'current_book_id') and self.current_book_id:
-            import store
-            store.get_store().mark_registered(self.current_book_id, self.doc_info['receipt_no'])
-            self.current_book_id = None
-        
-        for temp_file in [_p(n) for n in ("temp_work.pdf", "temp.pdf", "page1.jpg", "page_sig.jpg",
-                                          "p1.pdf", "psig.pdf", "blank.pdf", "page1_final.jpg")]:
-            if os.path.exists(temp_file): os.remove(temp_file)
-            
-        self.after(0, lambda: self.set_status("✅ เสร็จสิ้น! กด 'ดึงข้อมูลเว็บ' เพื่อทำเรื่องต่อไป"))
-        self.after(0, lambda: messagebox.showinfo("สำเร็จ", f"บันทึกไฟล์เรียบร้อยแล้ว\n\n(กดปุ่ม ดึงข้อมูลเว็บ ซ้ำอีกครั้ง เพื่อทำเรื่องต่อไปได้เลยครับ)"))
+            stage = (
+                f"ลงทะเบียนเลขรับ {doc.get('receipt_no')} แล้ว แต่ขั้นตอนถัดไปไม่สำเร็จ"
+                if registered else "ลงทะเบียนไม่สำเร็จ จึงยังไม่ได้สร้างหรือส่งเอกสาร")
+            if registered and doc.get('book_id') and not history_marked:
+                try:
+                    import store
+                    store.get_store().mark_registered(doc['book_id'], doc['receipt_no'])
+                    history_marked = True
+                except Exception:
+                    pass
+            self.after(0, lambda e=e, stage=stage:
+                       self.log(f"❌ {stage}: {type(e).__name__}: {e}"))
+            self.after(0, lambda e=e, stage=stage:
+                       self.set_status(f"❌ {stage}: {e}"))
+            self.after(0, lambda e=e, stage=stage:
+                       messagebox.showerror("สร้างเอกสารไม่สำเร็จ", f"{stage}\n\n{e}"))
+        finally:
+            self._finish_job(job)
 
 if __name__ == '__main__':
     app = SarabanApp()

@@ -8,6 +8,7 @@ import sys
 import io
 import json
 import base64
+import copy
 import secrets
 import hashlib
 import threading
@@ -569,7 +570,38 @@ import sppweb
 from web import docmode
 from fastapi import UploadFile, File
 
-_spp_cookie = {"value": None}          # เก็บ PHPSESSID ไว้ใช้ซ้ำ ไม่ต้องล็อกอินใหม่ทุกครั้ง
+_spp_session_state = None       # cookie ทุกตัว + User-Agent; ไม่แชร์ requests.Session ข้ามเธรด
+_spp_session_lock = threading.Lock()
+
+
+def _with_spp_session(operation):
+    """เรียกงานเว็บ สพป. ด้วย session ที่ใช้ได้ แล้วจำสถานะล่าสุดไว้รอบถัดไป
+
+    requests.Session ไม่ปลอดภัยสำหรับการใช้พร้อมกันหลายเธรด จึงเก็บเฉพาะ
+    สถานะที่ export แล้ว และสร้าง Session ใหม่ทุกครั้ง ล็อกนี้ยังช่วยกันหลาย request
+    ล็อกอินซ้อนกันหรือเขียน cookie ชุดเก่าทับชุดใหม่
+    """
+    global _spp_session_state
+    with _spp_session_lock:
+        sess = sppweb.new_session(_spp_session_state) if _spp_session_state else None
+        if sess is None or not sppweb.is_logged_in(sess):
+            sess = sppweb.login()
+
+        try:
+            result = operation(sess)
+        except sppweb.SessionExpiredError:
+            # session อาจหมดอายุหลังตรวจแต่ก่อนเปิดหน้าถัดไป ล็อกอินใหม่แล้วลองซ้ำครั้งเดียว
+            sess = sppweb.login()
+            result = operation(sess)
+
+        _spp_session_state = sppweb.export_session(sess)
+        return result
+
+
+def _spp_session_snapshot():
+    """สำเนาสถานะสำหรับส่งให้งานเบื้องหลัง โดยไม่เปิด Session ร่วมกัน"""
+    with _spp_session_lock:
+        return copy.deepcopy(_spp_session_state)
 
 
 @app.get("/doc", response_class=HTMLResponse)
@@ -584,11 +616,8 @@ def doc_page(session: str = Cookie(default=None)):
 def api_spp_check(user: str = Depends(current_user)):
     """ดูว่ามีหนังสือใหม่ที่ยังไม่ได้ลงรับกี่เรื่อง"""
     try:
-        sess = sppweb.new_session(_spp_cookie["value"]) if _spp_cookie["value"] else None
-        if sess is None or not sppweb.is_logged_in(sess):
-            sess = sppweb.login()
-            _spp_cookie["value"] = sppweb.get_cookie(sess)
-        docs = sppweb.list_new_documents(sess, pages=2)
+        docs = _with_spp_session(
+            lambda sess: sppweb.list_new_documents(sess, pages=2))
         return {"ok": True, "count": len(docs), "docs": docs}
     except sppweb.LoginError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
@@ -609,11 +638,9 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
     """รายการหนังสือทั้งหมดจากเว็บข่าว พร้อมสถานะ จัดกลุ่มตามวันที่เว็บอัปโหลด"""
     import store as _s
     try:
-        sess = sppweb.new_session(_spp_cookie["value"]) if _spp_cookie["value"] else None
-        if sess is None or not sppweb.is_logged_in(sess):
-            sess = sppweb.login()
-            _spp_cookie["value"] = sppweb.get_cookie(sess)
-        docs = _s.get_store().status_of(sppweb.list_documents(sess, pages=max(1, min(pages, 8))))
+        fetched = _with_spp_session(
+            lambda sess: sppweb.list_documents(sess, pages=max(1, min(pages, 8))))
+        docs = _s.get_store().status_of(fetched)
     except sppweb.LoginError as e:
         # เว็บ สพป. อยู่หลัง Cloudflare ซึ่งบล็อก IP ของศูนย์ข้อมูล
         # เปิดจากคอมที่โรงเรียนได้ แต่เปิดจากเซิร์ฟเวอร์คลาวด์ไม่ได้
@@ -657,7 +684,7 @@ async def api_spp_skip(request: Request, user: str = Depends(current_user)):
 @app.post("/api/doc/open")
 async def api_doc_open(request: Request, user: str = Depends(current_user)):
     d = await request.json()
-    job = docmode.start_from_spp(user, str(d.get("book_id", "")), _spp_cookie["value"],
+    job = docmode.start_from_spp(user, str(d.get("book_id", "")), _spp_session_snapshot(),
                                  redo_no=(d.get("redo_no") or None))
     return {"job_id": job["id"]}
 

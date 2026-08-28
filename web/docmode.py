@@ -91,7 +91,7 @@ def _set(job, **kw):
         job.update(kw)
 
 
-def start_from_spp(user: str, book_id: str, cookie: str = None, redo_no: str = None) -> dict:
+def start_from_spp(user: str, book_id: str, session_state=None, redo_no: str = None) -> dict:
     """โหมดที่ ๑ — ดึงหนังสือจากเว็บ สพป. มาลงรับ
 
     redo_no = ลงรับใหม่โดยใช้เลขรับเดิม (ไม่กินเลขใหม่ และจะเขียนทับแถวเดิมในทะเบียน)
@@ -101,7 +101,9 @@ def start_from_spp(user: str, book_id: str, cookie: str = None, redo_no: str = N
     def work():
         try:
             _set(job, step="กำลังเข้าสู่ระบบเว็บ สพป. ...")
-            sess = sppweb.new_session(cookie) if cookie else None
+            # session_state อาจเป็น PHPSESSID แบบเก่า หรือสถานะเต็มที่มี cookie
+            # ทุกตัวกับ User-Agent; new_session สร้างตัวใหม่จึงไม่แชร์ Session ข้ามเธรด
+            sess = sppweb.new_session(session_state) if session_state else None
             if sess is None or not sppweb.is_logged_in(sess):
                 sess = sppweb.login()
 
