@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from http.cookies import SimpleCookie
 from urllib.parse import urljoin, urlsplit
 
@@ -18,8 +20,12 @@ BASE = "https://office.sakonarea1.go.th/"
 NEWS_URL = core.NEWS_URL
 DETAIL_URL = BASE + "modules/book/main/bookdetail_school_total.php?b_id={}"
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+# Cloudflare ให้คะแนนความเป็นบอทกับเบราว์เซอร์เวอร์ชันเก่าเกินจริงค่อนข้างสูง
+# ค่านี้จึงต้องตามเวอร์ชัน Chrome ที่ใช้จริงอยู่เรื่อยๆ ตั้งทับได้ด้วย
+# SARABAN_USER_AGENT (ฝั่งเดสก์ท็อปดึง navigator.userAgent จาก Chrome จริงมาใช้อยู่แล้ว)
+UA = os.environ.get("SARABAN_USER_AGENT", "").strip() or (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
 
 BASE_HEADERS = {
     "User-Agent": UA,
@@ -33,6 +39,55 @@ FILE_EXTENSIONS = {
     ".zip", ".rar", ".jpg", ".jpeg", ".png",
 }
 MAX_DOWNLOAD_BYTES = int(os.environ.get("SARABAN_MAX_DOWNLOAD_MB", "80")) * 1024 * 1024
+
+# ==========================================================
+# เว้นจังหวะการยิง — กัน rate limit
+# ==========================================================
+# เว็บ สพป. เป็นเซิร์ฟเวอร์ของหน่วยงานเล็กๆ การยิงรัวไม่หยุดทำให้ทั้งเราและ
+# โรงเรียนอื่นเดือดร้อน และเป็นสัญญาณบอทที่ Cloudflare จับได้ง่ายที่สุด
+# ตั้งเป็น 0 เพื่อปิดได้ (เช่นตอนรันเทสต์)
+REQUEST_GAP = float(os.environ.get("SARABAN_REQUEST_GAP", "0.7"))
+RETRY_ON_BUSY = 2                 # ลองซ้ำกี่ครั้งเมื่อโดน 429/503
+_pace_lock = threading.Lock()
+_last_request_at = 0.0
+
+
+def _pace():
+    """หน่วงให้ทุก request ที่ยิงออกจากโปรแกรมนี้ห่างกันอย่างน้อย REQUEST_GAP วินาที"""
+    if REQUEST_GAP <= 0:
+        return
+    global _last_request_at
+    with _pace_lock:
+        wait = REQUEST_GAP - (time.monotonic() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
+
+
+def _retry_after(response, attempt: int) -> float:
+    """เว็บบอกให้รอกี่วินาที ถ้าไม่บอกก็ถอยแบบทวีคูณ"""
+    raw = str((getattr(response, "headers", {}) or {}).get("Retry-After", "")).strip()
+    if raw.isdigit():
+        return min(float(raw), 30.0)
+    return min(2.0 ** attempt, 8.0)
+
+
+def _send(sess, method: str, url: str, **kwargs):
+    """ยิง request หนึ่งครั้งโดยเว้นจังหวะ และลองซ้ำให้เมื่อเว็บบอกว่ายุ่งอยู่"""
+    call = getattr(sess, method.lower())
+    for attempt in range(RETRY_ON_BUSY + 1):
+        _pace()
+        response = call(url, **kwargs)
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status not in (429, 503) or attempt == RETRY_ON_BUSY:
+            return response
+        # ทิ้งคำตอบนี้แล้ว ต้องปิดก่อน ไม่งั้น connection ค้างเมื่อใช้ stream=True
+        try:
+            response.close()
+        except Exception:
+            pass
+        time.sleep(_retry_after(response, attempt))
+    return response
 
 
 class SPPWebError(RuntimeError):
@@ -282,8 +337,7 @@ def _raise_for_response(response, text: str, context: str):
 def _request_html(sess, method: str, url: str, *, context: str,
                   timeout: int = 20, authenticated: bool = False, **kwargs):
     try:
-        call = getattr(sess, method.lower())
-        response = call(url, timeout=timeout, **kwargs)
+        response = _send(sess, method, url, timeout=timeout, **kwargs)
     except SPPWebError:
         raise
     except Exception as e:
@@ -379,7 +433,14 @@ def _book_ids(soup) -> set[str]:
     return out
 
 
-def find_last_page(sess) -> int:
+def _scan_last_page(sess):
+    """คืน (เลขหน้าสุดท้าย, soup ของหน้านั้น หรือ None)
+
+    คืน soup มาด้วยได้เฉพาะกรณีที่รู้แน่ว่าเป็นหน้าไหน คือตอน probe เจอว่ามีหน้า
+    ถัดไปจริง (soup ตัวนั้นคือหน้า last+1 พอดี) ส่วนหน้า landing ห้ามเอามาใช้ซ้ำ
+    เพราะเว็บอาจแสดงหน้าแรกไม่ใช่หน้าสุดท้าย ถ้าเดาผิดจะทำให้หนังสือใหม่หายไปเงียบๆ
+    ซึ่งร้ายแรงกว่าการยิงเพิ่มอีกหนึ่ง request มาก
+    """
     _, soup = _request_html(
         sess, "get", NEWS_URL, context="ค้นหาหน้าสุดท้าย", timeout=20,
         authenticated=True,
@@ -400,8 +461,12 @@ def find_last_page(sess) -> int:
     )
     probe_ids = _book_ids(probe_soup)
     if probe_ids and probe_ids != _book_ids(soup):
-        return last + 1
-    return last
+        return last + 1, probe_soup
+    return last, None
+
+
+def find_last_page(sess) -> int:
+    return _scan_last_page(sess)[0]
 
 
 THAI_MON = {"มค": 1, "กพ": 2, "มีค": 3, "เมย": 4, "พค": 5, "มิย": 6,
@@ -451,16 +516,20 @@ def _row_of(link) -> dict:
 
 def list_documents(sess, pages: int = 2) -> list:
     """คืนหนังสือจากหน้าท้ายๆ เรียงใหม่สุดขึ้นก่อน"""
-    last = find_last_page(sess)
+    last, last_soup = _scan_last_page(sess)
     count = max(1, int(pages))
     wanted = range(max(1, last - count + 1), last + 1)
     out, seen = [], set()
     for page in wanted:
-        _, soup = _request_html(
-            sess, "get", f"{NEWS_URL}&page={page}",
-            context=f"เปิดรายการหนังสือหน้า {page}", timeout=20,
-            authenticated=True,
-        )
+        # หน้าสุดท้ายโหลดมาแล้วตอนหาเลขหน้า ใช้ซ้ำเลย ไม่ต้องยิงอีกรอบ
+        if page == last and last_soup is not None:
+            soup = last_soup
+        else:
+            _, soup = _request_html(
+                sess, "get", f"{NEWS_URL}&page={page}",
+                context=f"เปิดรายการหนังสือหน้า {page}", timeout=20,
+                authenticated=True,
+            )
         if not _is_news_page(soup):
             raise UnexpectedPageError(f"ไม่พบตารางรายการหนังสือในหน้าที่ {page}")
         for link in _doc_links(soup):
@@ -510,7 +579,21 @@ def _attachment_ext(href: str) -> str:
     return os.path.splitext(urlsplit(str(href or "")).path)[1].lower()
 
 
-def _attachment_candidates(href: str, detail_url: str) -> list[str]:
+# เว็บวางไฟล์แนบไว้หลายที่ ต้อง "เดา" path เอา แต่ทั้งเว็บใช้แบบเดียวกันตลอด
+# จึงจำกฎที่เพิ่งใช้ได้ไว้ แล้วเอามาลองก่อนเป็นตัวแรกในครั้งถัดไป
+# ทำให้จากเดิมยิงเดาสูงสุด ๕ ครั้งต่อไฟล์แนบ ๑ ตัว เหลือ ๑ ครั้งเกือบตลอด
+_rule_hint = None
+_rule_hint_lock = threading.Lock()
+
+
+def _remember_rule(rule: str):
+    global _rule_hint
+    with _rule_hint_lock:
+        _rule_hint = rule
+
+
+def _attachment_candidates(href: str, detail_url: str) -> list[tuple[str, str]]:
+    """คืน [(ชื่อกฎ, url), ...] เรียงตามกฎที่เพิ่งใช้ได้ก่อน"""
     raw = str(href or "").strip()
     if not raw or _attachment_ext(raw) not in FILE_EXTENSIONS:
         return []
@@ -519,51 +602,100 @@ def _attachment_candidates(href: str, detail_url: str) -> list[str]:
         return []
 
     candidates = []
+    seen = set()
 
-    def add(value):
-        if value and value not in candidates:
-            candidates.append(value)
+    def add(rule, value):
+        if value and value not in seen:
+            seen.add(value)
+            candidates.append((rule, value))
 
     if parsed.scheme or raw.startswith("//") or raw.startswith("/"):
-        add(urljoin(detail_url, raw))
+        add("absolute", urljoin(detail_url, raw))
     elif raw.startswith("."):
-        add(urljoin(detail_url, raw))
-        add(urljoin(BASE, raw.lstrip("./")))
+        add("relative", urljoin(detail_url, raw))
+        add("root", urljoin(BASE, raw.lstrip("./")))
     else:
         clean = raw.lstrip("./")
         if clean.startswith("bookregister/") or clean.startswith("book/"):
-            add(urljoin(BASE + "modules/", clean))
-        add(urljoin(BASE + "modules/bookregister/", clean))
-        add(urljoin(BASE + "modules/book/", clean))
-        add(urljoin(detail_url, raw))
-        add(urljoin(BASE, raw))
+            add("modules", urljoin(BASE + "modules/", clean))
+        add("bookregister", urljoin(BASE + "modules/bookregister/", clean))
+        add("book", urljoin(BASE + "modules/book/", clean))
+        add("relative", urljoin(detail_url, raw))
+        add("root", urljoin(BASE, raw))
+
+    with _rule_hint_lock:
+        hint = _rule_hint
+    if hint:
+        candidates.sort(key=lambda item: item[0] != hint)
     return candidates
 
 
-def _pick_attachment_url(sess, candidates: list[str], *, timeout: int = 20) -> str | None:
-    for candidate in candidates:
-        response = None
+def _probe_attachment(sess, url: str, *, timeout: int):
+    """ถาม HEAD ว่า url นี้เป็นไฟล์จริงไหม — ถูกกว่าโหลดตัวไฟล์มาดู
+
+    คืน "ok" / "missing" (ลองตัวถัดไป) / "html" (ได้หน้าเว็บ ไม่ใช่ไฟล์)
+    เว็บบางตัวไม่รองรับ HEAD จะถอยไปใช้ GET แบบขอแค่ ๑ KB แรกให้เอง
+    """
+    response = _send(sess, "head", url, timeout=timeout, allow_redirects=True)
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in (405, 501):
+        response = _send(sess, "get", url, timeout=timeout, stream=True,
+                         allow_redirects=True, headers={"Range": "bytes=0-1023"})
         try:
-            response = sess.get(
-                candidate, timeout=timeout, stream=True, allow_redirects=True,
-                headers={"Range": "bytes=0-1023"},
-            )
-            status = int(getattr(response, "status_code", 0) or 0)
-            if status in (404, 410):
-                continue
-            content_type = str((getattr(response, "headers", {}) or {}).get("Content-Type", "")).lower()
-            text = _response_text(response) if "html" in content_type else ""
-            _raise_for_response(response, text, "ตรวจลิงก์ไฟล์แนบ")
-            if text:
-                soup = BeautifulSoup(text, "html.parser")
-                if _is_login_page(soup):
-                    raise SessionExpiredError("session หมดอายุระหว่างตรวจไฟล์แนบ")
-                continue
-            return getattr(response, "url", candidate) or candidate
+            return _classify_probe(response)
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+    return _classify_probe(response)
+
+
+def _classify_probe(response):
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in (404, 410):
+        return "missing", response
+    content_type = str(
+        (getattr(response, "headers", {}) or {}).get("Content-Type", "")).lower()
+    if "html" in content_type:
+        return "html", response
+    _raise_for_response(response, "", "ตรวจลิงก์ไฟล์แนบ")
+    return "ok", response
+
+
+def _pick_attachment_url(sess, candidates: list[tuple[str, str]], *,
+                         timeout: int = 20) -> str | None:
+    """หา url ของไฟล์แนบตัวจริง ยิงให้น้อยที่สุดเท่าที่ทำได้"""
+    html_hit = None
+    for rule, candidate in candidates:
+        try:
+            verdict, response = _probe_attachment(sess, candidate, timeout=timeout)
         except SPPWebError:
             raise
         except Exception as e:
             raise SiteUnavailableError(f"ตรวจลิงก์ไฟล์แนบไม่สำเร็จ: {e}") from e
+
+        if verdict == "ok":
+            _remember_rule(rule)
+            return getattr(response, "url", candidate) or candidate
+        if verdict == "html" and html_hit is None:
+            html_hit = candidate
+
+    # เดา path ไม่ถูกสักตัว แต่มีตัวที่ตอบเป็นหน้าเว็บ — เปิดดูสักครั้งว่าเป็น
+    # หน้าล็อกอินหรือเปล่า จะได้แยก "session หมดอายุ" ออกจาก "ไม่มีไฟล์นี้"
+    if html_hit:
+        response = None
+        try:
+            response = _send(sess, "get", html_hit, timeout=timeout, stream=True,
+                             allow_redirects=True, headers={"Range": "bytes=0-1023"})
+            text = _response_text(response)
+            _raise_for_response(response, text, "ตรวจลิงก์ไฟล์แนบ")
+            if _is_login_page(BeautifulSoup(text, "html.parser")):
+                raise SessionExpiredError("session หมดอายุระหว่างตรวจไฟล์แนบ")
+        except SPPWebError:
+            raise
+        except Exception:
+            pass
         finally:
             if response is not None:
                 try:
@@ -616,7 +748,7 @@ def download(sess, url: str, dest: str, *, expected_type: str | None = None) -> 
     total = 0
     prefix = bytearray()
     try:
-        response = sess.get(url, timeout=120, stream=True, allow_redirects=True)
+        response = _send(sess, "get", url, timeout=120, stream=True, allow_redirects=True)
         _raise_for_response(response, "", "ดาวน์โหลดไฟล์แนบ")
         length = str((getattr(response, "headers", {}) or {}).get("Content-Length", "")).strip()
         if length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:

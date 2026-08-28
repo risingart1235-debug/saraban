@@ -889,9 +889,10 @@ class SarabanApp(tk.Tk):
         handed_to_preview = False
         try:
             sess = sppweb.new_session(session_state)
-            sppweb.assert_authenticated(sess)
             self.after(0, lambda: self.set_status("กำลังค้นหาหนังสือใหม่จากหน้าล่าสุด..."))
-            documents = sppweb.list_new_documents(sess, pages=8)
+            # ไม่ต้อง assert_authenticated ก่อน — list_new_documents ตรวจ session
+            # ให้อยู่แล้วและโยน SessionExpiredError เอง การเรียกก่อนคือยิงหน้าเดิมซ้ำฟรีๆ
+            documents = sppweb.list_new_documents(sess, pages=3)
             self.spp_session_state = sppweb.export_session(sess)
             if not documents:
                 self.after(0, lambda: self.set_status("ตรวจสอบเรียบร้อย ไม่มีหนังสือเข้าใหม่ครับ"))

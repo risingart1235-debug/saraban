@@ -18,6 +18,9 @@ from requests.structures import CaseInsensitiveDict
 
 import sppweb
 
+# Never pace the offline suite; the delay only exists to be polite to the real site.
+sppweb.REQUEST_GAP = 0
+
 
 LOGIN_HTML = """
 <!doctype html>
@@ -461,6 +464,73 @@ class DetailTests(unittest.TestCase):
         )
         with self.assertRaises(sppweb.UnexpectedPageError):
             sppweb.fetch_detail(sess, "123")
+
+
+class RequestBudgetTests(unittest.TestCase):
+    """Bursts of requests are what gets an IP rate-limited; keep the count down."""
+
+    DETAIL = sppweb.DETAIL_URL.format("123")
+    WORKING = sppweb.BASE + "modules/book/bookregister/files/x.pdf"
+    DEAD = (
+        sppweb.BASE + "modules/bookregister/files/x.pdf",
+        sppweb.BASE + "modules/bookregister/bookregister/files/x.pdf",
+    )
+    HTML = """
+    <!doctype html><html><body><h2>รายละเอียดหนังสือ</h2>
+      <a href="bookregister/files/x.pdf">1. หนังสือหลัก</a>
+    </body></html>
+    """
+
+    def setUp(self):
+        sppweb._rule_hint = None          # a learned rule must not leak between tests
+
+    def _session(self):
+        sess = FakeSession()
+        sess.add("GET", self.DETAIL, FakeResponse(text=self.HTML))
+        for url in self.DEAD:
+            sess.add("HEAD", url, FakeResponse(404, content=b"", text=None))
+        sess.add(
+            "HEAD",
+            self.WORKING,
+            FakeResponse(200, content=b"", text=None,
+                         headers={"Content-Type": "application/pdf"}),
+        )
+        return sess
+
+    def test_attachment_probe_uses_head_not_a_body_download(self):
+        sess = self._session()
+        sppweb.fetch_detail(sess, "123")
+        probes = [c for c in sess.calls if c["url"].endswith("x.pdf")]
+        self.assertTrue(probes)
+        self.assertTrue(all(c["method"] == "HEAD" for c in probes),
+                        f"ต้องใช้ HEAD ตรวจลิงก์ ไม่ใช่โหลดตัวไฟล์: {probes}")
+
+    def test_working_path_rule_is_reused_on_the_next_document(self):
+        first = self._session()
+        detail = sppweb.fetch_detail(first, "123")
+        self.assertEqual(detail["main_pdf"], self.WORKING)
+        self.assertEqual(len([c for c in first.calls if c["method"] == "HEAD"]), 3)
+
+        second = self._session()
+        sppweb.fetch_detail(second, "123")
+        self.assertEqual(
+            [c["url"] for c in second.calls if c["method"] == "HEAD"],
+            [self.WORKING],
+            "เอกสารถัดไปต้องยิงแค่ครั้งเดียว เพราะจำกฎที่ใช้ได้ไว้แล้ว")
+
+    def test_listing_two_pages_stays_within_a_small_request_budget(self):
+        landing = list_html("123").replace(
+            "</body>", f'<a href="{sppweb.NEWS_URL}&page=2">2</a></body>')
+        sess = FakeSession()
+        sess.add("GET", sppweb.NEWS_URL, FakeResponse(text=landing))
+        sess.add("GET", f"{sppweb.NEWS_URL}&page=3", FakeResponse(text=EMPTY_LIST_HTML))
+        sess.add("GET", f"{sppweb.NEWS_URL}&page=1", FakeResponse(text=list_html("123")))
+        sess.add("GET", f"{sppweb.NEWS_URL}&page=2", FakeResponse(text=list_html("124")))
+
+        sppweb.list_documents(sess, pages=2)
+
+        # landing + probe + หน้า 1 + หน้า 2 = 4 ครั้ง ไม่ควรเกินนี้
+        self.assertLessEqual(len(sess.calls), 4, [c["url"] for c in sess.calls])
 
 
 class DownloadTests(unittest.TestCase):

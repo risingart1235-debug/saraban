@@ -42,6 +42,16 @@ pinned: false
 
 `SARABAN_LINE_ACCESS_TOKEN` · `SARABAN_LINE_GROUP_ID` · `SARABAN_IMGBB_API_KEY`
 
+### ปรับการยิงเว็บ สพป. (ไม่ตั้งก็ได้)
+
+| ชื่อ | คืออะไร | ค่าเริ่มต้น |
+|---|---|---|
+| `SARABAN_REQUEST_GAP` | เว้นจังหวะระหว่าง request กี่วินาที — กัน rate limit | `0.7` |
+| `SARABAN_USER_AGENT` | User-Agent ที่ใช้ยิง ควรตรงกับ Chrome เวอร์ชันที่ใช้จริง | Chrome รุ่นล่าสุดที่ตั้งไว้ในโค้ด |
+| `SARABAN_MAX_DOWNLOAD_MB` | ขนาดไฟล์แนบสูงสุดที่ยอมโหลด | `80` |
+
+> เช็กว่าเน็ตเส้นที่ใช้อยู่เข้าเว็บ สพป. ได้ไหม: `python check_access.py`
+
 ### ถ้าจะให้เก็บไฟล์ PDF ถาวร
 
 `SARABAN_DRIVE_UPLOAD=on` · `SARABAN_DRIVE_FOLDER=<รหัสโฟลเดอร์>` · `SARABAN_DRIVE_URL=<ลิงก์โฟลเดอร์>`
