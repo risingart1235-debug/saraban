@@ -83,7 +83,17 @@ async function readJSON(r) {
 }
 
 const LBL = { registered: 'รับแล้ว', skipped: 'ข้าม', new: 'ยังไม่ลงรับ' };
-let DATA = null, filter = 'all', day = 'all';
+// จำวันที่/ตัวกรองที่เลือกไว้ เพราะพอลงรับเสร็จจะเด้งกลับมาหน้านี้
+// ถ้ารีเซ็ตเป็น "ทุกวัน" ทุกครั้ง ต้องมาเลือกใหม่ทุกเรื่อง
+// ใช้ sessionStorage — จำเฉพาะแท็บนี้ ปิดแท็บแล้วเริ่มใหม่
+function remembered(k, dflt) {
+  try { return sessionStorage.getItem('news.' + k) || dflt; } catch (e) { return dflt; }
+}
+function remember(k, v) {
+  try { sessionStorage.setItem('news.' + k, v); } catch (e) { }
+}
+
+let DATA = null, filter = remembered('filter', 'all'), day = remembered('day', 'all');
 
 function show(kind, html) {
   const m = $('msg'); m.className = kind; m.innerHTML = html;
@@ -99,7 +109,11 @@ async function load(pages = 3) {
     const d = await readJSON(r);
     if (d.blocked) { blockedNotice(d.error); return; }
     if (!d.ok) throw new Error(d.error || 'โหลดไม่สำเร็จ');
-    DATA = d; render();
+    DATA = d;
+    // วันที่จำไว้อาจหลุดออกจากรายการไปแล้ว (เรื่องเก่าเลื่อนพ้นหน้าที่ดึงมา)
+    // ถ้าไม่เช็ค จะเห็นหน้าว่างเปล่าโดยไม่รู้สาเหตุ
+    if (day !== 'all' && !DATA.days.some(g => g.key === day)) { day = 'all'; remember('day', day); }
+    render();
   } catch (e) {
     $('sum').innerHTML = `<div class="err" style="margin:0">${esc(e.message)}</div>`;
   }
@@ -141,13 +155,13 @@ function render() {
        เรียงตามวันที่เว็บอัปโหลด (วันเวลาที่ส่ง) ใหม่สุดอยู่บน<br>
        กด "ลงรับใหม่" ในเรื่องที่รับแล้ว จะใช้<b>เลขรับเดิม</b> ไม่กินเลขใหม่
      </p>`;
-  for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; render(); };
+  for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; remember('filter', filter); render(); };
 
   $('tabs').innerHTML =
     `<button class="${day === 'all' ? 'on' : ''}" data-d="all">ทุกวัน</button>` +
     DATA.days.map(g => `<button class="${day === g.key ? 'on' : ''}" data-d="${g.key}">
         ${esc(g.label)} <span class="n">(${g.docs.length})</span></button>`).join('');
-  for (const el of $('tabs').querySelectorAll('[data-d]')) el.onclick = () => { day = el.dataset.d; render(); };
+  for (const el of $('tabs').querySelectorAll('[data-d]')) el.onclick = () => { day = el.dataset.d; remember('day', day); render(); };
 
   const days = DATA.days.filter(g => day === 'all' || g.key === day);
   let html = '', shown = 0;

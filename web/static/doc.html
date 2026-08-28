@@ -48,7 +48,7 @@
 </head>
 <body>
 <header class="bar">
-  <a href="/">‹ กลับ</a>
+  <a href="/" id="back">‹ กลับ</a>
   <h1>จัดหน้าเอกสาร</h1>
 </header>
 
@@ -134,6 +134,11 @@ async function readJSON(r) {
 }
 
 const JOB = new URLSearchParams(location.search).get('job');
+
+// กลับไปหน้าที่เข้ามา — โหมด ๑ กลับไปรายการเรื่อง จะได้ลงรับต่อได้เลย
+// ไม่ต้องไล่กดจากหน้าแรกใหม่ทุกเรื่อง
+function backUrl() { return (D && D.book_id) ? '/news' : '/'; }
+function backLabel() { return (D && D.book_id) ? '⬅️ ลงรับเรื่องต่อไป' : 'กลับหน้าแรก'; }
 let D = null, sel = null;          // D = ข้อมูลงาน, sel = กล่องที่เลือกอยู่
 
 function show(kind, html) {
@@ -157,6 +162,7 @@ function build() {
   $('loading').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('savebar').classList.remove('hidden');
+  $('back').href = backUrl();          // ปุ่มมุมซ้ายบนก็กลับที่เดิม
   $('rno').textContent = D.receipt_no;
   $('meta').innerHTML =
     `${esc(D.emoji)} <b>${esc(D.doc_no)}</b><br>เรื่อง: ${esc(D.doc_title)}<br>ลงวันที่ ${esc(D.doc_date)} · จาก ${esc(D.sender)}`;
@@ -363,7 +369,8 @@ $('save').onclick = async () => {
     show('ok', `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>` +
       (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +
       `<a class="btn" href="${d.download}" download style="margin-top:12px;text-decoration:none;text-align:center;line-height:28px">⬇️ ดาวน์โหลด PDF</a>` +
-      `<a class="btn grey" href="/" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">กลับหน้าแรก</a>`);
+      `<a class="btn" href="${backUrl()}" style="margin-top:8px;text-decoration:none;text-align:center;line-height:28px">${backLabel()}</a>` +
+      (D.book_id ? `<a class="btn grey" href="/" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">กลับหน้าแรก</a>` : ''));
   } catch (e) {
     show('err', 'บันทึกไม่สำเร็จ: ' + e.message);
     b.disabled = false; b.textContent = '✅ ยืนยัน & สร้างไฟล์';
@@ -373,7 +380,7 @@ $('save').onclick = async () => {
 $('skip').onclick = async () => {
   if (!confirm('ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนและไม่ส่ง LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก')) return;
   await fetch(`/api/doc/${JOB}/skip`, { method: 'POST' });
-  location.href = '/';
+  location.href = backUrl();
 };
 
 if (!JOB) show('err', 'ไม่ได้ระบุงาน — <a href="/">กลับหน้าแรก</a>');

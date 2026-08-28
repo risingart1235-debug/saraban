@@ -713,9 +713,11 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "")}
     # ส่งเฉพาะที่หน้าจอต้องใช้ (ตัด pdf_path และของภายในออก)
+    # book_id บอกหน้าจอว่าเข้ามาจากทางไหน (มี = โหมด ๑ / ไม่มี = อัปโหลดเอง)
+    # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
     keys = ("status", "receipt_no", "doc_no", "doc_title", "doc_date", "sender",
             "emoji", "recipient", "category", "pages", "stamp", "boxes",
-            "total_pages", "sig_page", "redo_no")
+            "total_pages", "sig_page", "redo_no", "book_id")
     out = {k: job.get(k) for k in keys}
     out["date"] = get_thai_date()
     out["time"] = get_thai_time_rounded()
