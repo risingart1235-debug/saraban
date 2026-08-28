@@ -52,6 +52,16 @@
   #editToggle:active { background:#eef2ff }
   #caret { transition:transform .15s }
   #editToggle.open #caret { transform:rotate(180deg) }
+  /* ตัวอย่างสดในแผงแก้ไข — ของจริงไปโผล่บนภาพเอกสารซึ่งอยู่ใต้แผง
+     ถ้าไม่มีตรงนี้ ต้องเลื่อนจอลงไปดูทุกครั้งที่พิมพ์
+     วางไว้เหนือช่องพิมพ์ เพราะบนมือถือคีย์บอร์ดจะบังครึ่งล่างของจอ */
+  .prev {
+    background:#fff; border:1px dashed #b6bcc6; border-radius:8px;
+    padding:8px; margin-bottom:10px; text-align:center;
+    max-height:260px; overflow:auto;
+  }
+  .prev img { max-width:100%; display:block; margin:0 auto }
+  .prevlab { font-size:12px; color:var(--muted); margin:0 0 4px }
   /* เลือกตรายางอยู่ = ช่องแก้ข้อความยังอยู่ที่เดิม แต่หรี่ไว้ให้รู้ว่าแก้ไม่ได้ตอนนี้ */
   #selBox.dim { opacity:.45 }
   .spin { width:36px;height:36px;border:4px solid #d1d5db;border-top-color:var(--blue);
@@ -94,6 +104,8 @@
     <div id="editPanel" class="hidden">
     <div class="card" id="selBox">
       <h2 id="selTitle">คำเกษียณ</h2>
+      <p class="prevlab">ตัวอย่างที่จะพิมพ์ลงเอกสาร</p>
+      <div class="prev"><img id="boxPrev" alt="ตัวอย่างคำเกษียณ"></div>
       <textarea id="btext"></textarea>
       <div class="row">
         <label>ขนาดตัวอักษร</label>
@@ -113,6 +125,8 @@
 
     <div class="card">
       <h2>🖋 วัน-เวลาบนตรายาง</h2>
+      <p class="prevlab">ตัวอย่างตรายางที่จะประทับ</p>
+      <div class="prev"><img id="stampPrev" alt="ตัวอย่างตรายาง"></div>
       <label for="d">วันที่</label><input id="d" type="text">
       <label for="t">เวลา</label><input id="t" type="text">
       <div class="row">
@@ -195,6 +209,7 @@ function build() {
   }
   $('d').value = D.date; $('t').value = D.time;
   $('ssv').textContent = D.stamp.size_pct + '%';
+  $('stampPrev').src = D.stamp.png;
 
   // หน้าเอกสาร + หน้ากระดาษเปล่าท้ายเล่มไว้วางคำเกษียณ
   const box = $('pages'); box.innerHTML = '';
@@ -312,6 +327,7 @@ function select(id) {
   $('bwv').textContent = b.wrap_pct + '%';
   $('bbg').classList.toggle('on', !!b.bg);
   $('bbd').classList.toggle('on', !!b.border);
+  $('boxPrev').src = b.png;
 }
 
 // ---------- วาดกล่องใหม่หลังแก้ ----------
@@ -329,6 +345,7 @@ function reBox(delay = 400) {
     const d = await readJSON(r);
     Object.assign(b, d);
     b._el.querySelector('img').src = d.png;
+    $('boxPrev').src = d.png;          // ตัวอย่างในแผงต้องเปลี่ยนพร้อมของจริง
     clamp(b); posOverlay(b);
   }, delay);
 }
@@ -376,6 +393,7 @@ async function reStamp() {
   const d = await readJSON(r);
   Object.assign(D.stamp, { png: d.png, w: d.w, h: d.h });
   D.stamp._el.querySelector('img').src = d.png;
+  $('stampPrev').src = d.png;          // ตัวอย่างในแผงต้องเปลี่ยนพร้อมของจริง
   clamp(D.stamp); posOverlay(D.stamp);
 }
 let st = null;
