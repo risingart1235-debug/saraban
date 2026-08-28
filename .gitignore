@@ -35,6 +35,7 @@ _jobs/
 .claude/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 *.bak
 .venv/
 venv/
