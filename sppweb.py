@@ -67,9 +67,20 @@ class DownloadError(SPPWebError):
     """ไฟล์แนบที่ดาวน์โหลดมาไม่ใช่ไฟล์ที่คาดไว้หรือดาวน์โหลดไม่ครบ"""
 
 
+# คำที่พบได้เฉพาะใน "หน้า challenge จริง" เท่านั้น
+#
+# ห้ามใส่คำว่า challenge-platform ลอยๆ กลับเข้ามาเด็ดขาด — Cloudflare แทรก
+# <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"> ลงใน "หน้าปกติ
+# ที่สำเร็จ" ทุกหน้าเพื่อเก็บลายนิ้วมือเบราว์เซอร์ ไม่ใช่สัญญาณว่าถูกบล็อก
+# ถ้าใส่กลับมา ทุก request ที่สำเร็จจะถูกตัดสินว่าโดน Cloudflare ทันที
+# (เคยเป็นบั๊กนี้มาแล้ว: ยิงได้ HTTP 200 ได้หน้าล็อกอินครบ แต่โปรแกรมแจ้งว่าถูกกัน
+#  และอาการจะโผล่เฉพาะบางเน็ต เพราะ Cloudflare แทรกสคริปต์ถี่ตามคะแนนของ IP)
 _CHALLENGE_MARKERS = (
-    "cf-browser-verification", "challenge-platform", "cf_chl_", "cf-chl-",
+    "cf-browser-verification",
+    "/cdn-cgi/challenge-platform/h/",      # path ของหน้า challenge ตัวจริง
+    "cf_chl_opt", "cf-challenge-running",
     "just a moment", "attention required", "checking your browser",
+    "enable javascript and cookies to continue",
 )
 
 
@@ -205,16 +216,33 @@ def _response_text(response) -> str:
         return ""
 
 
+def _has_real_content(text: str) -> bool:
+    """ได้หน้าจริงของเว็บ สพป. กลับมาไหม (หน้าล็อกอิน หรือหน้ารายการหนังสือ)
+
+    หน้า challenge ของ Cloudflare ไม่มีทั้งฟอร์มรหัสผ่านและตารางหนังสือ
+    ถ้าเจออย่างใดอย่างหนึ่ง แปลว่าทะลุถึงเว็บจริงแล้ว ไม่ได้ถูกกัน
+    """
+    if not text:
+        return False
+    try:
+        soup = BeautifulSoup(text, "html.parser")
+    except Exception:
+        return False
+    return _is_login_page(soup) or _is_news_page(soup)
+
+
 def _is_cloudflare_block(response, text: str) -> bool:
     status = int(getattr(response, "status_code", 0) or 0)
     headers = getattr(response, "headers", {}) or {}
-    if status in (403, 429):
-        return True
     if str(headers.get("cf-mitigated", "")).lower() == "challenge":
-        return True
+        return True                      # Cloudflare บอกมาเองตรงๆ
     low = (text or "").lower()
     if any(marker in low for marker in _CHALLENGE_MARKERS):
         return True
+    if status in (403, 429):
+        # 403/429 มาจากตัวเว็บ PHP เองก็ได้ (เช่นเดา path ไฟล์แนบผิด)
+        # ถ้าได้หน้าจริงกลับมาด้วย แปลว่าไม่ได้ถูก Cloudflare กัน
+        return not _has_real_content(text)
     return status == 503 and "cloudflare" in low
 
 
@@ -262,10 +290,12 @@ def _request_html(sess, method: str, url: str, *, context: str,
         raise SiteUnavailableError(f"เชื่อมต่อเว็บ สพป. ไม่สำเร็จระหว่าง{context}: {e}") from e
 
     text = _response_text(response)
-    _raise_for_response(response, text, context)
     soup = BeautifulSoup(text, "html.parser")
+    # ตรวจหน้า login ก่อนดูรหัสสถานะ — เว็บ PHP บางหน้าตอบ 403 พร้อมหน้าล็อกอิน
+    # ซึ่งความหมายจริงคือ "session หมดอายุ" ไม่ใช่ "เว็บพัง"
     if authenticated and _is_login_page(soup):
         raise SessionExpiredError("session เว็บ สพป. หมดอายุหรือยังไม่ได้ล็อกอิน")
+    _raise_for_response(response, text, context)
     return response, soup
 
 

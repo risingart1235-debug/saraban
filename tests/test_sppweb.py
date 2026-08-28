@@ -38,6 +38,19 @@ CLOUDFLARE_HTML = """
 <div id="cf-browser-verification"></div></body></html>
 """
 
+# Cloudflare injects this fingerprinting beacon into ordinary SUCCESSFUL pages.
+# It is not a challenge.  Treating it as one made every request look blocked.
+# Copied from a real HTTP 200 response served by the live site.
+JSD_BEACON = (
+    "<script>(function(){var a=document.createElement('script');"
+    "a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';"
+    "document.getElementsByTagName('head')[0].appendChild(a);})();</script>"
+)
+
+
+def with_beacon(html: str) -> str:
+    return html.replace("</body>", JSD_BEACON + "</body>")
+
 EMPTY_LIST_HTML = """
 <!doctype html><html><body>
   <table id="book-list">
@@ -247,6 +260,49 @@ class ValidationTests(unittest.TestCase):
             "GET", sppweb.NEWS_URL, FakeResponse(200, text=EMPTY_LIST_HTML)
         )
         self.assertTrue(sppweb.is_logged_in(sess))
+
+    def test_jsd_beacon_on_successful_page_is_not_a_block(self):
+        """Cloudflare's fingerprinting script rides along on ordinary 200s.
+
+        Matching it as a challenge marker made every successful request look
+        blocked, and only on networks Cloudflare chose to fingerprint.
+        """
+        sess = FakeSession().add(
+            "GET", sppweb.NEWS_URL, FakeResponse(200, text=with_beacon(list_html()))
+        )
+        self.assertTrue(sppweb.is_logged_in(sess))
+
+    def test_jsd_beacon_on_login_page_reports_logged_out_not_blocked(self):
+        sess = FakeSession().add(
+            "GET", sppweb.NEWS_URL, FakeResponse(200, text=with_beacon(LOGIN_HTML))
+        )
+        self.assertFalse(sppweb.is_logged_in(sess))
+
+    def test_real_challenge_page_is_still_detected(self):
+        sess = FakeSession().add(
+            "GET", sppweb.NEWS_URL, FakeResponse(200, text=CLOUDFLARE_HTML)
+        )
+        with self.assertRaises(sppweb.AccessBlockedError):
+            sppweb.is_logged_in(sess)
+
+    def test_cf_mitigated_header_alone_is_enough_to_detect_a_challenge(self):
+        sess = FakeSession().add(
+            "GET",
+            sppweb.NEWS_URL,
+            FakeResponse(200, text="<html><body>x</body></html>",
+                         headers={"cf-mitigated": "challenge"}),
+        )
+        with self.assertRaises(sppweb.AccessBlockedError):
+            sppweb.is_logged_in(sess)
+
+    def test_403_carrying_a_real_page_is_not_reported_as_cloudflare(self):
+        """The PHP app answers 403 on its own; that is not a WAF block."""
+        sess = FakeSession().add(
+            "GET", sppweb.NEWS_URL, FakeResponse(403, text=list_html())
+        )
+        with self.assertRaises(sppweb.UpstreamResponseError) as caught:
+            sppweb.is_logged_in(sess)
+        self.assertNotIsInstance(caught.exception, sppweb.AccessBlockedError)
 
 
 class LoginTests(unittest.TestCase):
