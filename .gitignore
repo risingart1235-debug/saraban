@@ -8,6 +8,9 @@ secrets/
 service_account*.json
 credentials*.json
 token*.json
+token.txt
+phone_config.json
+spp.txt
 
 # ===== ข้อมูลราชการ / ไฟล์งาน =====
 history_ids.txt

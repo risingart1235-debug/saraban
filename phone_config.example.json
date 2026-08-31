@@ -1,0 +1,6 @@
+{
+  "render_url": "https://saraban.onrender.com",
+  "token": "ใส่โทเคนให้ตรงกับ SARABAN_PHONE_TOKEN บน Render",
+  "spp_user": "ชื่อผู้ใช้เว็บ สพป.",
+  "spp_pass": "รหัสผ่านเว็บ สพป."
+}

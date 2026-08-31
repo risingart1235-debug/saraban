@@ -25,15 +25,20 @@ import os
 import sys
 import tempfile
 
-# ======== ตั้งค่าครั้งเดียว ========
-RENDER_URL  = "https://saraban.onrender.com"    # ที่อยู่ระบบบน Render (แก้ถ้าเปลี่ยน)
-PHONE_TOKEN = ""                                 # โทเคนลับ (ปล่อยว่างได้ถ้าใช้ token.txt — ดูด้านล่าง)
+# ======== ตั้งค่า ========
+# วิธีที่แนะนำ: สร้างไฟล์ phone_config.json ข้างไฟล์นี้ (ไม่ต้องแก้ .py) เช่น
+#   {
+#     "render_url": "https://saraban.onrender.com",
+#     "token": "โทเคนลับให้ตรงกับ SARABAN_PHONE_TOKEN บน Render",
+#     "spp_user": "ชื่อผู้ใช้เว็บ สพป.",
+#     "spp_pass": "รหัสผ่านเว็บ สพป."
+#   }
+# ไฟล์นี้ถูกกันไม่ให้ขึ้น GitHub แล้ว (.gitignore) รหัสจึงอยู่ในเครื่องคุณเครื่องเดียว
+# จะใส่แค่บางคีย์ก็ได้ — ที่ไม่ใส่ (เช่น spp_pass) สคริปต์จะถามตอนรัน
+RENDER_URL  = "https://saraban.onrender.com"    # ค่าเริ่มต้น (phone_config.json ทับได้)
+PHONE_TOKEN = ""                                 # ค่าเริ่มต้น (phone_config.json ทับได้)
 MAX_FETCH   = 20                                 # ดึงมากสุดต่อรอบ (กันเผลอโหลดทีละเยอะ)
 # ==================================
-#
-# โทเคนหาได้ ๓ ทาง (เรียงตามลำดับที่ใช้): ตัวแปร PHONE_TOKEN ข้างบน >
-# ตัวแปรระบบ SARABAN_PHONE_TOKEN > ไฟล์ token.txt ข้างไฟล์นี้
-# วิธีง่ายสุดบนมือถือ (ไม่ต้องแก้ไฟล์ .py):  echo "โทเคนของคุณ" > token.txt
 
 # บังคับจอมือถือให้แสดงภาษาไทยไม่เพี้ยน
 try:
@@ -60,13 +65,33 @@ except ImportError as e:
     die("หา sppweb.py / core.py ไม่เจอ — วางไว้โฟลเดอร์เดียวกับไฟล์นี้ (" + str(e) + ")")
 
 
+def _load_config():
+    """อ่าน phone_config.json ข้างสคริปต์ (ถ้ามี) — ที่เก็บ token/รหัสไว้ในเครื่อง"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "phone_config.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        import json
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        die("อ่าน phone_config.json ไม่ได้ (รูปแบบ JSON ผิด?): " + str(e))
+
+
+CFG = _load_config()
+
+
 def _resolve_token():
-    """หาโทเคนจาก: ตัวแปรในไฟล์ > ตัวแปรระบบ > ไฟล์ token.txt ข้างสคริปต์"""
+    """หาโทเคนจาก: ตัวแปรในไฟล์ > ตัวแปรระบบ > phone_config.json > token.txt"""
     if PHONE_TOKEN.strip():
         return PHONE_TOKEN.strip()
     env = os.environ.get("SARABAN_PHONE_TOKEN", "").strip()
     if env:
         return env
+    if str(CFG.get("token", "")).strip():
+        return str(CFG["token"]).strip()
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "token.txt")
     if os.path.exists(path):
@@ -76,6 +101,7 @@ def _resolve_token():
 
 
 TOKEN = _resolve_token()
+RENDER = (str(CFG.get("render_url", "")).strip() or RENDER_URL).rstrip("/")
 
 
 def _headers():
@@ -85,7 +111,7 @@ def _headers():
 def fetch_history():
     """ถาม Render ว่า book_id ไหนจัดการไปแล้ว จะได้ไม่โหลด/ส่งซ้ำ"""
     try:
-        r = requests.get(RENDER_URL + "/api/phone/history",
+        r = requests.get(RENDER + "/api/phone/history",
                          headers=_headers(), timeout=60)
     except requests.RequestException as e:
         die("ต่อ Render ไม่ได้: " + str(e))
@@ -101,15 +127,17 @@ def submit(pdf_path, meta):
     """ส่ง PDF + ข้อมูลหนังสือเข้า Render สร้างงานรอลงรับ"""
     with open(pdf_path, "rb") as f:
         files = {"file": ("doc.pdf", f, "application/pdf")}
-        r = requests.post(RENDER_URL + "/api/phone/submit",
+        r = requests.post(RENDER + "/api/phone/submit",
                           headers=_headers(), files=files, data=meta, timeout=180)
     r.raise_for_status()
     return r.json()
 
 
 def ask_credentials():
-    user = os.environ.get("SPP_USER") or input("ชื่อผู้ใช้เว็บ สพป.: ").strip()
-    pwd = os.environ.get("SPP_PASS")
+    """รหัส สพป. จาก: ตัวแปรระบบ > phone_config.json > ถามตอนรัน (ถ้าไม่มีที่ไหนเลย)"""
+    user = (os.environ.get("SPP_USER") or str(CFG.get("spp_user", "")).strip()
+            or input("ชื่อผู้ใช้เว็บ สพป.: ").strip())
+    pwd = os.environ.get("SPP_PASS") or str(CFG.get("spp_pass", "")).strip()
     if not pwd:
         try:
             import getpass
@@ -123,7 +151,8 @@ def ask_credentials():
 
 def main():
     if not TOKEN:
-        die("ยังไม่มีโทเคน — สร้างไฟล์ token.txt:  echo \"โทเคนของคุณ\" > token.txt")
+        die("ยังไม่มีโทเคน — ใส่ในไฟล์ phone_config.json (คีย์ \"token\") "
+            "หรือดูตัวอย่างที่ phone_config.example.json")
 
     user, pwd = ask_credentials()
 
