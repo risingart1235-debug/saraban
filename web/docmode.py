@@ -186,6 +186,48 @@ def _enqueue(job: dict, work):
         raise QueueFullError("คิวประมวลผลเต็ม กรุณารอสักครู่แล้วลองใหม่")
 
 
+def _phone_prepare_work(job: dict):
+    """งานอ่าน/เกษียณของเรื่องจากมือถือ — สร้างจากข้อมูลที่เก็บไว้ใน job"""
+    pdf = os.path.join(job["dir"], "doc.pdf")
+
+    def work():
+        try:
+            _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
+            _prepare(job, pdf, doc_no=job["doc_no"], doc_title=job["doc_title"],
+                     doc_date=job["doc_date"], sender=job["sender"],
+                     emoji=job["emoji"], attach=job["attach"],
+                     book_id=job["book_id"], redo_no=job.get("redo_no"))
+        except Exception as e:
+            _fail(job, e)
+
+    return work
+
+
+def prepare_stored(job: dict) -> bool:
+    """เริ่มประมวลผลเรื่องที่เก็บไฟล์ไว้แล้ว — เรียกตอนผู้ใช้แตะเปิดเรื่องนั้น
+
+    แยกจากตอนรับไฟล์ เพราะมือถือส่งมารวดเดียวหลายเรื่อง ถ้าเข้าคิวประมวลผลทันที
+    ที่รับ เครื่องจะไล่ทำทุกเรื่องรวมถึงเรื่องที่ยังไม่มีใครเปิดดู กินแรงเปล่า
+    (โหมด ๑ ก็ทำแบบนี้ — หน้ารายการไม่เรียก AI เรียกตอนกดเปิดเรื่อง)
+
+    คืน False ถ้าเรื่องนี้เริ่มไปแล้ว/ทำเสร็จแล้ว จะได้ไม่ทำซ้ำเวลากดรัวๆ
+    """
+    with _lock:
+        if job.get("status") != "stored":
+            return False
+        # ยึดสถานะทันทีในล็อก กันกดพร้อมกันสองครั้งแล้วเข้าคิวซ้ำ
+        job["status"] = "queued"
+        job["step"] = "อยู่ในคิวรอประมวลผล..."
+    work = _phone_prepare_work(job)
+    try:
+        _work_queue.put_nowait(work)
+    except queue.Full:
+        _set(job, status="error", step="คิวเต็ม",
+             error="เซิร์ฟเวอร์มีงานรอเต็มแล้ว กรุณารอสักครู่แล้วเปิดเรื่องนี้ใหม่")
+        raise QueueFullError("คิวประมวลผลเต็ม กรุณารอสักครู่แล้วลองใหม่")
+    return True
+
+
 def _durable_phone_record(book_id: str):
     """อ่านสถานะถาวร; history รุ่นเก่าที่ไม่มีรายละเอียดก็ถือว่าจัดการแล้ว"""
     import store as _st
@@ -250,7 +292,7 @@ def phone_queue() -> list:
     with _lock:
         for j in _jobs.values():
             if j.get("source") != "phone" or j.get("status") not in (
-                    "uploading", "queued", "analyzing", "ready", "saving",
+                    "uploading", "stored", "queued", "analyzing", "ready", "saving",
                     "skipping", "error", "save_error"):
                 continue
             rows.append((j.get("created"), {
@@ -393,18 +435,9 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
         _fail(job, e)
         raise
 
-    def work():
-        try:
-            _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
-            _prepare(job, pdf,
-                     doc_no=job["doc_no"], doc_title=job["doc_title"],
-                     doc_date=job["doc_date"], sender=job["sender"],
-                     emoji=job["emoji"], attach=job["attach"],
-                     book_id=job["book_id"], redo_no=job.get("redo_no"))
-        except Exception as e:
-            _fail(job, e)
-
-    _enqueue(job, work)
+    # เก็บไฟล์ไว้เฉยๆ ยังไม่เข้าคิวประมวลผล — รอผู้ใช้แตะเปิดเรื่องนี้ก่อน
+    # (ดูเหตุผลที่ prepare_stored)
+    _set(job, status="stored", step="รอเปิดอ่าน")
     return job, True
 
 
@@ -418,18 +451,8 @@ def start_from_phone(user: str, pdf_bytes: bytes, meta: dict,
     try:
         with open(pdf, "wb") as f:
             f.write(pdf_bytes)
-
-        def work():
-            try:
-                _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
-                _prepare(job, pdf, doc_no=job["doc_no"], doc_title=job["doc_title"],
-                         doc_date=job["doc_date"], sender=job["sender"],
-                         emoji=job["emoji"], attach=job["attach"],
-                         book_id=job["book_id"], redo_no=job.get("redo_no"))
-            except Exception as e:
-                _fail(job, e)
-
-        _enqueue(job, work)
+        # เก็บไว้ก่อน ยังไม่ประมวลผล (ดู prepare_stored)
+        _set(job, status="stored", step="รอเปิดอ่าน")
         return job
     except Exception as e:
         _fail(job, e)

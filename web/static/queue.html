@@ -66,8 +66,10 @@ function card(j) {
       <div class="me" style="color:#b91c1c">ประมวลผลไม่สำเร็จ: ${esc(j.error)}</div>
       <div class="me">ดึงใหม่ได้โดยรัน phone_fetch.py อีกครั้ง (ยังไม่กินเลขรับ)</div></div>`;
   }
-  // ยังประมวลผลไม่เสร็จ = ยังกดเข้าไม่ได้ โชว์สปินเนอร์รอ
-  if (j.status !== 'ready') {
+  // stored = เก็บไฟล์ไว้แล้วแต่ยังไม่ได้ให้ AI อ่าน — แตะเปิดแล้วค่อยเริ่มทีละเรื่อง
+  const isNew = j.status === 'stored';
+  // กำลังประมวลผลอยู่ = ยังกดเข้าไม่ได้ โชว์สปินเนอร์รอ
+  if (!isNew && j.status !== 'ready') {
     return `<div class="doc wait">
       <div class="no">${esc(j.doc_no)}</div>
       <div class="ti">${esc(j.doc_title)}</div>
@@ -75,7 +77,7 @@ function card(j) {
   }
   const rno = j.receipt_no ? `เลขรับ ${esc(j.receipt_no)} · ` : '';
   return `<a class="doc" href="/doc?job=${esc(j.job_id)}">
-    <span class="go">ลงรับ ›</span>
+    <span class="go">${isNew ? 'เปิดอ่าน ›' : 'ลงรับ ›'}</span>
     <div class="no">${esc(j.emoji)} ${esc(j.doc_no)}</div>
     <div class="ti">${esc(j.doc_title)}</div>
     <div class="me">${rno}ลงวันที่ ${esc(j.doc_date)} · ${esc(j.sender)} · เข้ามา ${esc(j.time)}</div></a>`;
@@ -94,7 +96,7 @@ async function load() {
         แล้วกดรีเฟรช</span></div>`;
       return;
     }
-    const ready = jobs.filter(j => j.status === 'ready').length;
+    const ready = jobs.filter(j => j.status === 'ready' || j.status === 'stored').length;
     const bad = jobs.filter(j => j.status === 'error').length;
     const wait = jobs.length - ready - bad;
     $('sum').innerHTML = `รอลงรับ <b>${ready}</b> เรื่อง`

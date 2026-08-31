@@ -194,6 +194,18 @@ async function poll() {
   if (r.status === 401) { location.href = '/login'; return; }
   if (!r.ok) { $('loading').classList.add('hidden'); show('err', 'ไม่พบงานนี้ (อาจหมดอายุ)'); return; }
   const d = await readJSON(r);
+  // เรื่องที่มือถือเก็บไว้ ยังไม่ได้อ่าน — เปิดเมื่อไหร่ค่อยเริ่มประมวลผลตอนนั้น
+  // (ไม่เริ่มตอนรับไฟล์ ไม่งั้นเครื่องไล่ทำทุกเรื่องรวมถึงที่ยังไม่มีใครเปิด)
+  if (d.status === 'stored') {
+    $('step').textContent = 'กำลังเริ่มอ่านเอกสาร...';
+    const pr = await fetch(`/api/doc/${JOB}/prepare`, { method: 'POST' }).catch(() => null);
+    if (pr && pr.status === 503) {
+      $('loading').classList.add('hidden');
+      show('err', 'เซิร์ฟเวอร์มีงานรอเต็ม กรุณารอสักครู่แล้วเปิดเรื่องนี้ใหม่');
+      return;
+    }
+    setTimeout(poll, 1200); return;
+  }
   if (d.status === 'analyzing') { $('step').textContent = d.step || '...'; setTimeout(poll, 1500); return; }
   if (d.status === 'error') { $('loading').classList.add('hidden'); show('err', 'เปิดเอกสารไม่สำเร็จ: ' + d.error); return; }
   D = d; build();

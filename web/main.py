@@ -832,6 +832,21 @@ def queue_page(session: str = Cookie(default=None)):
     return FileResponse(os.path.join(STATIC_DIR, "queue.html"))
 
 
+@app.post("/api/doc/{job_id}/prepare")
+def api_doc_prepare(job_id: str, user: str = Depends(current_user)):
+    """เริ่มอ่าน/เกษียณเรื่องที่มือถือเก็บไว้ — เรียกตอนผู้ใช้แตะเปิดเรื่องนั้น
+
+    แยกจากตอนรับไฟล์ เพราะมือถือส่งมารวดเดียวหลายเรื่อง ถ้าเข้าคิวทันทีที่รับ
+    เครื่องจะไล่ประมวลผลทุกเรื่องรวมถึงเรื่องที่ยังไม่มีใครเปิด กินแรงเปล่า
+    """
+    job = _job_or_404(job_id, user)
+    try:
+        docmode.prepare_stored(job)       # เริ่มไปแล้ว/เสร็จแล้ว จะไม่ทำซ้ำ
+    except docmode.QueueFullError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"ok": True, "status": job.get("status")}
+
+
 @app.get("/api/phone/queue")
 def api_phone_queue(request: Request, session: str = Cookie(default=None)):
     """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (โหมด ๔)
@@ -885,6 +900,9 @@ def _job_or_404(job_id: str, user: str):
 @app.get("/api/doc/{job_id}")
 def api_doc_status(job_id: str, user: str = Depends(current_user)):
     job = _job_or_404(job_id, user)
+    if job["status"] == "stored":
+        # เก็บไฟล์ไว้แล้วแต่ยังไม่ได้ประมวลผล — หน้าจอจะสั่ง /prepare ให้เริ่ม
+        return {"status": "stored", "step": job.get("step", "")}
     if job["status"] in ("uploading", "queued", "analyzing", "saving", "skipping"):
         return {"status": "analyzing", "step": job.get("step", "")}
     if job["status"] in ("error", "save_error"):
