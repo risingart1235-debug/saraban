@@ -689,6 +689,64 @@ async def api_doc_open(request: Request, user: str = Depends(current_user)):
     return {"job_id": job["id"]}
 
 
+# ==========================================================
+# โหมด ๑ ผ่านมือถือ — มือถือเป็นคนดึงจาก สพป. (อุปกรณ์ที่เว็บอนุญาต)
+# แล้วส่งไฟล์มาที่นี่ เซิร์ฟเวอร์ทำ AI/ตรายาง/LINE/ทะเบียนต่อ ไม่แตะ สพป.
+#
+# ยืนยันตัวด้วยโทเคนลับ (SARABAN_PHONE_TOKEN) แทนการเอารหัสเว็บไปไว้ในมือถือ
+# ตั้งโทเคนที่ Render → Environment ให้ตรงกับที่ใส่ในสคริปต์มือถือ
+# ==========================================================
+def _check_phone_token(request: Request) -> str:
+    want = (os.environ.get("SARABAN_PHONE_TOKEN") or "").strip()
+    if not want:
+        raise HTTPException(
+            status_code=503,
+            detail="เซิร์ฟเวอร์ยังไม่ได้ตั้ง SARABAN_PHONE_TOKEN — ตั้งที่ Render ก่อนใช้โหมดมือถือ")
+    got = (request.headers.get("X-Phone-Token") or "").strip()
+    if not secrets.compare_digest(got, want):
+        raise HTTPException(status_code=401, detail="โทเคนมือถือไม่ถูกต้อง")
+    return (os.environ.get("SARABAN_PHONE_USER") or "phone").strip()
+
+
+@app.get("/api/phone/history")
+def api_phone_history(request: Request):
+    """คืน book_id ที่จัดการไปแล้ว (รับแล้ว+ข้าม) ให้มือถือกรองก่อนโหลด"""
+    _check_phone_token(request)
+    import store as _s
+    try:
+        done = sorted(_s.get_store().history_ids())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
+    return {"ok": True, "done": done}
+
+
+@app.post("/api/phone/submit")
+async def api_phone_submit(
+    request: Request,
+    file: UploadFile = File(...),
+    book_id: str = Form(""),
+    doc_no: str = Form("-"),
+    doc_title: str = Form("-"),
+    doc_date: str = Form("-"),
+    sender: str = Form("-"),
+    emoji: str = Form("🔵"),
+    attach: str = Form(""),
+):
+    """รับ PDF ที่มือถือโหลดจาก สพป. มาแล้ว สร้างงานให้รอลงรับ (ทบทวนในเบราว์เซอร์)"""
+    user = _check_phone_token(request)
+    data = await file.read()
+    if len(data) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน ๔๐ MB")
+    if not data:
+        raise HTTPException(status_code=400, detail="ไฟล์ว่างเปล่า")
+    meta = {"book_id": book_id, "doc_no": doc_no, "doc_title": doc_title,
+            "doc_date": doc_date, "sender": sender, "emoji": emoji, "attach": attach}
+    job = docmode.start_from_phone(user, data, meta)
+    pub = (os.environ.get("SARABAN_PUBLIC_URL") or "").strip().rstrip("/")
+    return {"ok": True, "job_id": job["id"], "doc_no": doc_no, "doc_title": doc_title,
+            "review_url": (f"{pub}/doc?job={job['id']}" if pub else f"/doc?job={job['id']}")}
+
+
 @app.post("/api/doc/upload")
 async def api_doc_upload(file: UploadFile = File(...), user: str = Depends(current_user)):
     data = await file.read()

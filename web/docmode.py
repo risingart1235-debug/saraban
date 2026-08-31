@@ -156,6 +156,37 @@ def start_from_upload(user: str, filename: str, data: bytes) -> dict:
     return job
 
 
+def start_from_phone(user: str, pdf_bytes: bytes, meta: dict) -> dict:
+    """โหมดที่ ๑ แต่คนไปดึงจาก สพป. คือ *มือถือ* (อุปกรณ์ที่เว็บอนุญาต)
+
+    มือถือล็อกอิน/โหลด PDF เองจากเน็ตที่ผ่านด่านได้ แล้วส่งไฟล์ + ข้อมูล
+    หนังสือมาที่นี่ เซิร์ฟเวอร์รับช่วงทำ AI เกษียณ + ตรายาง + LINE + ทะเบียน ต่อ
+    โดยไม่ต้องแตะเว็บ สพป. เลย — ใช้ _prepare ตัวเดียวกับโหมด ๑ ปกติ
+    """
+    job = create_job(user)
+
+    def work():
+        try:
+            _set(job, step="กำลังรับไฟล์จากมือถือ...")
+            pdf = os.path.join(job["dir"], "doc.pdf")
+            with open(pdf, "wb") as f:
+                f.write(pdf_bytes)
+            _prepare(job, pdf,
+                     doc_no=meta.get("doc_no") or "-",
+                     doc_title=meta.get("doc_title") or "-",
+                     doc_date=meta.get("doc_date") or "-",
+                     sender=meta.get("sender") or "-",
+                     emoji=meta.get("emoji") or "🔵",
+                     attach=meta.get("attach") or "",
+                     book_id=(str(meta["book_id"]) if meta.get("book_id") else None),
+                     redo_no=(meta.get("redo_no") or None))
+        except Exception as e:
+            _fail(job, e)
+
+    threading.Thread(target=work, daemon=True).start()
+    return job
+
+
 def _fail(job, e):
     try:
         with open(core._w("ai_error.log"), "a", encoding="utf-8") as f:

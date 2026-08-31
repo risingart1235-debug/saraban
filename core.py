@@ -11,7 +11,6 @@ import time
 import threading
 import importlib
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
 
 # ==========================================
 # ๐. โหลดไลบรารีหนักแบบ "ใช้เมื่อไหร่ค่อยโหลด" (Lazy Import)
@@ -43,6 +42,11 @@ class _LazyFunc:
 
 requests          = _LazyModule('requests')
 genai             = _LazyModule('google.genai')
+# PIL เป็นโค้ดเนทีฟ — iOS โหลดไม่ได้ ทำเป็น lazy เพื่อให้ sppweb (ที่ import core)
+# รันบนมือถือได้ ส่วนเรนเดอร์ภาพไม่เคยถูกเรียกบนมือถือ จึงไม่โหลด PIL เลย
+Image             = _LazyModule('PIL.Image')
+ImageDraw         = _LazyModule('PIL.ImageDraw')
+ImageFont         = _LazyModule('PIL.ImageFont')
 BeautifulSoup     = _LazyFunc('bs4', 'BeautifulSoup')
 convert_from_path = _LazyFunc('pdf2image', 'convert_from_path')
 PdfMerger         = _LazyFunc('PyPDF2', 'PdfMerger')
@@ -541,7 +545,13 @@ def find_kasien_pos(pil_img, kasien_w, kasien_h, start_y, end_y, left_x, return_
 # --- Cache เพื่อความเร็ว (ใช้ซ้ำแทนการสร้าง/โหลดใหม่ทุกครั้ง) ---
 _FONT_CACHE = {}          # เก็บฟอนต์ตามขนาด ไม่ต้องโหลดไฟล์ซ้ำ
 _TOKENIZE_CACHE = {}      # เก็บผลตัดคำภาษาไทยตามข้อความ ไม่ต้องตัดซ้ำ
-_MEASURE_DRAW = ImageDraw.Draw(Image.new('RGBA', (1, 1)))  # ตัววัดความกว้างตัวเดียวใช้ร่วมกัน
+_MEASURE_DRAW = None      # ตัววัดความกว้าง สร้างตอนใช้ครั้งแรก (ไม่สร้างตอน import เพราะ PIL เป็น lazy)
+
+def _measure_draw():
+    global _MEASURE_DRAW
+    if _MEASURE_DRAW is None:
+        _MEASURE_DRAW = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+    return _MEASURE_DRAW
 
 def get_font(font_size, path="THSarabunNew.ttf"):
     """โหลดฟอนต์แบบ cache — โหลดจากไฟล์แค่ครั้งเดียวต่อขนาด
@@ -567,7 +577,7 @@ def cached_tokenize(line):
     return toks
 
 def get_text_w(txt, font):
-    try: return _MEASURE_DRAW.textlength(txt, font=font)
+    try: return _measure_draw().textlength(txt, font=font)
     except: return font.getsize(txt)[0]
 
 def render_transparent_stamp(receipt_no, percent_size, date_str=None, time_str=None):
