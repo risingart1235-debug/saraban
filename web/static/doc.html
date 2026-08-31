@@ -172,7 +172,7 @@ async function readJSON(r) {
 const JOB = new URLSearchParams(location.search).get('job');
 
 // กลับไปหน้าที่เข้ามา จะได้ลงรับต่อได้เลย ไม่ต้องไล่กดจากหน้าแรกใหม่ทุกเรื่อง
-//   มือถือ (โหมด ๔) -> /queue | โหมด ๑ -> /news | อัปโหลดเอง -> /
+//   มือถือ (โหมด ๒) -> /queue | โหมด ๑ -> /news | อัปโหลดเอง -> /
 function backUrl() {
   if (D && D.source === 'phone') return '/queue';
   return (D && D.book_id) ? '/news' : '/';
