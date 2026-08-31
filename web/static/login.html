@@ -14,24 +14,8 @@
     <p class="tiny">โรงเรียนบ้านโพนทองประชาอุทิศ</p>
   </div>
 
-  <div class="card">
-    <div id="err" class="err hidden"></div>
-    <form id="f">
-      <label for="u">ชื่อผู้ใช้</label>
-      <input id="u" name="username" type="text" autocomplete="username" autocapitalize="none" required>
-      <label for="p">รหัสผ่าน</label>
-      <input id="p" name="password" type="password" autocomplete="current-password" required>
-      <button class="btn" type="submit" style="margin-top:18px">เข้าสู่ระบบ</button>
-    </form>
-  </div>
-
-    <p class="tiny" style="text-align:center; margin-top:16px">
-      ยังไม่มีบัญชี? <a href="/register" style="color:var(--blue); font-weight:700">สมัครสมาชิก</a>
-      <br>(สมัครแล้วรอผู้ดูแลอนุมัติก่อนใช้งาน)
-    </p>
-
   <!-- ขอเลขหนังสือส่ง — ครูขอเองได้โดยไม่ต้องมีบัญชี จึงต้องอยู่หน้านี้ -->
-  <div class="card" style="margin-top:22px; border-color:#f59e0b; background:#fffbeb">
+  <div class="card" style="border-color:#f59e0b; background:#fffbeb">
     <button id="sendToggle" style="display:flex; align-items:center; justify-content:space-between;
         gap:8px; width:100%; min-height:46px; padding:0; background:none; border:0;
         font-family:inherit; font-size:16px; font-weight:700; color:#92400e; cursor:pointer">
@@ -61,6 +45,23 @@
       </div>
     </div>
   </div>
+
+  <div class="card" style="margin-top:22px">
+    <div id="err" class="err hidden"></div>
+    <form id="f">
+      <label for="u">ชื่อผู้ใช้</label>
+      <input id="u" name="username" type="text" autocomplete="username" autocapitalize="none" required>
+      <label for="p">รหัสผ่าน</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button class="btn" type="submit" style="margin-top:18px">เข้าสู่ระบบ</button>
+    </form>
+  </div>
+
+    <p class="tiny" style="text-align:center; margin-top:16px">
+      ยังไม่มีบัญชี? <a href="/register" style="color:var(--blue); font-weight:700">สมัครสมาชิก</a>
+      <br>(สมัครแล้วรอผู้ดูแลอนุมัติก่อนใช้งาน)
+    </p>
+
 </div>
 
 <script>
