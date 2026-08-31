@@ -108,6 +108,15 @@ def _headers():
     return {"X-Phone-Token": TOKEN}
 
 
+def open_in_browser(url):
+    """เปิด URL ใน Safari ผ่านคำสั่ง open ของ a-Shell — คืน True ถ้าสั่งได้"""
+    try:
+        import shlex
+        return os.system("open " + shlex.quote(url)) == 0
+    except Exception:
+        return False
+
+
 def fetch_history():
     """ถาม Render ว่า book_id ไหนจัดการไปแล้ว จะได้ไม่โหลด/ส่งซ้ำ"""
     try:
@@ -200,16 +209,33 @@ def main():
             except OSError:
                 pass
             ok += 1
-            links.append(res.get("review_url", ""))
+            links.append((res.get("review_url", ""), title or bid))
             print("ส่งแล้ว")
         except Exception as e:
             print("ผิดพลาด: %s" % e)
 
     print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
-    if links:
-        print("\nเปิดลิงก์นี้ในเบราว์เซอร์ (ที่ล็อกอินเว็บลงรับไว้) เพื่อตรวจ/ยืนยันแต่ละเรื่อง:")
-        for u in links:
-            print("   " + u)
+    if not links:
+        return
+
+    # เปิด Safari ให้เองทีละเรื่อง (ตั้ง "auto_open": false ใน phone_config.json เพื่อปิด)
+    if CFG.get("auto_open", True):
+        print("\nจะเปิดทีละเรื่องใน Safari ให้ตรวจ/กดลงรับ — สลับกลับมาที่นี่แล้วกด Enter ไปเรื่องต่อไป")
+        for i, (url, title) in enumerate(links, 1):
+            print("\n[%d/%d] %s\n   %s" % (i, len(links), title, url))
+            if not open_in_browser(url):
+                print("   (เปิดเองไม่ได้ — แตะลิงก์ข้างบน หรือก๊อปไปเปิดใน Safari)")
+            if i < len(links):
+                try:
+                    if input("   กด Enter เพื่อเปิดเรื่องถัดไป (q=หยุด): ").strip().lower() == "q":
+                        break
+                except (EOFError, KeyboardInterrupt):
+                    break
+        print("\nครบแล้ว — ตรวจ/กดลงรับให้ครบทุกเรื่องในเบราว์เซอร์นะครับ")
+    else:
+        print("\nเปิดลิงก์เหล่านี้ในเบราว์เซอร์ (ที่ล็อกอินเว็บลงรับไว้) เพื่อตรวจ/ยืนยัน:")
+        for url, title in links:
+            print("   %s  (%s)" % (url, title))
 
 
 if __name__ == "__main__":

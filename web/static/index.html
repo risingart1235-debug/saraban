@@ -109,6 +109,13 @@
     </p>
   </div>
 
+  <a href="/queue" class="card" id="mode4" style="display:block; text-decoration:none; border-color:#0ea5e9; background:#f0f9ff">
+    <h2 style="color:#075985">📲 โหมดที่ ๔ — ลงรับจากมือถือ <span id="qbadge"></span></h2>
+    <p class="hint" style="margin:0">
+      เรื่องที่ดึงจากเว็บ สพป. ด้วยมือถือ (phone_fetch.py) รอตรวจ/ลงรับ — เหมือนโหมด ๑ แต่ทำได้แม้ไม่อยู่หน้าคอม
+    </p>
+  </a>
+
   <div class="card">
     <h2>โหมดที่ ๒ — นำเข้าไฟล์ (AI)</h2>
     <p class="hint">เลือก PDF หรือรูปจากเครื่อง/มือถือ ให้ AI อ่านและเกษียณให้</p>
@@ -178,6 +185,16 @@ fetch('/api/me').then(r => r.json()).then(d => {
       // เมนูปิดอยู่ ถ้าไม่ติดจุดแดงไว้ที่ปุ่มจะไม่มีทางรู้ว่ามีคนรออนุมัติ
       $('dot').classList.remove('hidden');
     }
+  }
+}).catch(() => {});
+
+// จำนวนเรื่องรอลงรับจากมือถือ -> ป้ายบนปุ่มโหมด ๔
+fetch('/api/phone/queue').then(r => r.ok ? r.json() : null).then(d => {
+  if (!d || !d.jobs) return;
+  const ready = d.jobs.filter(j => j.status === 'ready').length;
+  if (ready > 0) {
+    document.getElementById('qbadge').innerHTML =
+      `<span style="background:#0ea5e9;color:#fff;border-radius:999px;padding:2px 10px;font-size:13px">รอ ${ready}</span>`;
   }
 }).catch(() => {});
 

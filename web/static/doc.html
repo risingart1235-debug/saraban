@@ -171,10 +171,16 @@ async function readJSON(r) {
 
 const JOB = new URLSearchParams(location.search).get('job');
 
-// กลับไปหน้าที่เข้ามา — โหมด ๑ กลับไปรายการเรื่อง จะได้ลงรับต่อได้เลย
-// ไม่ต้องไล่กดจากหน้าแรกใหม่ทุกเรื่อง
-function backUrl() { return (D && D.book_id) ? '/news' : '/'; }
-function backLabel() { return (D && D.book_id) ? '⬅️ ลงรับเรื่องต่อไป' : 'กลับหน้าแรก'; }
+// กลับไปหน้าที่เข้ามา จะได้ลงรับต่อได้เลย ไม่ต้องไล่กดจากหน้าแรกใหม่ทุกเรื่อง
+//   มือถือ (โหมด ๔) -> /queue | โหมด ๑ -> /news | อัปโหลดเอง -> /
+function backUrl() {
+  if (D && D.source === 'phone') return '/queue';
+  return (D && D.book_id) ? '/news' : '/';
+}
+function backLabel() {
+  if (D && D.source === 'phone') return '⬅️ กลับไปคิวมือถือ';
+  return (D && D.book_id) ? '⬅️ ลงรับเรื่องต่อไป' : 'กลับหน้าแรก';
+}
 let D = null, sel = null;          // D = ข้อมูลงาน, sel = กล่องที่เลือกอยู่
 
 function show(kind, html) {

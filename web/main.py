@@ -747,6 +747,20 @@ async def api_phone_submit(
             "review_url": (f"{pub}/doc?job={job['id']}" if pub else f"/doc?job={job['id']}")}
 
 
+@app.get("/queue", response_class=HTMLResponse)
+def queue_page(session: str = Cookie(default=None)):
+    with _session_lock:
+        if session not in _sessions:
+            return RedirectResponse("/login", status_code=302)
+    return FileResponse(os.path.join(STATIC_DIR, "queue.html"))
+
+
+@app.get("/api/phone/queue")
+def api_phone_queue(user: str = Depends(current_user)):
+    """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (โหมด ๔)"""
+    return {"ok": True, "jobs": docmode.phone_queue()}
+
+
 @app.post("/api/doc/upload")
 async def api_doc_upload(file: UploadFile = File(...), user: str = Depends(current_user)):
     data = await file.read()
@@ -775,7 +789,7 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
     keys = ("status", "receipt_no", "doc_no", "doc_title", "doc_date", "sender",
             "emoji", "recipient", "category", "pages", "stamp", "boxes",
-            "total_pages", "sig_page", "redo_no", "book_id")
+            "total_pages", "sig_page", "redo_no", "book_id", "source")
     out = {k: job.get(k) for k in keys}
     out["date"] = get_thai_date()
     out["time"] = get_thai_time_rounded()

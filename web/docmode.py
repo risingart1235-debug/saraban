@@ -66,9 +66,37 @@ def _cleanup():
 def get_job(job_id: str, user: str):
     with _lock:
         j = _jobs.get(job_id)
-    if not j or j["user"] != user:
+    if not j:
+        return None
+    # งานจากมือถือเป็น "คิวกลาง" ของโรงเรียน ใครล็อกอินเว็บก็เข้าตรวจได้
+    # (ผ่าน current_user มาแล้ว) ไม่งั้นเจ้าของ token "phone" กับคนรีวิวคนละชื่อ จะเปิดไม่ได้
+    if j["user"] != user and j.get("source") != "phone":
         return None
     return j
+
+
+def phone_queue() -> list:
+    """งานที่มือถือส่งเข้ามาและยังรอลงรับ (ยังไม่ done/skip) — ใหม่สุดอยู่บน"""
+    rows = []
+    with _lock:
+        for j in _jobs.values():
+            if j.get("source") != "phone" or j.get("status") not in ("analyzing", "ready"):
+                continue
+            rows.append((j.get("created"), {
+                "job_id": j["id"],
+                "status": j.get("status"),
+                "step": j.get("step", ""),
+                "receipt_no": j.get("receipt_no", ""),
+                "doc_no": j.get("doc_no", "-"),
+                "doc_title": j.get("doc_title", "-"),
+                "doc_date": j.get("doc_date", "-"),
+                "sender": j.get("sender", "-"),
+                "emoji": j.get("emoji", ""),
+                "book_id": j.get("book_id", ""),
+                "time": j["created"].strftime("%H:%M") if j.get("created") else "",
+            }))
+    rows.sort(key=lambda r: r[0] or datetime.min, reverse=True)
+    return [r[1] for r in rows]
 
 
 # ==========================================================
@@ -164,6 +192,7 @@ def start_from_phone(user: str, pdf_bytes: bytes, meta: dict) -> dict:
     โดยไม่ต้องแตะเว็บ สพป. เลย — ใช้ _prepare ตัวเดียวกับโหมด ๑ ปกติ
     """
     job = create_job(user)
+    job["source"] = "phone"    # ให้หน้า "ลงรับจากมือถือ" (โหมด ๔) หยิบไปแสดงเป็นคิวได้
 
     def work():
         try:

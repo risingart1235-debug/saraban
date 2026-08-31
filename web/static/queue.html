@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ลงรับจากมือถือ</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .doc { display:block; text-decoration:none; color:inherit; border:1px solid var(--line);
+         border-radius:10px; padding:12px; margin-bottom:8px; background:#fff }
+  .doc:active { background:#eef2ff }
+  .doc .no { font-weight:700; margin-bottom:2px }
+  .doc .ti { margin-bottom:4px }
+  .doc .me { font-size:12px; color:var(--muted) }
+  .doc .go { float:right; color:var(--purple); font-weight:700 }
+  .wait { opacity:.7 }
+  .spin { width:18px;height:18px;border:3px solid #d1d5db;border-top-color:var(--blue);
+          border-radius:50%;animation:sp .9s linear infinite;display:inline-block;vertical-align:-3px }
+  @keyframes sp { to { transform:rotate(360deg) } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>📲 ลงรับจากมือถือ</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div class="card" style="margin-bottom:12px">
+    <p class="hint" style="margin:0">
+      เรื่องที่ดึงจากเว็บ สพป. ด้วยมือถือ (phone_fetch.py) แล้วรอตรวจ/ลงรับ
+      แตะเรื่องเพื่อเปิดหน้าจัดเอกสาร — AI เกษียณ + ตรายาง ทำไว้ให้แล้ว
+    </p>
+  </div>
+
+  <div id="sum" class="tiny" style="margin-bottom:8px"></div>
+  <div id="list"></div>
+
+  <button class="btn grey" id="refresh" style="margin-top:12px">🔄 รีเฟรช</button>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+}
+async function readJSON(r) {
+  const t = await r.text();
+  try { return JSON.parse(t); }
+  catch (e) { throw new Error(`เซิร์ฟเวอร์ผิดพลาด (${r.status})`); }
+}
+function show(kind, html) { const m = $('msg'); m.className = kind; m.innerHTML = html; m.classList.remove('hidden'); }
+
+let timer = null;
+
+function card(j) {
+  // ยังประมวลผลไม่เสร็จ = ยังกดเข้าไม่ได้ โชว์สปินเนอร์รอ
+  if (j.status !== 'ready') {
+    return `<div class="doc wait">
+      <div class="no">${esc(j.doc_no)}</div>
+      <div class="ti">${esc(j.doc_title)}</div>
+      <div class="me"><span class="spin"></span> ${esc(j.step || 'กำลังประมวลผล...')}</div></div>`;
+  }
+  const rno = j.receipt_no ? `เลขรับ ${esc(j.receipt_no)} · ` : '';
+  return `<a class="doc" href="/doc?job=${esc(j.job_id)}">
+    <span class="go">ลงรับ ›</span>
+    <div class="no">${esc(j.emoji)} ${esc(j.doc_no)}</div>
+    <div class="ti">${esc(j.doc_title)}</div>
+    <div class="me">${rno}ลงวันที่ ${esc(j.doc_date)} · ${esc(j.sender)} · เข้ามา ${esc(j.time)}</div></a>`;
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/phone/queue');
+    if (r.status === 401) { location.href = '/login'; return; }
+    const d = await readJSON(r);
+    const jobs = d.jobs || [];
+    if (!jobs.length) {
+      $('sum').textContent = '';
+      $('list').innerHTML = `<div class="card" style="text-align:center;color:var(--muted)">
+        ยังไม่มีเรื่องรอลงรับ<br><span class="tiny">รัน <b>python phone_fetch.py</b> ในมือถือก่อน
+        แล้วกดรีเฟรช</span></div>`;
+      return;
+    }
+    const ready = jobs.filter(j => j.status === 'ready').length;
+    const wait = jobs.length - ready;
+    $('sum').innerHTML = `รอลงรับ <b>${ready}</b> เรื่อง` + (wait ? ` · กำลังประมวลผลอีก ${wait}` : '');
+    $('list').innerHTML = jobs.map(card).join('');
+    // ถ้ายังมีเรื่องประมวลผลค้าง รีเฟรชเองทุก 4 วินาที
+    clearTimeout(timer);
+    if (wait) timer = setTimeout(load, 4000);
+  } catch (e) {
+    show('err', 'โหลดไม่สำเร็จ: ' + esc(e.message));
+  }
+}
+
+$('refresh').onclick = load;
+load();
+</script>
+</body>
+</html>
