@@ -8,9 +8,11 @@ import sys
 import io
 import json
 import base64
+import asyncio
 import copy
 import secrets
 import hashlib
+import tempfile
 import threading
 from datetime import datetime
 
@@ -42,6 +44,9 @@ A4_W, A4_H = 1654, 2339
 CM = A4_DPI / 2.54          # ๑ เซนติเมตร = กี่พิกเซล
 
 app = FastAPI(title="ระบบลงรับหนังสือราชการ")
+
+MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+UPLOAD_CHUNK_BYTES = 64 * 1024
 
 
 @app.exception_handler(Exception)
@@ -526,8 +531,7 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
     today = datetime.now().strftime("%Y-%m-%d")
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
-    base = (f.get("doc_no") or "").strip().replace("/", "_").replace(":", "").replace("\\", "_")
-    name = f"เลขรับ_{receipt_no}_{base}.pdf" if base else f"เลขรับ_{receipt_no}.pdf"
+    name = docmode.safe_output_filename(f.get("doc_no", ""), receipt_no)
     path = os.path.join(folder, name)
     # resolution ต้องเท่า A4_DPI หน้ากระดาษใน PDF จะได้เป็น A4 พอดี
     page.save(path, "PDF", resolution=float(A4_DPI))
@@ -556,9 +560,8 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
 @app.get("/api/stamp/download/{day}/{name}")
 def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
     """ดาวน์โหลด PDF ที่เพิ่งสร้าง (กันเรียกไฟล์นอกโฟลเดอร์ด้วยการเช็ก path)"""
-    folder = os.path.abspath(os.path.join(core.OUTPUT_ROOT, day))
-    path = os.path.abspath(os.path.join(folder, name))
-    if not path.startswith(os.path.abspath(core.OUTPUT_ROOT)) or not os.path.exists(path):
+    path = docmode.contained_path(core.OUTPUT_ROOT, day, name)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="ไม่พบไฟล์")
     return FileResponse(path, media_type="application/pdf", filename=name)
 
@@ -568,7 +571,6 @@ def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
 # ==========================================================
 import sppweb
 from web import docmode
-from fastapi import UploadFile, File
 
 _spp_session_state = None       # cookie ทุกตัว + User-Agent; ไม่แชร์ requests.Session ข้ามเธรด
 _spp_session_lock = threading.Lock()
@@ -684,8 +686,11 @@ async def api_spp_skip(request: Request, user: str = Depends(current_user)):
 @app.post("/api/doc/open")
 async def api_doc_open(request: Request, user: str = Depends(current_user)):
     d = await request.json()
-    job = docmode.start_from_spp(user, str(d.get("book_id", "")), _spp_session_snapshot(),
-                                 redo_no=(d.get("redo_no") or None))
+    try:
+        job = docmode.start_from_spp(user, str(d.get("book_id", "")), _spp_session_snapshot(),
+                                     redo_no=(d.get("redo_no") or None))
+    except docmode.QueueFullError as e:
+        raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "30"})
     return {"job_id": job["id"]}
 
 
@@ -708,6 +713,63 @@ def _check_phone_token(request: Request) -> str:
     return (os.environ.get("SARABAN_PHONE_USER") or "phone").strip()
 
 
+@app.middleware("http")
+async def _phone_upload_guard(request: Request, call_next):
+    """ปฏิเสธ token/ขนาดที่ผิดก่อน Starlette เริ่มแยก multipart เท่าที่ header ทำได้"""
+    if request.url.path == "/api/phone/submit" and request.method == "POST":
+        try:
+            _check_phone_token(request)
+        except HTTPException as e:
+            return JSONResponse({"ok": False, "detail": e.detail}, status_code=e.status_code)
+        raw_length = request.headers.get("content-length", "")
+        if raw_length:
+            try:
+                # multipart มี header/metadata เพิ่มจากตัว PDF จึงเผื่อ ๑ MB;
+                # ตัว stream ด้านล่างยังบังคับเพดานไฟล์จริง ๔๐ MB ซ้ำอีกชั้น
+                if int(raw_length) > MAX_UPLOAD_BYTES + 1024 * 1024:
+                    return JSONResponse({"ok": False, "detail": "ไฟล์ใหญ่เกิน ๔๐ MB"},
+                                        status_code=413)
+            except ValueError:
+                return JSONResponse({"ok": False, "detail": "Content-Length ไม่ถูกต้อง"},
+                                    status_code=400)
+    return await call_next(request)
+
+
+async def _stream_upload(upload, path: str, allowed: str = "pdf") -> int:
+    """stream ลงดิสก์ทีละก้อน พร้อมเพดานจริงและตรวจ magic bytes"""
+    total = 0
+    prefix = b""
+    with open(path, "wb") as out:
+        while True:
+            chunk = await upload.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน ๔๐ MB")
+            if len(prefix) < 8:
+                prefix = (prefix + chunk)[:8]
+            out.write(chunk)
+    if total == 0:
+        raise HTTPException(status_code=400, detail="ไฟล์ว่างเปล่า")
+    is_pdf = prefix.startswith(b"%PDF-")
+    is_jpeg = prefix.startswith(b"\xff\xd8\xff")
+    is_png = prefix.startswith(b"\x89PNG\r\n\x1a\n")
+    if allowed == "pdf" and not is_pdf:
+        raise HTTPException(status_code=400, detail="รับเฉพาะไฟล์ PDF ที่ถูกต้อง")
+    if allowed == "document" and not (is_pdf or is_jpeg or is_png):
+        raise HTTPException(status_code=400, detail="รับเฉพาะ PDF, JPG หรือ PNG ที่ถูกต้อง")
+    return total
+
+
+def _new_incoming_path() -> str:
+    folder = core._w("_incoming")
+    os.makedirs(folder, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="upload_", suffix=".part", dir=folder)
+    os.close(fd)
+    return path
+
+
 @app.get("/api/phone/history")
 def api_phone_history(request: Request):
     """คืน book_id ที่จัดการไปแล้ว (รับแล้ว+ข้าม) ให้มือถือกรองก่อนโหลด"""
@@ -721,29 +783,44 @@ def api_phone_history(request: Request):
 
 
 @app.post("/api/phone/submit")
-async def api_phone_submit(
-    request: Request,
-    file: UploadFile = File(...),
-    book_id: str = Form(""),
-    doc_no: str = Form("-"),
-    doc_title: str = Form("-"),
-    doc_date: str = Form("-"),
-    sender: str = Form("-"),
-    emoji: str = Form("🔵"),
-    attach: str = Form(""),
-):
+async def api_phone_submit(request: Request):
     """รับ PDF ที่มือถือโหลดจาก สพป. มาแล้ว สร้างงานให้รอลงรับ (ทบทวนในเบราว์เซอร์)"""
     user = _check_phone_token(request)
-    data = await file.read()
-    if len(data) > 40 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน ๔๐ MB")
-    if not data:
-        raise HTTPException(status_code=400, detail="ไฟล์ว่างเปล่า")
-    meta = {"book_id": book_id, "doc_no": doc_no, "doc_title": doc_title,
-            "doc_date": doc_date, "sender": sender, "emoji": emoji, "attach": attach}
-    job = docmode.start_from_phone(user, data, meta)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not callable(getattr(upload, "read", None)):
+        raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์ PDF")
+    meta = {key: form.get(key, default) for key, default in (
+        ("book_id", ""), ("doc_no", "-"), ("doc_title", "-"),
+        ("doc_date", "-"), ("sender", "-"), ("emoji", "🔵"), ("attach", ""),
+        ("redo_no", ""))}
+    retry_failed = str(form.get("retry_failed", "")).strip().lower() in ("1", "true", "yes")
+    incoming = _new_incoming_path()
+    try:
+        await _stream_upload(upload, incoming, "pdf")
+        job, created = docmode.start_from_phone_path(
+            user, incoming, meta, retry_failed=retry_failed)
+    except docmode.AlreadyHandledError as e:
+        raise HTTPException(status_code=409, detail={
+            "message": str(e), "status": e.status, "receipt_no": e.receipt_no})
+    except docmode.QueueFullError as e:
+        raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "30"})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            await upload.close()
+        except Exception:
+            pass
+        if os.path.exists(incoming):
+            try:
+                os.remove(incoming)
+            except OSError:
+                pass
     pub = (os.environ.get("SARABAN_PUBLIC_URL") or "").strip().rstrip("/")
-    return {"ok": True, "job_id": job["id"], "doc_no": doc_no, "doc_title": doc_title,
+    return {"ok": True, "created": created, "status": job.get("status"),
+            "job_id": job["id"], "doc_no": job.get("doc_no", "-"),
+            "doc_title": job.get("doc_title", "-"),
             "review_url": (f"{pub}/doc?job={job['id']}" if pub else f"/doc?job={job['id']}")}
 
 
@@ -770,11 +847,31 @@ def api_phone_queue(request: Request, session: str = Cookie(default=None)):
 
 
 @app.post("/api/doc/upload")
-async def api_doc_upload(file: UploadFile = File(...), user: str = Depends(current_user)):
-    data = await file.read()
-    if len(data) > 40 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน ๔๐ MB")
-    job = docmode.start_from_upload(user, file.filename or "upload.pdf", data)
+async def api_doc_upload(request: Request):
+    # ตรวจ session ก่อน parse multipart เพื่อไม่ให้ผู้ไม่ล็อกอินใช้ RAM/ดิสก์รับไฟล์
+    user = current_user(request.cookies.get("session"))
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not callable(getattr(upload, "read", None)):
+        raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์")
+    incoming = _new_incoming_path()
+    try:
+        await _stream_upload(upload, incoming, "document")
+        try:
+            job = docmode.start_from_upload_path(
+                user, getattr(upload, "filename", "") or "upload.pdf", incoming)
+        except docmode.QueueFullError as e:
+            raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "30"})
+    finally:
+        try:
+            await upload.close()
+        except Exception:
+            pass
+        if os.path.exists(incoming):
+            try:
+                os.remove(incoming)
+            except OSError:
+                pass
     return {"job_id": job["id"]}
 
 
@@ -788,10 +885,11 @@ def _job_or_404(job_id: str, user: str):
 @app.get("/api/doc/{job_id}")
 def api_doc_status(job_id: str, user: str = Depends(current_user)):
     job = _job_or_404(job_id, user)
-    if job["status"] == "analyzing":
+    if job["status"] in ("uploading", "queued", "analyzing", "saving", "skipping"):
         return {"status": "analyzing", "step": job.get("step", "")}
-    if job["status"] == "error":
-        return {"status": "error", "error": job.get("error", "")}
+    if job["status"] in ("error", "save_error"):
+        return {"status": "error", "error": job.get("error", ""),
+                "receipt_no": job.get("reserved_receipt", "")}
     # ส่งเฉพาะที่หน้าจอต้องใช้ (ตัด pdf_path และของภายในออก)
     # book_id บอกหน้าจอว่าเข้ามาจากทางไหน (มี = โหมด ๑ / ไม่มี = อัปโหลดเอง)
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
@@ -826,21 +924,27 @@ async def api_doc_stamp(job_id: str, request: Request, user: str = Depends(curre
 @app.post("/api/doc/{job_id}/save")
 async def api_doc_save(job_id: str, request: Request, user: str = Depends(current_user)):
     job = _job_or_404(job_id, user)
-    if job.get("status") == "done":
-        raise HTTPException(status_code=409, detail="งานนี้บันทึกไปแล้ว")
+    payload = await request.json()
 
     def reserve(**fields):
         """จองเลขรับ + เขียนแถวทะเบียนในจังหวะเดียว กันเลขซ้ำเวลาหลายคนกดพร้อมกัน"""
         with _receipt_lock:
             return core.register_document(**fields)
 
-    return docmode.finalize(job, await request.json(), reserve)
+    try:
+        # แปลง/รวม PDF, อัปโหลด Drive และส่ง LINE เป็นงาน blocking ทั้งหมด
+        # ต้องออกจาก async event loop เพื่อให้ request อื่นยังตอบได้
+        return await asyncio.to_thread(docmode.finalize, job, payload, reserve)
+    except docmode.JobStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.post("/api/doc/{job_id}/skip")
 def api_doc_skip(job_id: str, user: str = Depends(current_user)):
-    docmode.skip(_job_or_404(job_id, user))
-    return {"ok": True}
+    try:
+        return docmode.skip(_job_or_404(job_id, user))
+    except docmode.JobStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # ==========================================================
@@ -906,9 +1010,8 @@ def api_fix_history(q: str = "", user: str = Depends(current_user)):
 
 @app.get("/api/doc/download/{day}/{name}")
 def api_doc_download(day: str, name: str, user: str = Depends(current_user)):
-    folder = os.path.abspath(os.path.join(core.OUTPUT_ROOT, day))
-    path = os.path.abspath(os.path.join(folder, name))
-    if not path.startswith(os.path.abspath(core.OUTPUT_ROOT)) or not os.path.exists(path):
+    path = docmode.contained_path(core.OUTPUT_ROOT, day, name)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="ไม่พบไฟล์")
     return FileResponse(path, media_type="application/pdf", filename=name)
 

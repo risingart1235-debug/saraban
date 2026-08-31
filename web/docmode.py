@@ -9,9 +9,11 @@ import os
 import io
 import re
 import base64
+import queue
 import shutil
 import threading
 import traceback
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 
@@ -36,6 +38,58 @@ _lock = threading.Lock()
 JOB_TTL = timedelta(hours=3)
 
 
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# งาน OCR/AI ใช้ RAM และ CPU สูง จึงต้องมีทั้งจำนวน worker และคิวที่มีขอบเขต
+# ปรับได้บน Render โดยไม่ต้องแก้โค้ด แต่ค่าเริ่มต้นตั้งใจให้เครื่องเล็กทำพร้อมกันแค่ ๒ งาน
+JOB_WORKERS = _env_int("SARABAN_JOB_WORKERS", 2, 1, 8)
+JOB_QUEUE_LIMIT = _env_int("SARABAN_JOB_QUEUE_LIMIT", 20, 1, 100)
+_work_queue = queue.Queue(maxsize=JOB_QUEUE_LIMIT)
+
+
+class QueueFullError(RuntimeError):
+    pass
+
+
+class AlreadyHandledError(RuntimeError):
+    def __init__(self, status: str, receipt_no: str = ""):
+        self.status = status
+        self.receipt_no = str(receipt_no or "")
+        label = "ลงรับแล้ว" if status == "registered" else "ข้ามแล้ว"
+        super().__init__(f"หนังสือเรื่องนี้{label}" +
+                         (f" (เลขรับ {self.receipt_no})" if self.receipt_no else ""))
+
+
+class JobStateError(RuntimeError):
+    def __init__(self, message: str, *, status: str = "", result=None):
+        super().__init__(message)
+        self.status = status
+        self.result = result
+
+
+def _worker_loop():
+    while True:
+        work = _work_queue.get()
+        try:
+            work()
+        except Exception:
+            # work แต่ละตัวต้องเก็บข้อผิดพลาดไว้ใน job ของตนเองอยู่แล้ว
+            # guard นี้กัน worker ตายถ้ามี bug ในตัวจัดการ error เอง
+            traceback.print_exc()
+        finally:
+            _work_queue.task_done()
+
+
+for _worker_no in range(JOB_WORKERS):
+    threading.Thread(target=_worker_loop, name=f"saraban-worker-{_worker_no + 1}",
+                     daemon=True).start()
+
+
 # ==========================================================
 # เครื่องมือช่วย
 # ==========================================================
@@ -54,6 +108,54 @@ def _render_pdf_page(pdf_path: str, page_no: int, dpi: int = DPI):
         return Image.frombytes("RGB", (px.width, px.height), px.samples), len(doc)
 
 
+def _clean_text(value, default: str = "", limit: int = 500) -> str:
+    """เก็บ metadata ไว้แสดงผลได้ แต่ตัด control character และจำกัดขนาด"""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = " ".join("".join(ch if (ch >= " " and ch != "\x7f") else " "
+                            for ch in text).split())
+    return (text[:limit] or default)
+
+
+def sanitize_phone_meta(meta: dict) -> dict:
+    raw_id = _clean_text(meta.get("book_id"), "", 128)
+    book_id = re.sub(r"[^0-9A-Za-z_.-]", "", raw_id)
+    if not book_id:
+        raise ValueError("ไม่ได้ระบุ book_id ที่ถูกต้อง")
+    return {
+        "book_id": book_id,
+        "doc_no": _clean_text(meta.get("doc_no"), "-", 200),
+        "doc_title": _clean_text(meta.get("doc_title"), "-", 500),
+        "doc_date": _clean_text(meta.get("doc_date"), "-", 100),
+        "sender": _clean_text(meta.get("sender"), "-", 300),
+        "emoji": _clean_text(meta.get("emoji"), "🔵", 16),
+        "attach": _clean_text(meta.get("attach"), "", 4000),
+        "redo_no": _clean_text(meta.get("redo_no"), "", 50) or None,
+    }
+
+
+def safe_output_filename(doc_no: str, receipt_no: str) -> str:
+    """ชื่อไฟล์ที่ปลอดภัยทั้ง Windows/Linux และมีเลขรับเพื่อไม่เขียนทับกัน"""
+    receipt = re.sub(r"[^0-9A-Za-zก-๙_.-]", "_",
+                     unicodedata.normalize("NFKC", str(receipt_no or "")))[:40] or "ไม่ทราบเลข"
+    stem = unicodedata.normalize("NFKC", str(doc_no or ""))
+    stem = "".join("_" if ch in '<>:"/\\|?*' or ord(ch) < 32 else ch for ch in stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" ._")
+    if not stem or stem == "-":
+        stem = "เอกสารนำเข้า"
+    stem = stem[:100].rstrip(" ._") or "เอกสารนำเข้า"
+    return f"เลขรับ_{receipt}_{stem}.pdf"
+
+
+def contained_path(root: str, *parts: str):
+    """คืน absolute path เมื่ออยู่ใต้ root จริง; คืน None เมื่อพยายามไต่โฟลเดอร์"""
+    root_abs = os.path.abspath(root)
+    candidate = os.path.abspath(os.path.join(root_abs, *[str(p) for p in parts]))
+    try:
+        return candidate if os.path.commonpath((root_abs, candidate)) == root_abs else None
+    except ValueError:  # คนละ drive บน Windows
+        return None
+
+
 def _cleanup():
     """ลบงานเก่าที่ค้างไว้ กันหน่วยความจำบวม"""
     now = datetime.now()
@@ -61,6 +163,69 @@ def _cleanup():
         for jid in [j for j, v in _jobs.items() if now - v["created"] > JOB_TTL]:
             v = _jobs.pop(jid)
             shutil.rmtree(v.get("dir", ""), ignore_errors=True)
+
+
+def _new_job_locked(user: str, **initial) -> dict:
+    jid = uuid.uuid4().hex
+    d = os.path.join(core._w("_jobs"), jid)
+    os.makedirs(d, exist_ok=True)
+    job = {"id": jid, "user": user, "created": datetime.now(),
+           "status": "analyzing", "step": "กำลังเตรียมเอกสาร...", "dir": d}
+    job.update(initial)
+    _jobs[jid] = job
+    return job
+
+
+def _enqueue(job: dict, work):
+    _set(job, status="queued", step="อยู่ในคิวรอประมวลผล...")
+    try:
+        _work_queue.put_nowait(work)
+    except queue.Full:
+        _set(job, status="error", step="คิวเต็ม", error=(
+            "เซิร์ฟเวอร์มีงานรอเต็มแล้ว กรุณารอสักครู่แล้วส่งใหม่โดยเลือก retry"))
+        raise QueueFullError("คิวประมวลผลเต็ม กรุณารอสักครู่แล้วลองใหม่")
+
+
+def _durable_phone_record(book_id: str):
+    """อ่านสถานะถาวร; history รุ่นเก่าที่ไม่มีรายละเอียดก็ถือว่าจัดการแล้ว"""
+    import store as _st
+    st = _st.get_store()
+    records = st.doc_records()
+    rec = records.get(str(book_id), {})
+    if rec.get("status") in ("registered", "skipped"):
+        return rec
+    if str(book_id) in st.history_ids():
+        return {"status": "registered", "receipt_no": rec.get("receipt_no", "")}
+    return None
+
+
+def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
+    """อะตอมมิกต่อโปรเซส: คืน (job, created) และไม่สร้างงานซ้ำจาก book_id เดียวกัน"""
+    clean = sanitize_phone_meta(meta)
+    durable = _durable_phone_record(clean["book_id"])
+    with _lock:
+        matching = [j for j in _jobs.values()
+                    if j.get("source") == "phone" and j.get("book_id") == clean["book_id"]]
+        matching.sort(key=lambda j: j.get("created") or datetime.min, reverse=True)
+        for existing in matching:
+            status = existing.get("status", "")
+            if status in ("done", "skipped"):
+                raise AlreadyHandledError(
+                    "registered" if status == "done" else "skipped",
+                    existing.get("reserved_receipt") or existing.get("receipt_no", ""))
+            if status == "error" and retry_failed:
+                existing.update(clean)
+                existing.update(user=user, status="uploading", error="",
+                                step="กำลังรับไฟล์จากมือถือ...")
+                return existing, True
+            # uploading/queued/analyzing/ready/saving/save_error/error ล้วนต้องใช้ job เดิม
+            return existing, False
+        if durable:
+            raise AlreadyHandledError(durable.get("status", "registered"),
+                                      durable.get("receipt_no", ""))
+        job = _new_job_locked(user, source="phone", status="uploading",
+                              step="กำลังรับไฟล์จากมือถือ...", **clean)
+        return job, True
 
 
 def get_job(job_id: str, user: str):
@@ -84,7 +249,9 @@ def phone_queue() -> list:
     rows = []
     with _lock:
         for j in _jobs.values():
-            if j.get("source") != "phone" or j.get("status") not in ("analyzing", "ready", "error"):
+            if j.get("source") != "phone" or j.get("status") not in (
+                    "uploading", "queued", "analyzing", "ready", "saving",
+                    "skipping", "error", "save_error"):
                 continue
             rows.append((j.get("created"), {
                 "job_id": j["id"],
@@ -109,14 +276,8 @@ def phone_queue() -> list:
 # ==========================================================
 def create_job(user: str) -> dict:
     _cleanup()
-    jid = uuid.uuid4().hex
-    d = os.path.join(core._w("_jobs"), jid)
-    os.makedirs(d, exist_ok=True)
-    job = {"id": jid, "user": user, "created": datetime.now(),
-           "status": "analyzing", "step": "กำลังเตรียมเอกสาร...", "dir": d}
     with _lock:
-        _jobs[jid] = job
-    return job
+        return _new_job_locked(user)
 
 
 def _set(job, **kw):
@@ -133,7 +294,7 @@ def start_from_spp(user: str, book_id: str, session_state=None, redo_no: str = N
 
     def work():
         try:
-            _set(job, step="กำลังเข้าสู่ระบบเว็บ สพป. ...")
+            _set(job, status="analyzing", step="กำลังเข้าสู่ระบบเว็บ สพป. ...")
             # session_state อาจเป็น PHPSESSID แบบเก่า หรือสถานะเต็มที่มี cookie
             # ทุกตัวกับ User-Agent; new_session สร้างตัวใหม่จึงไม่แชร์ Session ข้ามเธรด
             sess = sppweb.new_session(session_state) if session_state else None
@@ -161,7 +322,7 @@ def start_from_spp(user: str, book_id: str, session_state=None, redo_no: str = N
         except Exception as e:
             _fail(job, e)
 
-    threading.Thread(target=work, daemon=True).start()
+    _enqueue(job, work)
     return job
 
 
@@ -171,7 +332,7 @@ def start_from_upload(user: str, filename: str, data: bytes) -> dict:
 
     def work():
         try:
-            _set(job, step="กำลังเตรียมไฟล์...")
+            _set(job, status="analyzing", step="กำลังเตรียมไฟล์...")
             pdf = os.path.join(job["dir"], "doc.pdf")
             ext = filename.lower().rsplit(".", 1)[-1]
             if ext in ("jpg", "jpeg", "png"):
@@ -185,40 +346,94 @@ def start_from_upload(user: str, filename: str, data: bytes) -> dict:
         except Exception as e:
             _fail(job, e)
 
-    threading.Thread(target=work, daemon=True).start()
+    _enqueue(job, work)
     return job
 
 
-def start_from_phone(user: str, pdf_bytes: bytes, meta: dict) -> dict:
+def start_from_upload_path(user: str, filename: str, source_path: str) -> dict:
+    """รับ ownership ของไฟล์ที่ API stream ลงดิสก์แล้ว จึงไม่ต้องเก็บทั้งไฟล์ใน RAM"""
+    job = create_job(user)
+    pdf = os.path.join(job["dir"], "doc.pdf")
+    os.replace(source_path, pdf)
+
+    def work():
+        try:
+            _set(job, status="analyzing", step="กำลังเตรียมไฟล์...")
+            ext = (filename or "").lower().rsplit(".", 1)[-1]
+            if ext in ("jpg", "jpeg", "png"):
+                converted = os.path.join(job["dir"], "converted.pdf")
+                Image.open(pdf).convert("RGB").save(converted, "PDF", resolution=float(DPI))
+                os.replace(converted, pdf)
+            _prepare(job, pdf, doc_no="-", doc_title="-", doc_date="-", sender="-",
+                     emoji="🔵", attach="📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)",
+                     book_id=None, redo_no=None)
+        except Exception as e:
+            _fail(job, e)
+
+    _enqueue(job, work)
+    return job
+
+
+def start_from_phone_path(user: str, source_path: str, meta: dict,
+                          retry_failed: bool = False):
     """โหมดที่ ๑ แต่คนไปดึงจาก สพป. คือ *มือถือ* (อุปกรณ์ที่เว็บอนุญาต)
 
     มือถือล็อกอิน/โหลด PDF เองจากเน็ตที่ผ่านด่านได้ แล้วส่งไฟล์ + ข้อมูล
     หนังสือมาที่นี่ เซิร์ฟเวอร์รับช่วงทำ AI เกษียณ + ตรายาง + LINE + ทะเบียน ต่อ
     โดยไม่ต้องแตะเว็บ สพป. เลย — ใช้ _prepare ตัวเดียวกับโหมด ๑ ปกติ
     """
-    job = create_job(user)
-    job["source"] = "phone"    # ให้หน้า "ลงรับจากมือถือ" (โหมด ๔) หยิบไปแสดงเป็นคิวได้
+    job, created = claim_phone_job(user, meta, retry_failed=retry_failed)
+    if not created:
+        return job, False
+
+    pdf = os.path.join(job["dir"], "doc.pdf")
+    try:
+        os.replace(source_path, pdf)
+    except Exception as e:
+        _fail(job, e)
+        raise
 
     def work():
         try:
-            _set(job, step="กำลังรับไฟล์จากมือถือ...")
-            pdf = os.path.join(job["dir"], "doc.pdf")
-            with open(pdf, "wb") as f:
-                f.write(pdf_bytes)
+            _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
             _prepare(job, pdf,
-                     doc_no=meta.get("doc_no") or "-",
-                     doc_title=meta.get("doc_title") or "-",
-                     doc_date=meta.get("doc_date") or "-",
-                     sender=meta.get("sender") or "-",
-                     emoji=meta.get("emoji") or "🔵",
-                     attach=meta.get("attach") or "",
-                     book_id=(str(meta["book_id"]) if meta.get("book_id") else None),
-                     redo_no=(meta.get("redo_no") or None))
+                     doc_no=job["doc_no"], doc_title=job["doc_title"],
+                     doc_date=job["doc_date"], sender=job["sender"],
+                     emoji=job["emoji"], attach=job["attach"],
+                     book_id=job["book_id"], redo_no=job.get("redo_no"))
         except Exception as e:
             _fail(job, e)
 
-    threading.Thread(target=work, daemon=True).start()
-    return job
+    _enqueue(job, work)
+    return job, True
+
+
+def start_from_phone(user: str, pdf_bytes: bytes, meta: dict,
+                     retry_failed: bool = False) -> dict:
+    """compatibility wrapper สำหรับผู้เรียกเดิม; API ใหม่ใช้ start_from_phone_path"""
+    job, created = claim_phone_job(user, meta, retry_failed=retry_failed)
+    if not created:
+        return job
+    pdf = os.path.join(job["dir"], "doc.pdf")
+    try:
+        with open(pdf, "wb") as f:
+            f.write(pdf_bytes)
+
+        def work():
+            try:
+                _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
+                _prepare(job, pdf, doc_no=job["doc_no"], doc_title=job["doc_title"],
+                         doc_date=job["doc_date"], sender=job["sender"],
+                         emoji=job["emoji"], attach=job["attach"],
+                         book_id=job["book_id"], redo_no=job.get("redo_no"))
+            except Exception as e:
+                _fail(job, e)
+
+        _enqueue(job, work)
+        return job
+    except Exception as e:
+        _fail(job, e)
+        raise
 
 
 def _fail(job, e):
@@ -323,7 +538,63 @@ def render_stamp(job, size_pct: int, date_str: str, time_str: str) -> dict:
 # ==========================================================
 # บันทึก
 # ==========================================================
+def _claim_save(job: dict):
+    """เปลี่ยน ready/save_error -> saving ในล็อกเดียว กันการกดพร้อมกันสองหน้าจอ"""
+    with _lock:
+        status = job.get("status", "")
+        if status == "done":
+            return job.get("result") or {"ok": True,
+                                         "receipt_no": job.get("reserved_receipt") or
+                                                       job.get("receipt_no", "")}
+        if status == "saving":
+            raise JobStateError("งานนี้กำลังบันทึกอยู่", status=status)
+        if status in ("skipping", "skipped"):
+            raise JobStateError("งานนี้กำลังถูกข้ามหรือข้ามไปแล้ว", status=status)
+        if status not in ("ready", "save_error"):
+            raise JobStateError("งานนี้ยังไม่พร้อมบันทึก", status=status)
+        job.update(status="saving", step="กำลังสร้างไฟล์และลงทะเบียน...", error="")
+    return None
+
+
+def _reserve_for_job(job: dict, reserve_fn, store):
+    """จองเลขเพียงครั้งเดียว; retry หลังพังต้องใช้เลขเดิมเสมอ"""
+    receipt_no = str(job.get("reserved_receipt") or "")
+    if not receipt_no:
+        if job.get("redo_no"):
+            receipt_no = str(job["redo_no"])
+            updated = store.update_registry_row(
+                receipt_no, job["doc_no"], job["doc_date"], job["sender"], job["doc_title"])
+            if not updated:
+                raise RuntimeError(f"ไม่พบเลขรับ {receipt_no} ในทะเบียน จึงลงรับใหม่ไม่ได้")
+        else:
+            receipt_no = reserve_fn(
+                doc_no=job["doc_no"], doc_date=job["doc_date"],
+                sender=job["sender"], doc_title=job["doc_title"])
+        _set(job, reserved_receipt=str(receipt_no), receipt_no=str(receipt_no))
+
+    # เขียน book_id -> เลขรับทันทีหลังจองเลข เพื่อกันเครื่องดับ/รีสตาร์ตแล้วมือถือ
+    # ส่งซ้ำและสร้างทะเบียนอีกแถว ไฟล์/LINE ที่ยังไม่เสร็จจะแสดงเป็น partial failure ใน job
+    if job.get("book_id") and not job.get("durable_claimed"):
+        store.mark_registered(job["book_id"], receipt_no)
+        _set(job, durable_claimed=True)
+    return str(receipt_no)
+
+
 def finalize(job, payload: dict, reserve_fn) -> dict:
+    existing = _claim_save(job)
+    if existing is not None:
+        return existing
+    try:
+        result = _finalize_claimed(job, payload, reserve_fn)
+    except Exception as e:
+        _set(job, status="save_error", step="บันทึกยังไม่สมบูรณ์",
+             error=f"{type(e).__name__}: {e}")
+        raise
+    _set(job, status="done", step="บันทึกเรียบร้อย", error="", result=result)
+    return result
+
+
+def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     """วางตรายาง+คำเกษียณลงหน้าจริง รวมเป็น PDF ลงทะเบียน แล้วส่ง LINE"""
     date_str = normalize_typed_date(payload.get("date", "")) or get_thai_date()
     time_str = to_thai_digits(str(payload.get("time", "")).strip()) or get_thai_time_rounded()
@@ -331,15 +602,8 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
     boxes = payload.get("boxes", [])
 
     import store as _st
-    if job.get("redo_no"):
-        # ลงรับใหม่ด้วยเลขเดิม — เขียนทับแถวเดิม ไม่กินเลขใหม่
-        receipt_no = str(job["redo_no"])
-        _st.get_store().update_registry_row(
-            receipt_no, job["doc_no"], job["doc_date"], job["sender"], job["doc_title"])
-    else:
-        receipt_no = reserve_fn(
-            doc_no=job["doc_no"], doc_date=job["doc_date"],
-            sender=job["sender"], doc_title=job["doc_title"])
+    store = _st.get_store()
+    receipt_no = _reserve_for_job(job, reserve_fn, store)
 
     out_pages = {}          # index หน้าใน PDF -> รูปที่วางของเสร็จแล้ว
 
@@ -404,10 +668,7 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
-    safe = (job["doc_no"] or "").replace("/", "_").replace(":", "").replace("\\", "_").strip()
-    if not safe or safe == "-":
-        safe = f"เอกสารนำเข้า_{receipt_no}"
-    out = os.path.join(folder, f"{safe}.pdf")
+    out = os.path.join(folder, safe_output_filename(job.get("doc_no", ""), receipt_no))
     merger.write(out)
     merger.close()
 
@@ -441,10 +702,6 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
     except Exception:
         line_ok = False
 
-    if job.get("book_id"):
-        _st.get_store().mark_registered(job["book_id"], receipt_no)
-
-    _set(job, status="done")
     return {"ok": True, "receipt_no": receipt_no, "line_ok": line_ok,
             "drive_link": drive_link,
             "filename": os.path.basename(out),
@@ -453,7 +710,21 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
 
 def skip(job):
     """ไม่รับเอกสารนี้ — จำไว้ว่าข้ามแล้ว จะได้ไม่ดึงซ้ำ"""
-    if job.get("book_id"):
-        import store as _st
-        _st.get_store().mark_skipped(job["book_id"])
-    _set(job, status="skipped")
+    with _lock:
+        status = job.get("status", "")
+        if status == "skipped":
+            return {"ok": True, "existing": True}
+        if status in ("saving", "done", "skipping"):
+            raise JobStateError("ข้ามงานนี้ไม่ได้ เพราะกำลังบันทึกหรือบันทึกแล้ว", status=status)
+        previous = status
+        job.update(status="skipping", step="กำลังบันทึกว่าไม่รับเอกสาร...")
+    try:
+        if job.get("book_id"):
+            import store as _st
+            _st.get_store().mark_skipped(job["book_id"])
+    except Exception:
+        _set(job, status=previous, step="ข้ามเอกสารไม่สำเร็จ")
+        raise
+    result = {"ok": True}
+    _set(job, status="skipped", step="ข้ามเอกสารแล้ว", result=result)
+    return result
