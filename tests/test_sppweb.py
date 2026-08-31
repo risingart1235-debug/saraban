@@ -10,6 +10,8 @@ import os
 import tempfile
 import unittest
 from collections import defaultdict
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from unittest.mock import patch
 
 import requests
@@ -186,6 +188,49 @@ class FakeSession:
         return None
 
 
+class RetryAfterTests(unittest.TestCase):
+    def test_retry_after_accepts_delta_seconds(self):
+        response = FakeResponse(429, headers={"Retry-After": "17"})
+        self.assertEqual(sppweb._retry_after(response, 0), 17.0)
+
+    def test_retry_after_accepts_http_date(self):
+        now = 1_700_000_000.0
+        retry_at = datetime.fromtimestamp(now + 17, tz=timezone.utc)
+        response = FakeResponse(
+            503, headers={"Retry-After": format_datetime(retry_at, usegmt=True)})
+        self.assertEqual(sppweb._retry_after(response, 0, now=now), 17.0)
+
+    def test_retry_after_too_far_away_does_not_shorten_the_wait(self):
+        response = FakeResponse(429, headers={"Retry-After": "120"})
+        self.assertIsNone(sppweb._retry_after(response, 0))
+
+    def test_send_sleeps_for_the_full_retry_after_before_retrying(self):
+        busy = FakeResponse(429, headers={"Retry-After": "7"})
+        success = FakeResponse(200, text="ok")
+        sess = FakeSession().add("GET", "https://example.test/data", busy, success)
+
+        with patch.object(sppweb, "_pace"), patch.object(sppweb.time, "sleep") as sleep:
+            result = sppweb._send(sess, "get", "https://example.test/data")
+
+        self.assertIs(result, success)
+        self.assertEqual(len(sess.calls), 2)
+        sleep.assert_called_once_with(7.0)
+        self.assertTrue(busy.closed)
+
+    def test_send_returns_long_retry_after_response_without_retrying_early(self):
+        busy = FakeResponse(429, headers={"Retry-After": "120"})
+        success = FakeResponse(200, text="must not be requested yet")
+        sess = FakeSession().add("GET", "https://example.test/data", busy, success)
+
+        with patch.object(sppweb, "_pace"), patch.object(sppweb.time, "sleep") as sleep:
+            result = sppweb._send(sess, "get", "https://example.test/data")
+
+        self.assertIs(result, busy)
+        self.assertEqual(len(sess.calls), 1)
+        sleep.assert_not_called()
+        self.assertFalse(busy.closed, "returned response still belongs to the caller")
+
+
 class SessionStateTests(unittest.TestCase):
     def test_new_session_accepts_legacy_phpsessid_string(self):
         sess = sppweb.new_session("legacy-session-id")
@@ -230,6 +275,12 @@ class ValidationTests(unittest.TestCase):
     def test_is_logged_in_returns_false_for_real_login_page(self):
         sess = FakeSession().add(
             "GET", sppweb.NEWS_URL, FakeResponse(text=LOGIN_HTML)
+        )
+        self.assertFalse(sppweb.is_logged_in(sess))
+
+    def test_is_logged_in_returns_false_for_login_page_even_with_http_403(self):
+        sess = FakeSession().add(
+            "GET", sppweb.NEWS_URL, FakeResponse(403, text=LOGIN_HTML)
         )
         self.assertFalse(sppweb.is_logged_in(sess))
 
@@ -399,6 +450,25 @@ class ListTests(unittest.TestCase):
         docs = sppweb.list_documents(self._site_with_pager_lagging_behind(), pages=2)
         self.assertEqual([d["book_id"] for d in docs], ["126", "125"])
 
+    def test_pagination_safety_cap_raises_instead_of_returning_incomplete_page(self):
+        landing = list_html("100").replace(
+            "</body>", f'<a href="{sppweb.NEWS_URL}&page=2">2</a></body>')
+        sess = FakeSession().add("GET", sppweb.NEWS_URL, FakeResponse(text=landing))
+        sess.add(
+            "GET", f"{sppweb.NEWS_URL}&page=2",
+            FakeResponse(text=list_html("102")),
+        )
+        # Every bounded probe still has a new id.  The old implementation silently
+        # returned page 14 even though the real last page could be much later.
+        for page in range(3, 3 + sppweb.MAX_PAGE_PROBE):
+            sess.add(
+                "GET", f"{sppweb.NEWS_URL}&page={page}",
+                FakeResponse(text=list_html(str(100 + page))),
+            )
+
+        with self.assertRaisesRegex(sppweb.UnexpectedPageError, "ไม่ส่งรายการที่ไม่ครบ"):
+            sppweb.find_last_page(sess)
+
     def test_list_documents_raises_for_403_instead_of_returning_empty(self):
         sess = FakeSession().add(
             "GET",
@@ -492,6 +562,85 @@ class DetailTests(unittest.TestCase):
             sppweb.fetch_detail(sess, "123")
 
 
+class AttachmentProbeTests(unittest.TestCase):
+    WRONG = sppweb.BASE + "guessed/wrong.pdf"
+    RIGHT = sppweb.BASE + "files/right.pdf"
+
+    def test_head_403_falls_back_to_get_and_continues_to_next_candidate(self):
+        wrong_head = FakeResponse(403, text="")
+        wrong_get = FakeResponse(
+            403, text="Forbidden", headers={"Content-Type": "text/plain"})
+        right_head = FakeResponse(
+            200, text=None, content=b"", headers={"Content-Type": "application/pdf"})
+        sess = FakeSession()
+        sess.add("HEAD", self.WRONG, wrong_head)
+        sess.add("GET", self.WRONG, wrong_get)
+        sess.add("HEAD", self.RIGHT, right_head)
+
+        result = sppweb._pick_attachment_url(
+            sess, [("wrong", self.WRONG), ("right", self.RIGHT)])
+
+        self.assertEqual(result, self.RIGHT)
+        self.assertEqual(
+            [(call["method"], call["url"]) for call in sess.calls],
+            [("HEAD", self.WRONG), ("GET", self.WRONG), ("HEAD", self.RIGHT)],
+        )
+        self.assertTrue(all(r.closed for r in (wrong_head, wrong_get, right_head)))
+
+    def test_http_403_login_html_during_range_probe_is_session_expired(self):
+        head = FakeResponse(403, text="")
+        ranged = FakeResponse(
+            403, text=LOGIN_HTML, headers={"Content-Type": "text/html"})
+        sess = FakeSession().add("HEAD", self.WRONG, head).add("GET", self.WRONG, ranged)
+
+        with self.assertRaises(sppweb.SessionExpiredError):
+            sppweb._pick_attachment_url(sess, [("wrong", self.WRONG)])
+
+        self.assertTrue(head.closed)
+        self.assertTrue(ranged.closed)
+
+    def test_ambiguous_2xx_inspects_prefix_and_rejects_mislabeled_html(self):
+        ambiguous_head = FakeResponse(200, text=None, content=b"", headers={})
+        html_get = FakeResponse(
+            200,
+            text="<!doctype html><html><body>file not found</body></html>",
+            # Deliberately wrong: the body, not this header, must win.
+            headers={"Content-Type": "application/pdf"},
+        )
+        right_head = FakeResponse(
+            200, text=None, content=b"", headers={"Content-Type": "application/pdf"})
+        sess = FakeSession()
+        sess.add("HEAD", self.WRONG, ambiguous_head)
+        sess.add("GET", self.WRONG, html_get)
+        sess.add("HEAD", self.RIGHT, right_head)
+
+        result = sppweb._pick_attachment_url(
+            sess, [("wrong", self.WRONG), ("right", self.RIGHT)])
+
+        self.assertEqual(result, self.RIGHT)
+        self.assertTrue(all(r.closed for r in (ambiguous_head, html_get, right_head)))
+
+    def test_ambiguous_2xx_rejects_plain_error_without_content_type(self):
+        head = FakeResponse(200, text=None, content=b"", headers={})
+        body = FakeResponse(200, text="File not found", headers={})
+        sess = FakeSession().add("HEAD", self.WRONG, head).add("GET", self.WRONG, body)
+
+        result = sppweb._pick_attachment_url(sess, [("wrong", self.WRONG)])
+
+        self.assertIsNone(result)
+        self.assertTrue(head.closed)
+        self.assertTrue(body.closed)
+
+    def test_explicit_cloudflare_challenge_still_aborts_probe(self):
+        challenged = FakeResponse(403, text=CLOUDFLARE_HTML)
+        sess = FakeSession().add("HEAD", self.WRONG, challenged)
+
+        with self.assertRaises(sppweb.AccessBlockedError):
+            sppweb._pick_attachment_url(sess, [("wrong", self.WRONG)])
+
+        self.assertTrue(challenged.closed)
+
+
 class RequestBudgetTests(unittest.TestCase):
     """Bursts of requests are what gets an IP rate-limited; keep the count down."""
 
@@ -574,6 +723,17 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaises(sppweb.AccessBlockedError):
                 sppweb.download(sess, self.PDF_URL, dest)
             self.assertFalse(os.path.exists(dest))
+
+    def test_download_treats_login_html_with_http_403_as_expired_session(self):
+        response = FakeResponse(
+            403, text=LOGIN_HTML, headers={"Content-Type": "text/html; charset=utf-8"})
+        sess = FakeSession().add("GET", self.PDF_URL, response)
+        with tempfile.TemporaryDirectory() as folder:
+            dest = self._dest(folder)
+            with self.assertRaises(sppweb.SessionExpiredError):
+                sppweb.download(sess, self.PDF_URL, dest)
+            self.assertFalse(os.path.exists(dest))
+        self.assertTrue(response.closed)
 
     def test_download_recognizes_expired_session_html(self):
         sess = FakeSession().add(
