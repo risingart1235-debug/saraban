@@ -325,8 +325,15 @@ def normalize_typed_date(raw):
         if 1 <= m <= 12 and 1 <= d <= 31:
             if y < 100: y += 2500               # พิมพ์ปีสองหลัก เช่น 69 → ๒๕๖๙
             elif y < 2400: y += 543             # พิมพ์เป็น ค.ศ. → แปลงเป็น พ.ศ.
+            try:
+                datetime(y - 543, m, d)         # มีวันนี้จริงไหม (กัน ๓๐ ก.พ.)
+            except ValueError:
+                return to_thai_digits(raw)      # ไม่มีจริง — คืนตามที่พิมพ์ ไม่เดาให้
             return to_thai_digits(f"{d} {THAI_MONTHS_ABBR[m-1]} {y}")
-    return format_scraped_date(raw)             # รูปแบบอื่น ให้ตัวแปลงเดิมจัดการ
+        # ตัวเลขไม่สมเหตุผล (เดือน ๑๓, วันที่ ๐/๓๒) — คืนตามที่พิมพ์มา
+        # แปลงเลขเป็นไทยให้หมด จะได้ไม่ปนไทย/อารบิก อย่างที่ตัวแปลงเดิมทำ
+        return to_thai_digits(raw)
+    return format_scraped_date(raw)             # รูปแบบอื่น (เดือนเป็นตัวหนังสือ) ให้ตัวเดิมจัดการ
 
 def get_thai_time_rounded():
     """เวลาลงรับแบบปัดเข้าครึ่งชั่วโมงที่ใกล้ที่สุด (ลงท้ายด้วย ๐๐ หรือ ๓๐ เท่านั้น)

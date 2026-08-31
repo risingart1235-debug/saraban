@@ -1120,4 +1120,26 @@ def api_doc_download(day: str, name: str, user: str = Depends(current_user)):
     return FileResponse(path, media_type="application/pdf", filename=name)
 
 
+@app.on_event("startup")
+def _warm_up():
+    """อุ่นเครื่องไว้ตั้งแต่เปิดเซิร์ฟเวอร์ ไม่ให้คนแรกที่ล็อกอินต้องรอ
+
+    วัดจริงบน Render: ล็อกอินครั้งแรกหลัง deploy ใหม่ใช้ ๕.๔ วินาที
+    ครั้งถัดไปเหลือ ๐.๗ วินาที — ส่วนต่างคือการสร้างตัวเชื่อม Google API
+    (โหลดกุญแจ + ต่อ discovery) ซึ่งทำครั้งเดียวต่อโปรเซส
+    ย้ายมาทำตอนเปิดเซิร์ฟเวอร์แทน ผู้ใช้จะได้ไม่ต้องเป็นคนจ่ายเวลานั้น
+
+    ทำในเธรดแยกและกลืน error ทั้งหมด — ถ้าต่อ Sheets ไม่ได้ตอนเปิด
+    เซิร์ฟเวอร์ต้องขึ้นได้ตามปกติ แล้วค่อยไปแจ้ง error ตอนใช้งานจริง
+    """
+    def work():
+        try:
+            import store as _s
+            _s.get_store().load_users()
+        except Exception:
+            pass
+
+    threading.Thread(target=work, name="saraban-warmup", daemon=True).start()
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
