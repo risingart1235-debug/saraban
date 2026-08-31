@@ -134,14 +134,26 @@ def _send_next_no(last_value) -> str:
         return "1"
 
 
-def _send_row(no, doc_date, sender, to, title, note=""):
+# ในทะเบียนจริงคอลัมน์ "จาก" เป็น "ผอ." ทุกแถว เพราะหนังสือส่งออกนอกโรงเรียน
+# ผู้ลงนามคือผู้อำนวยการเสมอ ไม่ใช่ครูที่เป็นเจ้าของเรื่อง
+SEND_FROM = os.environ.get("SARABAN_SEND_FROM", "").strip() or "ผอ."
+
+
+def _send_row(no, doc_date, to, title, requester="", note=""):
+    """แถวทะเบียนส่ง
+
+    requester = ครูที่ขอเลข ไม่ใช่ผู้ส่ง จึงไม่ลงช่อง "จาก"
+    แต่เก็บไว้ในหมายเหตุเพื่อให้ตามได้ว่าใครเป็นเจ้าของเรื่อง
+    """
+    tail = " · ".join(x for x in [f"ผู้ขอ: {requester.strip()}" if requester and requester.strip() else "",
+                                  (note or "").strip()] if x)
     return [str(no),
             SEND_PREFIX + str(no),
             core.normalize_typed_date(doc_date or "") or core.get_thai_date(),
-            (sender or "").strip(),
+            SEND_FROM,
             (to or "").strip(),
             (title or "").strip(),
-            (note or "").strip()]
+            tail]
 
 
 # คอลัมน์ของแท็บผู้ใช้ (เก็บเป็นคอลัมน์ ไม่ใช่ JSON ก้อนเดียว จะได้เปิดดูในชีตรู้เรื่อง)
@@ -355,7 +367,7 @@ class LocalStore(StatusMixin, UsersMixin):
     def _send_path(self):
         return os.path.join(core.OUTPUT_ROOT, SEND_XLSX_NAME)
 
-    def send_register(self, doc_date="", sender="", to="", title="", note="") -> str:
+    def send_register(self, doc_date="", requester="", to="", title="", note="") -> str:
         """จองเลขส่งและเขียนแถวในล็อกเดียว — คืนเลขที่ได้
 
         เขียนลงแถวว่างท้ายสุด ไม่ใช่ ws.append() เพราะไฟล์จริงมีแถวเปล่าค้างอยู่
@@ -386,7 +398,7 @@ class LocalStore(StatusMixin, UsersMixin):
             # ต่อท้ายเสมอ — ไม่ไปเขียนทับแถวที่มีคนจองเลขไว้ (แถวที่มีแต่เลข)
             # เพราะคนจองตั้งใจจะใช้เลขนั้น
             write_row = last_row + 1
-            for col, val in enumerate(_send_row(no, doc_date, sender, to, title, note), start=1):
+            for col, val in enumerate(_send_row(no, doc_date, to, title, requester, note), start=1):
                 ws.cell(row=write_row, column=col, value=val)
             self._save_ws(wb, path)
             return no
@@ -722,7 +734,7 @@ class SheetsStore(StatusMixin, UsersMixin):
             return receipt_no
 
     # ---- ทะเบียนหนังสือส่ง ----
-    def send_register(self, doc_date="", sender="", to="", title="", note="") -> str:
+    def send_register(self, doc_date="", requester="", to="", title="", note="") -> str:
         """จองเลขส่งบน Sheets — กันเลขซ้ำแบบเดียวกับทะเบียนรับ
 
         ๑. ต่อท้ายด้วย INSERT_ROWS ซึ่งกูเกิลรับประกันว่าไม่ทับกัน
@@ -731,7 +743,7 @@ class SheetsStore(StatusMixin, UsersMixin):
         with _mem_lock:
             vals = self._get(self.TAB_SEND, fresh=True)
             no = str(_next_no_this_year(vals[1:], SEND_DATE_COLS, SEND_DATA_COLS))
-            res = self._append(self.TAB_SEND, [_send_row(no, doc_date, sender, to, title, note)])
+            res = self._append(self.TAB_SEND, [_send_row(no, doc_date, to, title, requester, note)])
 
             m = re.search(r"!\D+(\d+)", res.get("updates", {}).get("updatedRange", ""))
             if not m:

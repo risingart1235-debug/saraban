@@ -308,7 +308,8 @@ def get_thai_date():
 
 def normalize_typed_date(raw):
     """แปลงวันที่ที่ผู้ใช้พิมพ์เองให้เป็นวันที่ไทยมาตรฐาน
-    รองรับ '๑๕ ก.ค. ๒๕๖๙' | '15 ก.ค. 2569' | '15/7/2569' | '15-7-2026' | '๑๕/๗/๒๕๖๙'"""
+    รองรับ '๑๕ ก.ค. ๒๕๖๙' | '15 ก.ค. 2569' | '15/7/2569' | '15-7-2026' | '๑๕/๗/๒๕๖๙'
+    และ '2026-08-31' (รูปแบบที่ช่องปฏิทินของเบราว์เซอร์ส่งมา — ปีมาก่อน)"""
     raw = (raw or "").strip()
     if not raw:
         return ""
@@ -316,6 +317,10 @@ def normalize_typed_date(raw):
         return to_thai_digits(raw)              # พิมพ์เป็นวันที่ไทยมาแล้ว ใส่ตรงๆ
     parts = [p for p in re.split(r"[/\-.\s]+", to_arabic_digits(raw)) if p]
     if len(parts) == 3 and all(p.isdigit() for p in parts):
+        # ช่องปฏิทิน (input type=date) ส่งมาเป็น ปี-เดือน-วัน ต้องสลับก่อน
+        # ไม่งั้น '2026-08-31' จะถูกอ่านเป็นวันที่ ๒๐๒๖ แล้วแปลงไม่ออก
+        if len(parts[0]) == 4 and int(parts[0]) > 31:
+            parts = [parts[2], parts[1], parts[0]]
         d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
         if 1 <= m <= 12 and 1 <= d <= 31:
             if y < 100: y += 2500               # พิมพ์ปีสองหลัก เช่น 69 → ๒๕๖๙

@@ -313,8 +313,10 @@ def _send_rate_ok(ip: str) -> bool:
 async def api_send_request(request: Request):
     """ขอเลขหนังสือส่ง — ต้องกรอกครบทุกช่องก่อน ถึงจะได้เลข"""
     d = await request.json()
+    # ผู้ขอ = ครูเจ้าของเรื่อง เก็บไว้ติดตามเท่านั้น ไม่ได้ลงช่อง "จาก" ในทะเบียน
+    # เพราะหนังสือส่งออกนอกโรงเรียน ผู้ส่งคือ ผอ. เสมอ
     fields = {
-        "sender": ("ผู้ขอ / เจ้าของเรื่อง", str(d.get("sender", "")).strip()),
+        "requester": ("ผู้ขอ / เจ้าของเรื่อง", str(d.get("requester", d.get("sender", ""))).strip()),
         "to": ("เรียน / ถึง", str(d.get("to", "")).strip()),
         "title": ("เรื่อง", str(d.get("title", "")).strip()),
     }
@@ -336,7 +338,7 @@ async def api_send_request(request: Request):
         no = await asyncio.to_thread(
             _s.get_store().send_register,
             str(d.get("doc_date", "")).strip(),
-            fields["sender"][1], fields["to"][1], fields["title"][1],
+            fields["requester"][1], fields["to"][1], fields["title"][1],
             str(d.get("note", "")).strip())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"บันทึกทะเบียนไม่สำเร็จ: {e}")
