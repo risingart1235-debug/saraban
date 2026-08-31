@@ -217,6 +217,18 @@ def prepare_stored(job: dict) -> bool:
 
     คืน False ถ้าเรื่องนี้เริ่มไปแล้ว/ทำเสร็จแล้ว จะได้ไม่ทำซ้ำเวลากดรัวๆ
     """
+    # เรื่องนี้อาจถูกลงรับ/ข้ามจากที่อื่นไปแล้ว (เช่นไปกดในโหมด ๑) หลังมือถือส่งเข้ามา
+    # เช็คก่อนเข้าคิว จะได้ไม่เปลือง AI กับเรื่องที่ทำไปแล้ว และบอกผู้ใช้ได้ตรงๆ
+    if job.get("book_id") and not job.get("redo_no"):
+        handled = _durable_phone_record(job["book_id"])
+        if handled:
+            label = "ลงรับแล้ว" if handled.get("status") == "registered" else "ข้ามแล้ว"
+            rno = handled.get("receipt_no", "")
+            _set(job, status="error", step=label,
+                 error=f"หนังสือเรื่องนี้{label}" + (f" (เลขรับ {rno})" if rno else "") +
+                       " — ไม่ต้องลงรับซ้ำ")
+            return False
+
     with _lock:
         if job.get("status") != "stored":
             return False
@@ -588,6 +600,15 @@ def _reserve_for_job(job: dict, reserve_fn, store):
     """จองเลขเพียงครั้งเดียว; retry หลังพังต้องใช้เลขเดิมเสมอ"""
     receipt_no = str(job.get("reserved_receipt") or "")
     if not receipt_no:
+        # ด่านสุดท้ายก่อนกินเลข — เรื่องนี้อาจถูกลงรับจากที่อื่นไปแล้วหลังงานนี้ถูกสร้าง
+        # (เช่น มือถือส่งเข้าโหมด ๒ ไว้ แล้วผู้ใช้ไปกดลงรับเรื่องเดียวกันในโหมด ๑)
+        # ถ้าไม่เช็คตรงนี้ เรื่องเดียวจะกินเลขรับสองเลขและมีสองแถวในทะเบียน
+        # ยกเว้น redo_no ซึ่งตั้งใจลงรับซ้ำด้วยเลขเดิมอยู่แล้ว
+        if job.get("book_id") and not job.get("redo_no"):
+            handled = _durable_phone_record(job["book_id"])
+            if handled:
+                raise AlreadyHandledError(handled.get("status", "registered"),
+                                          handled.get("receipt_no", ""))
         if job.get("redo_no"):
             receipt_no = str(job["redo_no"])
             updated = store.update_registry_row(

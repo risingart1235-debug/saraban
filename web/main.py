@@ -968,6 +968,10 @@ async def api_doc_save(job_id: str, request: Request, user: str = Depends(curren
         # แปลง/รวม PDF, อัปโหลด Drive และส่ง LINE เป็นงาน blocking ทั้งหมด
         # ต้องออกจาก async event loop เพื่อให้ request อื่นยังตอบได้
         return await asyncio.to_thread(docmode.finalize, job, payload, reserve)
+    except docmode.AlreadyHandledError as e:
+        # เรื่องนี้ถูกลงรับ/ข้ามจากที่อื่นไปแล้วระหว่างที่เปิดหน้านี้ค้างไว้
+        # (เช่นเปิดค้างในโหมด ๒ แล้วไปกดลงรับเรื่องเดียวกันในโหมด ๑)
+        raise HTTPException(status_code=409, detail=str(e))
     except docmode.JobStateError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
