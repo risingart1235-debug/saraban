@@ -48,7 +48,6 @@ Image             = _LazyModule('PIL.Image')
 ImageDraw         = _LazyModule('PIL.ImageDraw')
 ImageFont         = _LazyModule('PIL.ImageFont')
 BeautifulSoup     = _LazyFunc('bs4', 'BeautifulSoup')
-convert_from_path = _LazyFunc('pdf2image', 'convert_from_path')
 PdfMerger         = _LazyFunc('PyPDF2', 'PdfMerger')
 PdfReader         = _LazyFunc('PyPDF2', 'PdfReader')
 Workbook          = _LazyFunc('openpyxl', 'Workbook')
@@ -58,7 +57,7 @@ word_tokenize     = _LazyFunc('thaiwords', 'tokenize')   # เบากว่า
 def _preload_heavy_libs():
     """แอบโหลดไลบรารีหนักไว้เบื้องหลังหลังหน้าต่างขึ้นแล้ว
     ผู้ใช้จะได้เห็นหน้าต่างทันที ส่วนตอนกดใช้งานจริงก็ไม่ต้องรอโหลด"""
-    for name in ('requests', 'openpyxl', 'PyPDF2', 'pdf2image', 'bs4',
+    for name in ('requests', 'openpyxl', 'PyPDF2', 'pymupdf', 'bs4',
                  'thaiwords', 'google.genai'):
         try:
             importlib.import_module(name)
@@ -82,7 +81,7 @@ def _hide_console():
 # ๑. ส่วนตั้งค่า (Configurations)
 # ==========================================
 NEWS_URL = 'https://office.sakonarea1.go.th/index.php?option=book&task=main/receive_mobile&saraban_index=19'
-POPPLER_PATH = r'C:\poppler\Library\bin'
+PDF_RENDER_DPI = 200
 
 # --- ค่าเริ่มต้นภายในโปรแกรม (ค่าสำรอง / fallback) ---
 # หมายเหตุ: ค่าจริงทั้งหมดย้ายไปเก็บที่ไฟล์ config.json แล้ว
@@ -316,6 +315,21 @@ def register_document(doc_no="", doc_date="", sender="", doc_title="", receive_d
     return _store().register(doc_no, doc_date, sender, doc_title, receive_date)
 
 
+def reserve_receipt_once(state, register_fn=register_document, **fields):
+    """จองเลขรับครั้งเดียวต่อหนึ่งงาน แล้วนำเลขเดิมกลับมาใช้เมื่อ retry.
+
+    ``state`` ต้องเป็น dict ที่อยู่ตลอดอายุของงานนั้น การบันทึกเลขลง state
+    เกิดทันทีหลังที่ store ยืนยันว่าลงทะเบียนสำเร็จ ดังนั้นความผิดพลาดในขั้น
+    สร้าง PDF ภายหลังจะไม่ทำให้การลองใหม่ไปกินเลขรับถัดไปอีกเลขหนึ่ง
+    """
+    reserved = state.get("reserved_receipt_no")
+    if reserved:
+        return reserved
+    reserved = register_fn(**fields)
+    state["reserved_receipt_no"] = reserved
+    return reserved
+
+
 def upload_to_imgbb(image_path):
     try:
         with open(image_path, "rb") as img:
@@ -473,6 +487,38 @@ def classify_recipient(recipient_line):
     if ("ในสังกัด" in txt) or ("ทุกโรงเรียน" in txt) or ("ทุกแห่ง" in txt):
         return 'auto'
     return 'check'
+
+
+def render_pdf_page(pdf_path, page_number=1, dpi=PDF_RENDER_DPI):
+    """เรนเดอร์หน้า PDF เป็น PIL Image ด้วย PyMuPDF โดยไม่ต้องติดตั้ง Poppler.
+
+    ``page_number`` เริ่มนับจาก 1 ให้ตรงกับเลขหน้าที่ผู้ใช้และ AI เห็น
+    ส่วน ``dpi`` ระบุชัดเจนเพื่อรักษาขนาดกระดาษเมื่อบันทึกกลับเป็น PDF
+    """
+    if page_number < 1:
+        raise ValueError("page_number must start at 1")
+    if dpi <= 0:
+        raise ValueError("dpi must be greater than zero")
+
+    import pymupdf
+
+    document = pymupdf.open(pdf_path)
+    try:
+        if page_number > document.page_count:
+            raise IndexError(
+                f"PDF has {document.page_count} page(s); page {page_number} was requested")
+        page = document.load_page(page_number - 1)
+        pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
+        return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    finally:
+        document.close()
+
+
+def save_image_as_pdf(pil_image, output_path, dpi=PDF_RENDER_DPI):
+    """บันทึกภาพเป็น PDF โดยรักษาสเกลพิกเซลตาม DPI ที่ระบุ."""
+    if dpi <= 0:
+        raise ValueError("dpi must be greater than zero")
+    pil_image.convert("RGB").save(output_path, "PDF", resolution=float(dpi))
 
 # =====================================================================
 # ๔. ระบบสแกนอัจฉริยะ (Auto-Scan Functions)

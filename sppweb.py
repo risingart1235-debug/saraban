@@ -10,6 +10,8 @@ import os
 import re
 import threading
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from urllib.parse import urljoin, urlsplit
 
@@ -48,6 +50,7 @@ MAX_DOWNLOAD_BYTES = int(os.environ.get("SARABAN_MAX_DOWNLOAD_MB", "80")) * 1024
 # ตั้งเป็น 0 เพื่อปิดได้ (เช่นตอนรันเทสต์)
 REQUEST_GAP = float(os.environ.get("SARABAN_REQUEST_GAP", "0.7"))
 RETRY_ON_BUSY = 2                 # ลองซ้ำกี่ครั้งเมื่อโดน 429/503
+MAX_RETRY_AFTER = 30.0            # ไม่ค้าง worker รอตาม header ที่ยาวเกินไป
 _pace_lock = threading.Lock()
 _last_request_at = 0.0
 
@@ -64,12 +67,31 @@ def _pace():
         _last_request_at = time.monotonic()
 
 
-def _retry_after(response, attempt: int) -> float:
-    """เว็บบอกให้รอกี่วินาที ถ้าไม่บอกก็ถอยแบบทวีคูณ"""
+def _retry_after(response, attempt: int, *, now: float | None = None) -> float | None:
+    """คืนเวลารอจาก Retry-After หรือ ``None`` ถ้านานเกินที่ worker ควรค้าง
+
+    RFC รองรับทั้งจำนวนวินาทีและ HTTP-date ห้ามตัดเวลาลงแล้วยิงซ้ำก่อน
+    เวลาที่เว็บกำหนด ถ้าเว็บขอให้รอนานเกินเพดานให้ส่งคำตอบนั้นกลับไปให้
+    ผู้เรียกลองใหม่ภายหลัง แทนการนอนค้างอยู่หรือลองก่อนเวลา
+    """
     raw = str((getattr(response, "headers", {}) or {}).get("Retry-After", "")).strip()
+    delay = None
     if raw.isdigit():
-        return min(float(raw), 30.0)
-    return min(2.0 ** attempt, 8.0)
+        delay = float(raw)
+    elif raw:
+        try:
+            retry_at = parsedate_to_datetime(raw)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = max(0.0, retry_at.timestamp() - (time.time() if now is None else now))
+        except (TypeError, ValueError, OverflowError):
+            delay = None
+
+    if delay is None:
+        delay = min(2.0 ** attempt, 8.0)
+    if delay > MAX_RETRY_AFTER:
+        return None
+    return delay
 
 
 def _send(sess, method: str, url: str, **kwargs):
@@ -81,12 +103,17 @@ def _send(sess, method: str, url: str, **kwargs):
         status = int(getattr(response, "status_code", 0) or 0)
         if status not in (429, 503) or attempt == RETRY_ON_BUSY:
             return response
+        delay = _retry_after(response, attempt)
+        # Retry-After ที่นานเกินเพดาน: ห้ามลองก่อนเวลา และไม่ค้าง worker
+        # รอนานเกินไป จึงคืนคำตอบนี้ให้ชั้นบนจัดคิวลองใหม่เอง
+        if delay is None:
+            return response
         # ทิ้งคำตอบนี้แล้ว ต้องปิดก่อน ไม่งั้น connection ค้างเมื่อใช้ stream=True
         try:
             response.close()
         except Exception:
             pass
-        time.sleep(_retry_after(response, attempt))
+        time.sleep(delay)
     return response
 
 
@@ -286,19 +313,24 @@ def _has_real_content(text: str) -> bool:
     return _is_login_page(soup) or _is_news_page(soup)
 
 
-def _is_cloudflare_block(response, text: str) -> bool:
-    status = int(getattr(response, "status_code", 0) or 0)
+def _has_explicit_cloudflare_challenge(response, text: str) -> bool:
+    """มีหลักฐานจาก header/body ว่าเป็น Cloudflare challenge จริงหรือไม่"""
     headers = getattr(response, "headers", {}) or {}
     if str(headers.get("cf-mitigated", "")).lower() == "challenge":
-        return True                      # Cloudflare บอกมาเองตรงๆ
+        return True
     low = (text or "").lower()
-    if any(marker in low for marker in _CHALLENGE_MARKERS):
+    return any(marker in low for marker in _CHALLENGE_MARKERS)
+
+
+def _is_cloudflare_block(response, text: str) -> bool:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if _has_explicit_cloudflare_challenge(response, text):
         return True
     if status in (403, 429):
         # 403/429 มาจากตัวเว็บ PHP เองก็ได้ (เช่นเดา path ไฟล์แนบผิด)
         # ถ้าได้หน้าจริงกลับมาด้วย แปลว่าไม่ได้ถูก Cloudflare กัน
         return not _has_real_content(text)
-    return status == 503 and "cloudflare" in low
+    return status == 503 and "cloudflare" in (text or "").lower()
 
 
 def _is_login_page(soup) -> bool:
@@ -351,8 +383,12 @@ def _request_html(sess, method: str, url: str, *, context: str,
     soup = BeautifulSoup(text, "html.parser")
     # ตรวจหน้า login ก่อนดูรหัสสถานะ — เว็บ PHP บางหน้าตอบ 403 พร้อมหน้าล็อกอิน
     # ซึ่งความหมายจริงคือ "session หมดอายุ" ไม่ใช่ "เว็บพัง"
-    if authenticated and _is_login_page(soup):
-        raise SessionExpiredError("session เว็บ สพป. หมดอายุหรือยังไม่ได้ล็อกอิน")
+    if _is_login_page(soup):
+        if authenticated:
+            raise SessionExpiredError("session เว็บ สพป. หมดอายุหรือยังไม่ได้ล็อกอิน")
+        # is_logged_in ต้องตอบ False แม้ PHP จะตั้ง HTTP 403 ให้หน้าล็อกอิน
+        # นี่เป็นคำตอบจากแอปจริง ไม่ใช่ Cloudflare challenge
+        return response, soup
     _raise_for_response(response, text, context)
     return response, soup
 
@@ -492,6 +528,14 @@ def _scan_last_page(sess):
             break
         last += 1
         seen[last], last_ids = probe_soup, probe_ids
+    else:
+        # ถ้าทุกหน้าที่ลองยังมี id ชุดใหม่ เรายังพิสูจน์ไม่ได้ว่าถึงหน้าสุดท้าย
+        # ห้ามคืนค่า last ปลอมแล้วทำให้หนังสือใหม่หายไปแบบเงียบๆ
+        raise UnexpectedPageError(
+            "ค้นหาหน้าสุดท้ายไม่สำเร็จ: "
+            f"แถบเลขหน้าล้าหลังเกิน {MAX_PAGE_PROBE} หน้า "
+            "จึงหยุดเพื่อไม่ส่งรายการที่ไม่ครบ"
+        )
     return last, seen
 
 
@@ -655,46 +699,144 @@ def _attachment_candidates(href: str, detail_url: str) -> list[tuple[str, str]]:
     return candidates
 
 
+PROBE_PREFIX_BYTES = 8192
+
+
+def _close_response(response):
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def _read_prefix(response, limit: int = PROBE_PREFIX_BYTES) -> bytes:
+    """อ่าน body แค่ช่วงแรก แล้วปล่อยให้ผู้เรียกปิด response ทันที"""
+    prefix = bytearray()
+    for chunk in response.iter_content(chunk_size=min(limit, 8192)):
+        if not chunk:
+            continue
+        prefix.extend(chunk[:limit - len(prefix)])
+        if len(prefix) >= limit:
+            break
+    return bytes(prefix)
+
+
+def _content_type(response) -> str:
+    return str((getattr(response, "headers", {}) or {}).get("Content-Type", "")).lower()
+
+
+def _headers_identify_file(response) -> bool:
+    """HEAD ชัดเจนพอที่จะไม่ต้อง GET ซ้ำหรือไม่"""
+    headers = getattr(response, "headers", {}) or {}
+    disposition = str(headers.get("Content-Disposition", "")).lower()
+    if "attachment" in disposition or "filename=" in disposition:
+        return True
+    content_type = _content_type(response).split(";", 1)[0].strip()
+    return (
+        content_type == "application/pdf"
+        or content_type == "application/msword"
+        or content_type.startswith("application/vnd.")
+        or content_type.startswith("application/zip")
+        or content_type.startswith("application/x-")
+        or content_type.startswith("image/")
+    )
+
+
+def _prefix_is_html_or_error(prefix: bytes, content_type: str) -> bool:
+    """แยกหน้า error แม้เว็บลืมหรือใส่ Content-Type ผิด"""
+    if not prefix:
+        return True
+    kind = (content_type or "").split(";", 1)[0].strip().lower()
+    stripped = prefix.lstrip(b"\xef\xbb\xbf\x00\t\r\n ")
+    low = stripped[:PROBE_PREFIX_BYTES].lower()
+    # เชื่อ magic bytes มากกว่า Content-Type: เว็บเก่าบางตัวส่ง PDF/Office เป็น text/plain
+    if stripped.startswith((
+        b"%PDF-", b"PK\x03\x04", b"\xd0\xcf\x11\xe0", b"\x89PNG\r\n\x1a\n",
+        b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"Rar!\x1a\x07",
+    )):
+        return False
+    if (
+        low.startswith((b"<!doctype html", b"<html", b"<head", b"<body"))
+        or b"<html" in low
+        or b"<form" in low
+    ):
+        return True
+    if kind.startswith("text/") or kind in {
+        "application/json", "application/problem+json", "application/xml",
+        "text/xml", "application/xhtml+xml",
+    }:
+        return True
+    decoded = stripped[:PROBE_PREFIX_BYTES].decode("utf-8", errors="ignore").lower()
+    if any(marker in decoded for marker in (
+        "not found", "forbidden", "unauthorized", "access denied",
+        "permission denied", "internal server error", "bad gateway",
+        "service unavailable", "ไม่พบไฟล์", "ไม่มีสิทธิ์",
+    )):
+        return True
+    if low.startswith((b"{", b"[")) and any(
+            marker in low for marker in (b'"error"', b'"message"', b'"status"')):
+        return True
+    return False
+
+
 def _probe_attachment(sess, url: str, *, timeout: int):
-    """ถาม HEAD ว่า url นี้เป็นไฟล์จริงไหม — ถูกกว่าโหลดตัวไฟล์มาดู
+    """ตรวจลิงก์ด้วย HEAD และถอยไป ranged GET เมื่อคำตอบกำกวม
 
-    คืน "ok" / "missing" (ลองตัวถัดไป) / "html" (ได้หน้าเว็บ ไม่ใช่ไฟล์)
-    เว็บบางตัวไม่รองรับ HEAD จะถอยไปใช้ GET แบบขอแค่ ๑ KB แรกให้เอง
+    HEAD 403 ไม่ได้แปลว่าถูก Cloudflare กั้นเสมอไป: PHP/เว็บเซิร์ฟเวอร์มัก
+    ปิด HEAD สำหรับ path ที่เดาผิด จึงดู body ช่วงแรกด้วย GET ก่อนตัดสิน
+    และปิดทุก response ในทุกทางออก
     """
+    probe_url = url
     response = _send(sess, "head", url, timeout=timeout, allow_redirects=True)
-    status = int(getattr(response, "status_code", 0) or 0)
-    if status in (405, 501):
-        response = _send(sess, "get", url, timeout=timeout, stream=True,
-                         allow_redirects=True, headers={"Range": "bytes=0-1023"})
-        try:
-            return _classify_probe(response)
-        finally:
-            try:
-                response.close()
-            except Exception:
-                pass
-    return _classify_probe(response)
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+        probe_url = getattr(response, "url", url) or url
+        # HEAD ปกติไม่มี body แต่บางเซิร์ฟเวอร์ส่งมา อ่านเฉพาะเมื่อต้องแยก error
+        head_text = _response_text(response) if status >= 400 else ""
+        if _has_explicit_cloudflare_challenge(response, head_text):
+            _raise_for_response(response, head_text, "ตรวจลิงก์ไฟล์แนบ")
+        if head_text and _is_login_page(BeautifulSoup(head_text, "html.parser")):
+            raise SessionExpiredError("session หมดอายุระหว่างตรวจไฟล์แนบ")
+        if status in (404, 410):
+            return "missing", probe_url
+        if 200 <= status < 400 and _headers_identify_file(response):
+            return "ok", probe_url
+        if status == 429 or status >= 500:
+            _raise_for_response(response, head_text, "ตรวจลิงก์ไฟล์แนบ")
+        # 403/405/501 และ 2xx ที่ Content-Type กำกวม ต้องดู prefix ด้วย GET
+    finally:
+        _close_response(response)
 
-
-def _classify_probe(response):
-    status = int(getattr(response, "status_code", 0) or 0)
-    if status in (404, 410):
-        return "missing", response
-    content_type = str(
-        (getattr(response, "headers", {}) or {}).get("Content-Type", "")).lower()
-    if "html" in content_type:
-        return "html", response
-    _raise_for_response(response, "", "ตรวจลิงก์ไฟล์แนบ")
-    return "ok", response
+    response = _send(
+        sess, "get", probe_url, timeout=timeout, stream=True,
+        allow_redirects=True, headers={"Range": f"bytes=0-{PROBE_PREFIX_BYTES - 1}"},
+    )
+    try:
+        prefix = _read_prefix(response)
+        text = prefix.decode("utf-8", errors="ignore")
+        status = int(getattr(response, "status_code", 0) or 0)
+        final_url = getattr(response, "url", probe_url) or probe_url
+        if _has_explicit_cloudflare_challenge(response, text):
+            _raise_for_response(response, text, "ตรวจลิงก์ไฟล์แนบ")
+        if _is_login_page(BeautifulSoup(text, "html.parser")):
+            raise SessionExpiredError("session หมดอายุระหว่างตรวจไฟล์แนบ")
+        # path ที่เดาผิดอาจตอบ 401/403 จาก PHP โดยไม่ใช่ WAF
+        if status in (400, 401, 403, 404, 410):
+            return "missing", final_url
+        _raise_for_response(response, text, "ตรวจลิงก์ไฟล์แนบ")
+        if _prefix_is_html_or_error(prefix, _content_type(response)):
+            return "html", final_url
+        return "ok", final_url
+    finally:
+        _close_response(response)
 
 
 def _pick_attachment_url(sess, candidates: list[tuple[str, str]], *,
                          timeout: int = 20) -> str | None:
     """หา url ของไฟล์แนบตัวจริง ยิงให้น้อยที่สุดเท่าที่ทำได้"""
-    html_hit = None
     for rule, candidate in candidates:
         try:
-            verdict, response = _probe_attachment(sess, candidate, timeout=timeout)
+            verdict, final_url = _probe_attachment(sess, candidate, timeout=timeout)
         except SPPWebError:
             raise
         except Exception as e:
@@ -702,31 +844,7 @@ def _pick_attachment_url(sess, candidates: list[tuple[str, str]], *,
 
         if verdict == "ok":
             _remember_rule(rule)
-            return getattr(response, "url", candidate) or candidate
-        if verdict == "html" and html_hit is None:
-            html_hit = candidate
-
-    # เดา path ไม่ถูกสักตัว แต่มีตัวที่ตอบเป็นหน้าเว็บ — เปิดดูสักครั้งว่าเป็น
-    # หน้าล็อกอินหรือเปล่า จะได้แยก "session หมดอายุ" ออกจาก "ไม่มีไฟล์นี้"
-    if html_hit:
-        response = None
-        try:
-            response = _send(sess, "get", html_hit, timeout=timeout, stream=True,
-                             allow_redirects=True, headers={"Range": "bytes=0-1023"})
-            text = _response_text(response)
-            _raise_for_response(response, text, "ตรวจลิงก์ไฟล์แนบ")
-            if _is_login_page(BeautifulSoup(text, "html.parser")):
-                raise SessionExpiredError("session หมดอายุระหว่างตรวจไฟล์แนบ")
-        except SPPWebError:
-            raise
-        except Exception:
-            pass
-        finally:
-            if response is not None:
-                try:
-                    response.close()
-                except Exception:
-                    pass
+            return final_url
     return None
 
 
@@ -771,38 +889,59 @@ def download(sess, url: str, dest: str, *, expected_type: str | None = None) -> 
     part = dest + ".part"
     response = None
     total = 0
-    prefix = bytearray()
     try:
         response = _send(sess, "get", url, timeout=120, stream=True, allow_redirects=True)
-        _raise_for_response(response, "", "ดาวน์โหลดไฟล์แนบ")
         length = str((getattr(response, "headers", {}) or {}).get("Content-Length", "")).strip()
         if length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:
             raise DownloadError(
                 f"ไฟล์แนบใหญ่เกินกำหนด {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
 
+        # ดึงแค่ prefix มาแยก login/challenge/error ก่อนสร้างไฟล์ .part
+        # สำคัญกับ HTTP 403: ถ้าดูแค่ status/body ว่าง หน้า login จะถูกเหมาผิดเป็น Cloudflare
+        chunks = response.iter_content(chunk_size=PROBE_PREFIX_BYTES)
+        buffered = []
+        prefix = bytearray()
+        while len(prefix) < PROBE_PREFIX_BYTES:
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
+            if not chunk:
+                continue
+            buffered.append(chunk)
+            total += len(chunk)
+            if total > MAX_DOWNLOAD_BYTES:
+                raise DownloadError(
+                    f"ไฟล์แนบใหญ่เกินกำหนด {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
+            prefix.extend(chunk[:PROBE_PREFIX_BYTES - len(prefix)])
+
+        prefix_bytes = bytes(prefix)
+        probe_text = prefix_bytes.decode("utf-8", errors="ignore")
+        if _has_explicit_cloudflare_challenge(response, probe_text):
+            _raise_for_response(response, probe_text, "ดาวน์โหลดไฟล์แนบ")
+        if _is_login_page(BeautifulSoup(probe_text, "html.parser")):
+            raise SessionExpiredError("session หมดอายุระหว่างดาวน์โหลดไฟล์แนบ")
+        _raise_for_response(response, probe_text, "ดาวน์โหลดไฟล์แนบ")
+        if _prefix_is_html_or_error(prefix_bytes, _content_type(response)):
+            raise DownloadError("เว็บส่งหน้า HTML/error กลับมาแทนไฟล์แนบ")
+        if expected in ("pdf", ".pdf") and b"%PDF-" not in prefix_bytes[:1024]:
+            raise DownloadError("เว็บส่งข้อมูลที่ไม่ใช่ PDF กลับมา (อาจเป็นหน้า login หรือ error)")
+
         os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
         with open(part, "wb") as out:
-            for chunk in response.iter_content(chunk_size=64 * 1024):
+            for chunk in buffered:
+                out.write(chunk)
+            for chunk in chunks:
                 if not chunk:
                     continue
                 total += len(chunk)
                 if total > MAX_DOWNLOAD_BYTES:
                     raise DownloadError(
                         f"ไฟล์แนบใหญ่เกินกำหนด {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
-                if len(prefix) < 8192:
-                    prefix.extend(chunk[:8192 - len(prefix)])
                 out.write(chunk)
 
         if total == 0:
             raise DownloadError("ไฟล์แนบที่ดาวน์โหลดมาว่างเปล่า")
-        probe_text = bytes(prefix).decode("utf-8", errors="ignore")
-        if _is_cloudflare_block(response, probe_text):
-            raise AccessBlockedError("Cloudflare ส่งหน้า Challenge กลับมาแทนไฟล์แนบ")
-        probe_soup = BeautifulSoup(probe_text, "html.parser")
-        if _is_login_page(probe_soup):
-            raise SessionExpiredError("session หมดอายุระหว่างดาวน์โหลดไฟล์แนบ")
-        if expected in ("pdf", ".pdf") and b"%PDF-" not in bytes(prefix[:1024]):
-            raise DownloadError("เว็บส่งข้อมูลที่ไม่ใช่ PDF กลับมา (อาจเป็นหน้า login หรือ error)")
         os.replace(part, dest)
         return dest
     except SPPWebError:

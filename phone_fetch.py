@@ -36,8 +36,9 @@ import tempfile
 # ไฟล์นี้ถูกกันไม่ให้ขึ้น GitHub แล้ว (.gitignore) รหัสจึงอยู่ในเครื่องคุณเครื่องเดียว
 # จะใส่แค่บางคีย์ก็ได้ — ที่ไม่ใส่ (เช่น spp_pass) สคริปต์จะถามตอนรัน
 RENDER_URL  = "https://saraban.onrender.com"    # ค่าเริ่มต้น (phone_config.json ทับได้)
-PHONE_TOKEN = ""                                 # ค่าเริ่มต้น (phone_config.json ทับได้)
-MAX_FETCH   = 20                                 # ดึงมากสุดต่อรอบ (กันเผลอโหลดทีละเยอะ)
+PHONE_TOKEN = ""                                 # รองรับของเดิม; แนะนำ env/config แทนการแก้ไฟล์นี้
+MAX_FETCH   = 20                                 # เท่าคิวรอเริ่มต้นฝั่งเซิร์ฟเวอร์
+MAX_UPLOAD_BYTES = 40 * 1024 * 1024              # ต้องตรงกับเพดานฝั่งเซิร์ฟเวอร์
 # ==================================
 
 # บังคับจอมือถือให้แสดงภาษาไทยไม่เพี้ยน
@@ -84,9 +85,7 @@ CFG = _load_config()
 
 
 def _resolve_token():
-    """หาโทเคนจาก: ตัวแปรในไฟล์ > ตัวแปรระบบ > phone_config.json > token.txt"""
-    if PHONE_TOKEN.strip():
-        return PHONE_TOKEN.strip()
+    """หาโทเคนจากแหล่งที่ไม่ต้อง commit ก่อน; ค่าฝังใน .py มีไว้รองรับรุ่นเก่าเท่านั้น"""
     env = os.environ.get("SARABAN_PHONE_TOKEN", "").strip()
     if env:
         return env
@@ -97,7 +96,7 @@ def _resolve_token():
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             return f.read().strip()
-    return ""
+    return PHONE_TOKEN.strip()
 
 
 TOKEN = _resolve_token()
@@ -125,10 +124,19 @@ def fetch_history():
 
 def submit(pdf_path, meta):
     """ส่ง PDF + ข้อมูลหนังสือเข้า Render สร้างงานรอลงรับ"""
+    fields = dict(meta)
+    # เป็นคำสั่ง retry ที่ชัดเจน: ถ้า job เดิมล้มให้ใช้ job เดิมส่งใหม่;
+    # แต่ถ้ายังทำอยู่ เซิร์ฟเวอร์จะคืน job เดิมและไม่เริ่มซ้ำ
+    fields["retry_failed"] = "true"
     with open(pdf_path, "rb") as f:
         files = {"file": ("doc.pdf", f, "application/pdf")}
         r = requests.post(RENDER + "/api/phone/submit",
-                          headers=_headers(), files=files, data=meta, timeout=180)
+                          headers=_headers(), files=files, data=fields, timeout=180)
+    if r.status_code == 409:
+        # เกิดได้เมื่ออีกเครื่องลงรับ/ข้ามช่วงหลัง fetch_history — ไม่ใช่งานเสีย
+        return {"ok": True, "already_handled": True, "created": False, "job_id": ""}
+    if r.status_code == 429:
+        raise RuntimeError("คิวเซิร์ฟเวอร์เต็ม กรุณารอสักครู่แล้วรันใหม่")
     r.raise_for_status()
     return r.json()
 
@@ -180,13 +188,18 @@ def main():
         bid = d["book_id"]
         title = (d.get("doc_title") or "")[:40]
         print("[%d/%d] %s  %s ..." % (i, len(new), bid, title), end=" ")
+        tmp = ""
         try:
             det = sppweb.fetch_detail(sess, bid)
             if not det["main_pdf"]:
                 print("ข้าม (ไม่มีไฟล์ PDF)")
                 continue
-            tmp = os.path.join(tempfile.gettempdir(), "spp_%s.pdf" % bid)
+            fd, tmp = tempfile.mkstemp(prefix="spp_", suffix=".pdf")
+            os.close(fd)
             sppweb.download(sess, det["main_pdf"], tmp)
+            if os.path.getsize(tmp) > MAX_UPLOAD_BYTES:
+                print("ข้าม (ไฟล์ใหญ่เกิน ๔๐ MB)")
+                continue
             meta = {"book_id": bid,
                     "doc_no": d.get("doc_no", "-"),
                     "doc_title": d.get("doc_title", "-"),
@@ -195,15 +208,24 @@ def main():
                     "emoji": det.get("emoji", "🔵"),
                     "attach": sppweb.attach_text(det["attachments"])}
             res = submit(tmp, meta)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            ok += 1
-            links.append(res.get("job_id", ""))
-            print("ส่งแล้ว")
+            if res.get("already_handled"):
+                print("จัดการไปแล้วโดยอีกเครื่อง")
+            else:
+                ok += 1
+                if res.get("job_id"):
+                    links.append(res["job_id"])
+                print("อยู่ในคิวเดิม" if not res.get("created", True) else "ส่งแล้ว")
         except Exception as e:
             print("ผิดพลาด: %s" % e)
+            if "คิวเซิร์ฟเวอร์เต็ม" in str(e):
+                print("   หยุดส่งรอบนี้เพื่อไม่เพิ่มภาระเซิร์ฟเวอร์")
+                break
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
     if links:

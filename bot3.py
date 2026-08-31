@@ -587,7 +587,7 @@ class SarabanApp(tk.Tk):
     # ขนาดกระดาษ A4 ที่ ๒๐๐ DPI = ๑๖๕๔ x ๒๓๓๙ px
     # เซฟ PDF ด้วย resolution เดียวกันนี้ หน้ากระดาษใน PDF จะได้เป็น A4 พอดีเป๊ะ
     # (สำคัญมาก — ปริ้นที่ ๑๐๐% แล้วตรายางจะลงตรงตำแหน่งเดียวกับที่เห็นในหน้าจอ)
-    A4_DPI = 200
+    A4_DPI = PDF_RENDER_DPI
     A4_W, A4_H = 1654, 2339
 
     def start_stamp_only_mode(self):
@@ -603,9 +603,14 @@ class SarabanApp(tk.Tk):
 
     def stamp_only_thread(self, job):
         try:
-            receipt_no_thai = get_next_receipt_no()
-            self.stamp_only_info = {'receipt_no': receipt_no_thai, 'job': job}
-            self.after(0, lambda: self.log(f"เลขรับที่จะลง: {receipt_no_thai} (รันต่อจากทะเบียน Excel)"))
+            preview_receipt_no = get_next_receipt_no()
+            self.stamp_only_info = {
+                'receipt_no': preview_receipt_no,
+                'reserved_receipt_no': None,
+                'job': job,
+            }
+            self.after(0, lambda: self.log(
+                f"เลขรับตัวอย่าง: {preview_receipt_no} (ระบบจะจองเลขจริงเมื่อกดบันทึก)"))
             self.after(0, self.show_stamp_only_window)
         except Exception as e:
             self.after(0, lambda e=e: messagebox.showerror("เตรียมกระดาษไม่สำเร็จ", str(e)))
@@ -617,7 +622,9 @@ class SarabanApp(tk.Tk):
         win = tk.Toplevel(self)
         self.stamp_only_win = win
         win.protocol("WM_DELETE_WINDOW", self.cancel_stamp_only)
-        win.title(f"ลงตรายางเลขรับ {self.stamp_only_info['receipt_no']} บนกระดาษ A4 เปล่า — ไว้ปริ้นทับเอกสารกระดาษ")
+        win.title(
+            f"ลงตรายางเลขรับ (ตัวอย่าง {self.stamp_only_info['receipt_no']}) "
+            "บนกระดาษ A4 เปล่า — ไว้ปริ้นทับเอกสารกระดาษ")
         win.geometry("1000x800")
         try:
             win.state('zoomed')
@@ -672,11 +679,14 @@ class SarabanApp(tk.Tk):
 
         head = tk.Frame(panel, bg="#f9f9f9")
         head.pack(fill="x")
-        tk.Label(head, text="เลขรับที่จะลง", font=("Helvetica", 9), bg="#f9f9f9", fg="#666").pack(side="left")
+        tk.Label(head, text="เลขรับตัวอย่าง", font=("Helvetica", 9), bg="#f9f9f9", fg="#666").pack(side="left")
         tk.Label(head, text=self.stamp_only_info['receipt_no'], font=("Helvetica", 20, "bold"),
                  bg="#f9f9f9", fg="#9C27B0").pack(side="left", padx=(6, 0))
         tk.Label(panel, text="กระดาษ A4 เปล่า ไว้ปริ้นทับเอกสารกระดาษ", font=("Helvetica", 8),
                  bg="#f9f9f9", fg="#999", wraplength=228, justify="left").pack(anchor="w", pady=(0, 6))
+        tk.Label(panel, text="เลขจริงจะยืนยันตอนกดบันทึก เพื่อไม่ให้ชนกับเครื่องอื่น",
+                 font=("Helvetica", 8), bg="#f9f9f9", fg="#C62828",
+                 wraplength=228, justify="left").pack(anchor="w", pady=(0, 6))
 
         # --- วันที่/เวลาบนตรายาง: เติมของจริงมาให้ก่อน แก้ได้ถ้าต้องลงรับย้อนหลัง ---
         st = tk.LabelFrame(panel, text=" 🖋 วัน-เวลาบนตรายาง ", font=("Helvetica", 8),
@@ -811,45 +821,74 @@ class SarabanApp(tk.Tk):
         self._finish_job(job)
 
     def finalize_stamp_only(self):
+        info = self.stamp_only_info
+        if info.get('finalizing'):
+            return
         # อ่านค่าจากช่องพิมพ์ก่อนปิดหน้าต่าง (ปิดแล้ว Entry จะหายไป)
-        self.stamp_only_info['fields'] = {k: e.get() for k, e in self.so_fields.items()}
-        self.stamp_only_info['stamp_date'], self.stamp_only_info['stamp_time'] = self._stamp_datetime()
-        self.stamp_only_info['size_pct'] = self.stamp_pct.get()
+        info['fields'] = {k: e.get() for k, e in self.so_fields.items()}
+        info['stamp_date'], info['stamp_time'] = self._stamp_datetime()
+        info['size_pct'] = self.stamp_pct.get()
+        info['background'] = self.stamp_only_bg.copy()
+        info['stamp_x'], info['stamp_y'] = self.stamp_orig_x, self.stamp_orig_y
+        info['page_box'] = (self.so_left, self.so_top, self.so_W, self.so_H)
+        info['dpi'] = self.A4_DPI
         # จำตำแหน่งที่วางไว้ ครั้งหน้าเปิดมาจะอยู่ที่เดิม
         left_cm, top_cm, _ = self._stamp_margins_cm()
-        save_stamp_pos(left_cm, top_cm, self.stamp_pct.get())
-        self.stamp_only_win.destroy()
-        self.set_status("กำลังลงตรายางและสร้างไฟล์...")
-        threading.Thread(target=self.finalize_stamp_only_thread, daemon=True).start()
-
-    def finalize_stamp_only_thread(self):
-        info = self.stamp_only_info
-        job = info.get('job')
-        receipt_no = info['receipt_no']
         try:
-            final_bg = self.stamp_only_bg.copy()
-            stamp_rgba = render_transparent_stamp(receipt_no, info['size_pct'],
-                                                  info['stamp_date'], info['stamp_time'])
-            final_bg.paste(stamp_rgba, (int(self.stamp_orig_x), int(self.stamp_orig_y)), stamp_rgba)
+            save_stamp_pos(left_cm, top_cm, self.stamp_pct.get())
+        except Exception as e:
+            self.log(f"⚠️ จำตำแหน่งตรายางไม่สำเร็จ แต่ยังบันทึกเอกสารต่อได้: {e}")
+        info['finalizing'] = True
+        self.stamp_only_win.destroy()
+        self.set_status("กำลังจองเลขรับจริงและสร้างไฟล์...")
+        threading.Thread(
+            target=self.finalize_stamp_only_thread, args=(info,), daemon=True).start()
 
-            page = final_bg.crop((self.so_left, self.so_top, self.so_left + self.so_W, self.so_top + self.so_H))
+    def finalize_stamp_only_thread(self, info):
+        job = info.get('job')
+        try:
+            f = info.get('fields', {})
 
+            # เตรียมปลายทางก่อนจองเลข เพื่อลดโอกาสที่เลขถูกจองแล้วแต่สร้างไฟล์ไม่ได้
             today_str = datetime.now().strftime("%Y-%m-%d")
             save_folder = os.path.join(OUTPUT_ROOT, today_str)
-            if not os.path.exists(save_folder): os.makedirs(save_folder)
+            os.makedirs(save_folder, exist_ok=True)
+            base = re.sub(
+                r'[<>:"/\\|?*]+', '_', (f.get('doc_no') or "").strip()).strip(' ._')
 
-            f = info.get('fields', {})
-            # ถ้าพิมพ์ "ที่" มา ใช้ตั้งชื่อไฟล์ให้ด้วย จะได้หาไฟล์ง่าย
-            base = (f.get('doc_no') or "").strip().replace("/", "_").replace(":", "").replace("\\", "_").strip()
+            # จองเลขจริงและเขียนทะเบียนใน operation เดียว เลขที่แสดงตอน preview
+            # เป็นเพียงตัวอย่างเท่านั้น หาก retry หลังจองแล้วจะใช้เลขเดิมจาก info
+            preview_receipt_no = info.get('receipt_no')
+            receipt_no = reserve_receipt_once(
+                info,
+                doc_no=f.get('doc_no', ''),
+                doc_date=f.get('doc_date', ''),
+                sender=f.get('sender', ''),
+                doc_title=f.get('doc_title', ''),
+                receive_date=info['stamp_date'],
+            )
+            info['receipt_no'] = receipt_no
+            if receipt_no != preview_receipt_no:
+                self.after(0, lambda old=preview_receipt_no, new=receipt_no: self.log(
+                    f"เลขรับเปลี่ยนจากตัวอย่าง {old} เป็นเลขที่จองได้จริง {new}"))
+
+            final_bg = info['background'].copy()
+            stamp_rgba = render_transparent_stamp(receipt_no, info['size_pct'],
+                                                  info['stamp_date'], info['stamp_time'])
+            final_bg.paste(
+                stamp_rgba, (int(info['stamp_x']), int(info['stamp_y'])), stamp_rgba)
+
+            page_left, page_top, page_w, page_h = info['page_box']
+            page = final_bg.crop(
+                (page_left, page_top, page_left + page_w, page_top + page_h))
             name = f"เลขรับ_{receipt_no}_{base}.pdf" if base else f"เลขรับ_{receipt_no}.pdf"
             final_pdf_path = os.path.join(save_folder, name)
 
             # เซฟด้วย resolution = A4_DPI → หน้ากระดาษใน PDF เป็น A4 พอดี
             # ปริ้นที่ ๑๐๐% (ห้ามใช้ Fit to page) ตรายางจะลงตรงตำแหน่งที่เห็นในหน้าจอเป๊ะ
-            page.convert('RGB').save(final_pdf_path, "PDF", resolution=float(self.A4_DPI))
-
-            append_excel_receipt_only(receipt_no, f.get('doc_no', ''), f.get('doc_date', ''),
-                                      f.get('sender', ''), f.get('doc_title', ''), info['stamp_date'])
+            temp_pdf_path = self._job_path(job, "stamp_output.pdf")
+            save_image_as_pdf(page, temp_pdf_path, dpi=info['dpi'])
+            os.replace(temp_pdf_path, final_pdf_path)
 
             self.after(0, lambda: self.log(f"ลงเลขรับ {receipt_no} บนกระดาษเปล่า → {final_pdf_path}"))
             self.after(0, lambda: self.set_status(f"✅ ลงเลขรับ {receipt_no} เรียบร้อย (ลงทะเบียน Excel แล้ว)"))
@@ -862,11 +901,41 @@ class SarabanApp(tk.Tk):
                 f"ลงตรายางเลขรับ {receipt_no} บนกระดาษ A4 เปล่าแล้ว\n\nไฟล์: {final_pdf_path}\n\n{note}\n\n"
                 f"⚠️ ตอนปริ้น ให้ตั้งขนาดเป็น 100% หรือ 'ขนาดจริง (Actual size)'\n"
                 f"อย่าใช้ 'Fit to page' ไม่งั้นตรายางจะเลื่อนตำแหน่ง"))
-        except Exception as e:
-            self.after(0, lambda e=e: messagebox.showerror("ลงตรายางไม่สำเร็จ", str(e)))
-            self.after(0, lambda e=e: self.set_status(f"ลงตรายางไม่สำเร็จ: {e}"))
-        finally:
             self._finish_job(job)
+        except Exception as e:
+            self.after(0, lambda e=e, info=info: self._handle_stamp_only_failure(info, e))
+
+    def _handle_stamp_only_failure(self, info, error):
+        """เสนอ retry โดยคงเลขที่จองแล้วไว้ ไม่จองเลขใหม่ซ้ำ."""
+        info['finalizing'] = False
+        reserved = info.get('reserved_receipt_no')
+        if reserved:
+            detail = (
+                f"เลขรับ {reserved} ลงทะเบียนไว้แล้ว\n"
+                "กดลองใหม่ได้ ระบบจะใช้เลขเดิมและไม่กินเลขถัดไป")
+            self.set_status(
+                f"ลงทะเบียนเลขรับ {reserved} แล้ว แต่สร้างไฟล์ไม่สำเร็จ — รอลองใหม่")
+        else:
+            detail = "ยังไม่ได้จองเลขรับ จึงยังไม่มีเลขถูกใช้"
+            self.set_status(f"ลงตรายางไม่สำเร็จ: {error}")
+
+        retry = messagebox.askretrycancel(
+            "ลงตรายางไม่สำเร็จ",
+            f"{error}\n\n{detail}\n\nต้องการลองสร้างไฟล์อีกครั้งหรือไม่?")
+        if retry:
+            info['finalizing'] = True
+            self.set_status(
+                f"กำลังลองสร้างไฟล์ด้วยเลขรับเดิม {reserved}..."
+                if reserved else "กำลังลองจองเลขรับและสร้างไฟล์อีกครั้ง...")
+            threading.Thread(
+                target=self.finalize_stamp_only_thread, args=(info,), daemon=True).start()
+        else:
+            if reserved:
+                self.log(
+                    f"⚠️ หยุดสร้างไฟล์ แต่เลขรับ {reserved} ถูกลงทะเบียนไว้แล้ว")
+            else:
+                self.log("ยกเลิกหลังสร้างไฟล์ไม่สำเร็จ (ยังไม่ได้ใช้เลขรับ)")
+            self._finish_job(info.get('job'))
 
     def start_web_mode(self):
         state = self.spp_session_state
@@ -1071,11 +1140,10 @@ class SarabanApp(tk.Tk):
             'page1_path': page1_path, 'page_sig_path': page_sig_path,
         }
         
-        images = convert_from_path(temp_pdf, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
-        images[0].save(page1_path, "JPEG")
+        render_pdf_page(temp_pdf, page_number=1, dpi=self.A4_DPI).save(page1_path, "JPEG")
         if sig_page > 1:
-            img_sig = convert_from_path(temp_pdf, first_page=sig_page, last_page=sig_page, poppler_path=POPPLER_PATH)
-            img_sig[0].save(page_sig_path, "JPEG")
+            render_pdf_page(temp_pdf, page_number=sig_page, dpi=self.A4_DPI).save(
+                page_sig_path, "JPEG")
 
         # ล้าง cache รูปต้นฉบับของเอกสารเดิม (เริ่มเอกสารใหม่)
         self._p1_orig_cache = None
@@ -1496,18 +1564,18 @@ class SarabanApp(tk.Tk):
             p1_crop = final_bg.crop((
                 20, snapshot['page_top'], 20 + snapshot['W'],
                 snapshot['page_top'] + snapshot['p1_h']))
-            p1_crop.convert('RGB').save(p1_path, "PDF", resolution=100.0)
+            save_image_as_pdf(p1_crop, p1_path, dpi=self.A4_DPI)
 
             if snapshot['psig_h'] > 0:
                 psig_top = snapshot['page_top'] + snapshot['p1_h'] + snapshot['gap']
                 psig_crop = final_bg.crop((
                     20, psig_top, 20 + snapshot['W'], psig_top + snapshot['psig_h']))
-                psig_crop.convert('RGB').save(psig_path, "PDF", resolution=100.0)
+                save_image_as_pdf(psig_crop, psig_path, dpi=self.A4_DPI)
             if has_blank_page:
                 blank_crop = final_bg.crop((
                     20, snapshot['blank_start_y'], 20 + snapshot['W'],
                     snapshot['blank_start_y'] + snapshot['blank_h']))
-                blank_crop.convert('RGB').save(blank_path, "PDF", resolution=100.0)
+                save_image_as_pdf(blank_crop, blank_path, dpi=self.A4_DPI)
 
             merger = PdfMerger()
             try:
