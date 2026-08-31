@@ -17,6 +17,8 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta
 
+from urllib.parse import quote
+
 import core
 from core import now_th
 import sppweb
@@ -714,7 +716,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     if blank_pdf:
         merger.append(blank_pdf)
 
-    today = now_th().strftime("%Y-%m-%d")
+    today = core.day_folder()          # "๒๕๖๙/๐๘ สิงหาคม/๒๘" — ซอยเป็น ปี/เดือน/วัน
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
     out = os.path.join(folder, safe_output_filename(job.get("doc_no", ""), receipt_no))
@@ -754,7 +756,8 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     return {"ok": True, "receipt_no": receipt_no, "line_ok": line_ok,
             "drive_link": drive_link,
             "filename": os.path.basename(out),
-            "download": f"/api/doc/download/{today}/{os.path.basename(out)}"}
+            # เข้ารหัส URL — ที่อยู่มีอักษรไทยและเว้นวรรค ("๐๘ สิงหาคม")
+            "download": "/api/doc/download/" + quote(today) + "/" + quote(os.path.basename(out))}
 
 
 def skip(job):

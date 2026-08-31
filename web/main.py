@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request, Form, HTTPException, Depends, Cookie
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from urllib.parse import quote
+
 import core
 from core import now_th
 from core import (
@@ -543,7 +545,7 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
     y = max(0, min(int(top_cm * CM), A4_H - stamp.height))
     page.paste(stamp, (x, y), stamp)
 
-    today = now_th().strftime("%Y-%m-%d")
+    today = core.day_folder()          # "๒๕๖๙/๐๘ สิงหาคม/๒๘" — ซอยเป็น ปี/เดือน/วัน
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
     name = docmode.safe_output_filename(f.get("doc_no", ""), receipt_no)
@@ -567,12 +569,13 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
         "filename": name,
         "path": path,
         "filled": filled,
-        "download": f"/api/stamp/download/{today}/{name}",
+        # เข้ารหัส URL — ที่อยู่มีอักษรไทยและเว้นวรรค ("๐๘ สิงหาคม")
+        "download": "/api/stamp/download/" + quote(today) + "/" + quote(name),
         "drive_link": drive_link,
     }
 
 
-@app.get("/api/stamp/download/{day}/{name}")
+@app.get("/api/stamp/download/{day:path}/{name}")
 def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
     """ดาวน์โหลด PDF ที่เพิ่งสร้าง (กันเรียกไฟล์นอกโฟลเดอร์ด้วยการเช็ก path)"""
     path = docmode.contained_path(core.OUTPUT_ROOT, day, name)
@@ -1045,7 +1048,7 @@ def api_fix_history(q: str = "", user: str = Depends(current_user)):
     return {"total": len(ids), "ids": ids[:30]}
 
 
-@app.get("/api/doc/download/{day}/{name}")
+@app.get("/api/doc/download/{day:path}/{name}")
 def api_doc_download(day: str, name: str, user: str = Depends(current_user)):
     path = docmode.contained_path(core.OUTPUT_ROOT, day, name)
     if not path or not os.path.isfile(path):
