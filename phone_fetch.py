@@ -18,12 +18,19 @@
 วิธีใช้ใน a-Shell (iOS) — ตั้งครั้งเดียว:
   ๑. pip install requests beautifulsoup4
   ๒. วางไฟล์ ๓ ตัวไว้โฟลเดอร์เดียวกัน:  core.py, sppweb.py, phone_fetch.py
-  ๓. แก้ RENDER_URL กับ PHONE_TOKEN ด้านล่างครั้งเดียว
-ใช้งานทุกครั้ง:  python phone_fetch.py   (แล้วใส่รหัสเว็บ สพป. เมื่อถาม)
+  ๓. สร้าง phone_config.json ข้างไฟล์นี้ (ดูตัวอย่างที่ phone_config.example.json)
+ใช้งานทุกครั้ง:  python phone_fetch.py   (หรือแตะไอคอนที่ทำไว้บนหน้าจอ)
 """
 import os
 import sys
 import tempfile
+
+# หาไฟล์ข้างๆ ให้เจอเสมอ ไม่ว่าจะถูกเรียกจากโฟลเดอร์ไหน
+# (แอป Shortcuts รันคำสั่งจากโฟลเดอร์ปัจจุบันซึ่งอาจไม่ใช่ที่ไฟล์อยู่
+#  ถ้าไม่ทำแบบนี้ import sppweb จะไม่เจอเวลาแตะจากไอคอนหน้าจอ)
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 # ======== ตั้งค่า ========
 # วิธีที่แนะนำ: สร้างไฟล์ phone_config.json ข้างไฟล์นี้ (ไม่ต้องแก้ .py) เช่น
@@ -68,8 +75,7 @@ except ImportError as e:
 
 def _load_config():
     """อ่าน phone_config.json ข้างสคริปต์ (ถ้ามี) — ที่เก็บ token/รหัสไว้ในเครื่อง"""
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "phone_config.json")
+    path = os.path.join(HERE, "phone_config.json")
     if not os.path.exists(path):
         return {}
     try:
@@ -91,8 +97,7 @@ def _resolve_token():
         return env
     if str(CFG.get("token", "")).strip():
         return str(CFG["token"]).strip()
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "token.txt")
+    path = os.path.join(HERE, "token.txt")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             return f.read().strip()
