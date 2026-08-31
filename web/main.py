@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 import core
+from core import now_th
 from core import (
     Image,
     get_next_receipt_no, register_document,
@@ -60,7 +61,7 @@ async def _json_errors(request: Request, exc: Exception):
     import traceback
     try:
         log = core._w("ai_error.log")
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stamp = now_th().strftime("%Y-%m-%d %H:%M:%S")
         with open(log, "a", encoding="utf-8") as f:
             f.write("[" + stamp + "] " + str(request.url.path) + '\n')
             f.write(traceback.format_exc())
@@ -116,7 +117,7 @@ def _make_user(username: str, password: str, display: str, role: str, status: st
         "display": display or username,
         "role": role,        # admin = อนุมัติคนอื่นได้ | user = ใช้งานอย่างเดียว
         "status": status,    # pending = รออนุมัติ | approved = ใช้ได้ | rejected = ไม่อนุญาต
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "created": now_th().strftime("%Y-%m-%d %H:%M"),
     }
 
 
@@ -291,7 +292,7 @@ def healthz():
     (งานเก็บในหน่วยความจำ ถ้าเลขกลับเป็น ๐ เอง แปลว่าเพิ่งรีสตาร์ท)
     """
     return {"ok": True, "jobs": len(docmode._jobs),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            "time": now_th().strftime("%Y-%m-%d %H:%M:%S")}
 
 
 # ==========================================================
@@ -542,7 +543,7 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
     y = max(0, min(int(top_cm * CM), A4_H - stamp.height))
     page.paste(stamp, (x, y), stamp)
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_th().strftime("%Y-%m-%d")
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
     name = docmode.safe_output_filename(f.get("doc_no", ""), receipt_no)

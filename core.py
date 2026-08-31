@@ -10,7 +10,24 @@ import json
 import time
 import threading
 import importlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# ==========================================
+# เวลาราชการไทยเสมอ ไม่ว่าเครื่องที่รันจะตั้งโซนเวลาอะไรไว้
+# ==========================================
+# hosting ต่างประเทศ (Render) ตั้งเครื่องเป็น UTC ถ้าอ่านเวลาเครื่องตรงๆ
+# ตรายางเลขรับจะพิมพ์เวลาผิดไป ๗ ชั่วโมง และถ้าลงรับก่อน ๐๗:๐๐ น.
+# "วันที่" จะเพี้ยนไปหนึ่งวันด้วย — เป็นเอกสารราชการที่แก้ทีหลังยาก
+# รวมถึงชื่อโฟลเดอร์รายวันที่เก็บไฟล์ก็จะแยกคนละวันกับเครื่องที่โรงเรียน
+#
+# ไทยไม่มี DST และใช้ UTC+7 มาตลอด จึงตรึงค่าไว้ได้เลย
+# ไม่ต้องพึ่งฐานข้อมูลโซนเวลาของเครื่อง (Windows ไม่มีมาให้ ต้องลง tzdata เพิ่ม)
+THAI_TZ = timezone(timedelta(hours=7))
+
+
+def now_th():
+    """เวลาปัจจุบันตามเวลาไทย — ใช้แทน datetime.now() ทุกที่ที่ผู้ใช้เห็นผล"""
+    return datetime.now(THAI_TZ)
 
 # ==========================================
 # ๐. โหลดไลบรารีหนักแบบ "ใช้เมื่อไหร่ค่อยโหลด" (Lazy Import)
@@ -259,7 +276,7 @@ def format_scraped_date(raw_date):
 THAI_MONTHS_ABBR = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
 
 def get_thai_date():
-    now = datetime.now()
+    now = now_th()
     thai_year = now.year + 543
     month_name = THAI_MONTHS_ABBR[now.month - 1]
     date_str = f"{now.day} {month_name} {thai_year}"
@@ -285,7 +302,7 @@ def normalize_typed_date(raw):
 def get_thai_time_rounded():
     """เวลาลงรับแบบปัดเข้าครึ่งชั่วโมงที่ใกล้ที่สุด (ลงท้ายด้วย ๐๐ หรือ ๓๐ เท่านั้น)
     เช่น ๐๙:๑๔ → ๐๙:๐๐ | ๐๙:๒๐ → ๐๙:๓๐ | ๐๙:๕๐ → ๑๐:๐๐"""
-    now = datetime.now()
+    now = now_th()
     slot = (((now.hour * 60 + now.minute) + 15) // 30) * 30
     slot %= 24 * 60          # ถ้าเลย ๒๓:๔๕ แล้วปัดขึ้น ให้วนกลับเป็น ๐๐:๐๐
     return to_thai_digits(f"{slot // 60:02d}:{slot % 60:02d}")
@@ -408,7 +425,7 @@ def generate_kasien_text(pdf_path):
         try:
             import traceback
             with open(_w("ai_error.log"), "a", encoding="utf-8") as logf:
-                logf.write("\n[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]\n")
+                logf.write("\n[" + now_th().strftime("%Y-%m-%d %H:%M:%S") + "]\n")
                 logf.write(traceback.format_exc())
         except Exception:
             pass

@@ -23,6 +23,7 @@ import threading
 from datetime import datetime
 
 import core
+from core import now_th
 
 # ล็อกในโปรเซสเดียวกัน (เว็บมีหลาย request พร้อมกัน)
 _mem_lock = threading.RLock()
@@ -137,12 +138,12 @@ class StatusMixin:
 
     def mark_registered(self, book_id, receipt_no):
         self.set_record(book_id, {"status": DONE, "receipt_no": str(receipt_no),
-                                  "when": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                                  "when": now_th().strftime("%Y-%m-%d %H:%M")})
         self.add_history(book_id)
 
     def mark_skipped(self, book_id):
         self.set_record(book_id, {"status": SKIP, "receipt_no": "",
-                                  "when": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                                  "when": now_th().strftime("%Y-%m-%d %H:%M")})
         self.add_history(book_id)
 
 
@@ -538,7 +539,7 @@ class SheetsStore(StatusMixin, UsersMixin):
             if book_id in self.history_ids():
                 return
             self._append(self.TAB_HIST,
-                         [[book_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]])
+                         [[book_id, now_th().strftime("%Y-%m-%d %H:%M:%S")]])
             self._hist_cache = None
 
     # ---- ทะเบียนรับ ----

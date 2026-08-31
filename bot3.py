@@ -139,7 +139,7 @@ class SarabanApp(tk.Tk):
     def open_output_folder(self):
         """เปิดโฟลเดอร์เก็บไฟล์ (ของวันนี้ถ้ามี) ใน File Explorer เพื่อสะดวกตอนปริ้น"""
         base = OUTPUT_ROOT
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = now_th().strftime("%Y-%m-%d")
         target = os.path.join(base, today_str)
         folder = target if os.path.exists(target) else base
         try:
@@ -237,7 +237,7 @@ class SarabanApp(tk.Tk):
         """เพิ่มข้อความลงกล่องแสดงสิ่งที่กำลังทำอยู่ (พร้อมเวลา)"""
         if not hasattr(self, 'log_box'):
             return
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = now_th().strftime('%H:%M:%S')
         self.log_box.config(state="normal")
         self.log_box.insert("end", f"[{ts}] {msg}\n")
         self.log_box.see("end")
@@ -850,7 +850,7 @@ class SarabanApp(tk.Tk):
             f = info.get('fields', {})
 
             # เตรียมปลายทางก่อนจองเลข เพื่อลดโอกาสที่เลขถูกจองแล้วแต่สร้างไฟล์ไม่ได้
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = now_th().strftime("%Y-%m-%d")
             save_folder = os.path.join(OUTPUT_ROOT, today_str)
             os.makedirs(save_folder, exist_ok=True)
             base = re.sub(
@@ -1000,7 +1000,7 @@ class SarabanApp(tk.Tk):
             try:
                 import traceback
                 with open(_w("ai_error.log"), "a", encoding="utf-8") as logf:
-                    logf.write("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] ดึงข้อมูลเว็บ" + os.linesep)
+                    logf.write("[" + now_th().strftime("%Y-%m-%d %H:%M:%S") + "] ดึงข้อมูลเว็บ" + os.linesep)
                     logf.write(traceback.format_exc())
             except Exception:
                 pass
@@ -1593,7 +1593,7 @@ class SarabanApp(tk.Tk):
                 if has_blank_page:
                     merger.append(blank_path)
 
-                today_str = datetime.now().strftime("%Y-%m-%d")
+                today_str = now_th().strftime("%Y-%m-%d")
                 save_folder = os.path.join(OUTPUT_ROOT, today_str)
                 os.makedirs(save_folder, exist_ok=True)
                 safe_name = re.sub(r'[<>:"/\\|?*]+', '_', str(doc['doc_no'])).strip(' ._')

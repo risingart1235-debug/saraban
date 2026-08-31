@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta
 
 import core
+from core import now_th
 import sppweb
 from core import (
     Image,
@@ -32,6 +33,10 @@ from core import (
 DPI = 200                      # ความละเอียดที่ใช้ทำงานจริง (เท่ากับเวอร์ชันเดสก์ท็อป)
 PREVIEW_DPI = 100              # ความละเอียดภาพที่ส่งให้เบราว์เซอร์ (เล็กลงครึ่ง โหลดเร็วบนมือถือ)
 CM = DPI / 2.54
+
+# ค่าเริ่มต้นสำหรับเรียงลำดับเมื่อไม่มีเวลาสร้าง — ต้องมีโซนเวลาเหมือน now_th()
+# ไม่งั้นเทียบ datetime แบบมีโซนกับไม่มีโซนแล้วพัง
+_OLDEST = datetime.min.replace(tzinfo=core.THAI_TZ)
 
 _jobs = {}
 _lock = threading.Lock()
@@ -158,7 +163,7 @@ def contained_path(root: str, *parts: str):
 
 def _cleanup():
     """ลบงานเก่าที่ค้างไว้ กันหน่วยความจำบวม"""
-    now = datetime.now()
+    now = now_th()
     with _lock:
         for jid in [j for j, v in _jobs.items() if now - v["created"] > JOB_TTL]:
             v = _jobs.pop(jid)
@@ -169,7 +174,7 @@ def _new_job_locked(user: str, **initial) -> dict:
     jid = uuid.uuid4().hex
     d = os.path.join(core._w("_jobs"), jid)
     os.makedirs(d, exist_ok=True)
-    job = {"id": jid, "user": user, "created": datetime.now(),
+    job = {"id": jid, "user": user, "created": now_th(),
            "status": "analyzing", "step": "กำลังเตรียมเอกสาร...", "dir": d}
     job.update(initial)
     _jobs[jid] = job
@@ -248,7 +253,7 @@ def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
     with _lock:
         matching = [j for j in _jobs.values()
                     if j.get("source") == "phone" and j.get("book_id") == clean["book_id"]]
-        matching.sort(key=lambda j: j.get("created") or datetime.min, reverse=True)
+        matching.sort(key=lambda j: j.get("created") or _OLDEST, reverse=True)
         for existing in matching:
             status = existing.get("status", "")
             if status in ("done", "skipped"):
@@ -309,7 +314,7 @@ def phone_queue() -> list:
                 "book_id": j.get("book_id", ""),
                 "time": j["created"].strftime("%H:%M") if j.get("created") else "",
             }))
-    rows.sort(key=lambda r: r[0] or datetime.min, reverse=True)
+    rows.sort(key=lambda r: r[0] or _OLDEST, reverse=True)
     return [r[1] for r in rows]
 
 
@@ -462,7 +467,7 @@ def start_from_phone(user: str, pdf_bytes: bytes, meta: dict,
 def _fail(job, e):
     try:
         with open(core._w("ai_error.log"), "a", encoding="utf-8") as f:
-            f.write("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] เว็บ/เปิดงาน\n")
+            f.write("[" + now_th().strftime("%Y-%m-%d %H:%M:%S") + "] เว็บ/เปิดงาน\n")
             f.write(traceback.format_exc())
     except Exception:
         pass
@@ -688,7 +693,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     if blank_pdf:
         merger.append(blank_pdf)
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_th().strftime("%Y-%m-%d")
     folder = os.path.join(core.OUTPUT_ROOT, today)
     os.makedirs(folder, exist_ok=True)
     out = os.path.join(folder, safe_output_filename(job.get("doc_no", ""), receipt_no))
