@@ -76,16 +76,21 @@ def get_job(job_id: str, user: str):
 
 
 def phone_queue() -> list:
-    """งานที่มือถือส่งเข้ามาและยังรอลงรับ (ยังไม่ done/skip) — ใหม่สุดอยู่บน"""
+    """งานที่มือถือส่งเข้ามาและยังไม่จบ (ยังไม่ done/skip) — ใหม่สุดอยู่บน
+
+    ต้องรวม status "error" ด้วย ไม่งั้นเรื่องที่ประมวลผลพังจะหายเงียบ
+    ผู้ใช้จะเห็นแค่หน้าว่างทั้งที่สคริปต์บอกว่าส่งสำเร็จ — หาสาเหตุไม่ได้เลย
+    """
     rows = []
     with _lock:
         for j in _jobs.values():
-            if j.get("source") != "phone" or j.get("status") not in ("analyzing", "ready"):
+            if j.get("source") != "phone" or j.get("status") not in ("analyzing", "ready", "error"):
                 continue
             rows.append((j.get("created"), {
                 "job_id": j["id"],
                 "status": j.get("status"),
                 "step": j.get("step", ""),
+                "error": j.get("error", ""),
                 "receipt_no": j.get("receipt_no", ""),
                 "doc_no": j.get("doc_no", "-"),
                 "doc_title": j.get("doc_title", "-"),

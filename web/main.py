@@ -756,8 +756,16 @@ def queue_page(session: str = Cookie(default=None)):
 
 
 @app.get("/api/phone/queue")
-def api_phone_queue(user: str = Depends(current_user)):
-    """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (โหมด ๔)"""
+def api_phone_queue(request: Request, session: str = Cookie(default=None)):
+    """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (โหมด ๔)
+
+    รับได้ทั้งคุกกี้ล็อกอิน (หน้าเว็บเรียก) และโทเคนมือถือ (สคริปต์เรียกเช็กเอง
+    ว่างานที่ส่งไปสถานะอะไร — จำเป็นตอนหาสาเหตุเวลางานไม่โผล่)
+    """
+    with _session_lock:
+        ok = session in _sessions
+    if not ok:
+        _check_phone_token(request)      # ไม่ใช่คนล็อกอิน ก็ต้องมีโทเคนที่ถูกต้อง
     return {"ok": True, "jobs": docmode.phone_queue()}
 
 

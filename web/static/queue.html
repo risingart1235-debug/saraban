@@ -58,6 +58,14 @@ function show(kind, html) { const m = $('msg'); m.className = kind; m.innerHTML 
 let timer = null;
 
 function card(j) {
+  // ประมวลผลพัง — ต้องโชว์ให้เห็นพร้อมสาเหตุ ไม่ใช่ซ่อนหายไปเฉยๆ
+  if (j.status === 'error') {
+    return `<div class="doc" style="border-color:#fca5a5;background:#fef2f2">
+      <div class="no">⚠️ ${esc(j.doc_no)}</div>
+      <div class="ti">${esc(j.doc_title)}</div>
+      <div class="me" style="color:#b91c1c">ประมวลผลไม่สำเร็จ: ${esc(j.error)}</div>
+      <div class="me">ดึงใหม่ได้โดยรัน phone_fetch.py อีกครั้ง (ยังไม่กินเลขรับ)</div></div>`;
+  }
   // ยังประมวลผลไม่เสร็จ = ยังกดเข้าไม่ได้ โชว์สปินเนอร์รอ
   if (j.status !== 'ready') {
     return `<div class="doc wait">
@@ -87,8 +95,11 @@ async function load() {
       return;
     }
     const ready = jobs.filter(j => j.status === 'ready').length;
-    const wait = jobs.length - ready;
-    $('sum').innerHTML = `รอลงรับ <b>${ready}</b> เรื่อง` + (wait ? ` · กำลังประมวลผลอีก ${wait}` : '');
+    const bad = jobs.filter(j => j.status === 'error').length;
+    const wait = jobs.length - ready - bad;
+    $('sum').innerHTML = `รอลงรับ <b>${ready}</b> เรื่อง`
+      + (wait ? ` · กำลังประมวลผลอีก ${wait}` : '')
+      + (bad ? ` · <span style="color:#b91c1c">ไม่สำเร็จ ${bad}</span>` : '');
     $('list').innerHTML = jobs.map(card).join('');
     // ถ้ายังมีเรื่องประมวลผลค้าง รีเฟรชเองทุก 4 วินาที
     clearTimeout(timer);
