@@ -61,6 +61,29 @@ def _year_of(value):
     return y if y > 2400 else y + 543          # ๒๐๒๖ -> ๒๕๖๙
 
 
+def year_tab(base: str, year: int, base_year: int) -> str:
+    """ชื่อแท็บของปีนั้น — ปีของแท็บเดิมใช้ชื่อเดิม ปีอื่นเติมปีต่อท้าย
+
+    ทำแบบนี้เพื่อไม่ต้องย้าย/เปลี่ยนชื่อแท็บที่ใช้อยู่ (มีข้อมูลจริงอยู่แล้ว)
+    พอขึ้นปีใหม่ระบบจะสร้าง "ทะเบียนรับ ๒๕๗๐" ให้เอง
+    """
+    return base if year == base_year else f"{base} {core.to_thai_digits(year)}"
+
+
+def newest_year_in(rows, date_cols) -> int:
+    """ปี พ.ศ. ล่าสุดที่พบในตาราง — ใช้บอกว่าแท็บเดิมเป็นของปีไหน"""
+    best = 0
+    for r in rows:
+        if not r or not str(r[0] or "").strip():
+            continue
+        for dc in date_cols:
+            y = _year_of(r[dc] if len(r) > dc else "")
+            if y is not None:
+                best = max(best, y)
+                break
+    return best
+
+
 def _next_no_this_year(rows, date_cols, data_cols) -> int:
     """เลขถัดไปของ "ปีนี้" — ขึ้นปีใหม่แล้วเริ่มนับ ๑ ใหม่
 
@@ -305,14 +328,51 @@ class LocalStore(StatusMixin, UsersMixin):
                 f.write(book_id + "\n")
 
     # ---- ทะเบียนรับ ----
+    def _sheet_for_now(self, wb, base: str, headers: list, date_cols):
+        """ชีตของปีปัจจุบันในสมุดเล่มนี้ — ขึ้นปีใหม่แล้วสร้างชีตใหม่ให้เอง
+
+        ชีตเดิมไม่ต้องย้าย/เปลี่ยนชื่อ ถือเป็นของปีที่มันเก็บอยู่
+        """
+        # ชีตแรกคือ "ชีตเดิม" เสมอ ไม่ว่าจะชื่ออะไร — ไฟล์ทะเบียนส่งจริงมีชีตชื่อ
+        # "ทะเบียนรับ" (ตั้งชื่อผิดมาแต่เดิม) ถ้าหาตามชื่ออย่างเดียวจะไม่เจอ
+        # แล้วไปสร้างชีตเปล่าใหม่ ทั้งที่ข้อมูลอยู่ในชีตแรก
+        first = wb[base] if base in wb.sheetnames else wb.worksheets[0]
+        rows = [list(r) for r in first.iter_rows(min_row=2, values_only=True)]
+        base_year = newest_year_in(rows, date_cols) or (now_th().year + 543)
+        if now_th().year + 543 == base_year:
+            return first                        # ยังเป็นปีของชีตเดิม ใช้ชีตนั้นต่อ
+        name = year_tab(base, now_th().year + 543, base_year)
+        if name in wb.sheetnames:
+            return wb[name]
+        ws = wb.create_sheet(title=name)
+        ws.append(headers)
+        return ws
+
+    def _all_sheets(self, wb, base: str):
+        """ชีตทั้งหมดของทะเบียนเล่มนี้ เรียงจากปีเก่าไปใหม่"""
+        found = []
+        for name in wb.sheetnames:
+            if name == base:
+                found.append((0, name))
+            elif name.startswith(base + " "):
+                y = core.to_arabic_digits(name[len(base) + 1:].strip())
+                if y.isdigit():
+                    found.append((int(y), name))
+        out = [wb[n] for _, n in sorted(found)]
+        if base not in wb.sheetnames:
+            # ชีตเดิมชื่ออื่น (เช่นไฟล์ทะเบียนส่งที่ชีตชื่อ "ทะเบียนรับ")
+            # ต้องนับเป็นชีตเก่าสุดด้วย ไม่งั้นข้อมูลปีก่อนๆ จะหายจากรายการ
+            out.insert(0, wb.worksheets[0])
+        return out
+
     def _open_ws(self):
         from openpyxl import Workbook, load_workbook
         path = core.REGISTRY_XLSX
         if not os.path.exists(path):
             wb = Workbook(); ws = wb.active; ws.title = "ทะเบียนรับ"; ws.append(HEADERS)
-        else:
-            wb = load_workbook(path); ws = wb.active
-        return wb, ws, path
+            return wb, ws, path
+        wb = load_workbook(path)
+        return wb, self._sheet_for_now(wb, "ทะเบียนรับ", HEADERS, REG_DATE_COLS), path
 
     def _save_ws(self, wb, path=None):
         """เซฟทะเบียนแบบปลอดภัย — เขียนไฟล์ชั่วคราวให้เสร็จก่อน แล้วค่อยสลับเข้าที่
@@ -344,7 +404,8 @@ class LocalStore(StatusMixin, UsersMixin):
         if not os.path.exists(core.REGISTRY_XLSX):
             return core.to_thai_digits(1)
         from openpyxl import load_workbook
-        ws = load_workbook(core.REGISTRY_XLSX, read_only=True).active
+        wb = load_workbook(core.REGISTRY_XLSX)
+        ws = self._sheet_for_now(wb, "ทะเบียนรับ", HEADERS, REG_DATE_COLS)
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         return core.to_thai_digits(_next_no_this_year(rows, REG_DATE_COLS, REG_DATA_COLS))
 
@@ -382,7 +443,8 @@ class LocalStore(StatusMixin, UsersMixin):
             path = self._send_path()
             if os.path.exists(path):
                 wb = load_workbook(path)
-                ws = wb.active
+                # ขึ้นปีใหม่ = ชีตใหม่ ("ทะเบียนส่ง ๒๕๗๐") ชีตเดิมไม่ต้องย้าย
+                ws = self._sheet_for_now(wb, "ทะเบียนส่ง", SEND_HEADERS, SEND_DATE_COLS)
             else:
                 wb = Workbook()
                 ws = wb.active
@@ -438,26 +500,31 @@ class LocalStore(StatusMixin, UsersMixin):
             if not os.path.exists(core.REGISTRY_XLSX):
                 return False
             from openpyxl import load_workbook
-            wb = load_workbook(core.REGISTRY_XLSX); ws = wb.active
-            for r in range(ws.max_row, 1, -1):
-                v = ws.cell(row=r, column=1).value
-                if v is not None and core.to_arabic_digits(str(v).strip()) == want:
-                    row = _row(v, doc_no, doc_date, sender, doc_title,
-                               receive_date, core.get_thai_date)
-                    for c, val in enumerate(row, start=1):
-                        if c in (7, 8):        # การปฏิบัติ/หมายเหตุ ไม่ทับของเดิม
-                            continue
-                        ws.cell(row=r, column=c).value = val
-                    self._save_ws(wb)
-                    return True
+            wb = load_workbook(core.REGISTRY_XLSX)
+            # ค้นจากชีตปีล่าสุดย้อนไป — เลขที่แก้มักเป็นของปีปัจจุบัน
+            for ws in reversed(self._all_sheets(wb, "ทะเบียนรับ")):
+                for r in range(ws.max_row, 1, -1):
+                    v = ws.cell(row=r, column=1).value
+                    if v is not None and core.to_arabic_digits(str(v).strip()) == want:
+                        row = _row(v, doc_no, doc_date, sender, doc_title,
+                                   receive_date, core.get_thai_date)
+                        for c, val in enumerate(row, start=1):
+                            if c in (7, 8):    # การปฏิบัติ/หมายเหตุ ไม่ทับของเดิม
+                                continue
+                            ws.cell(row=r, column=c).value = val
+                        self._save_ws(wb)
+                        return True
             return False
 
     def registry_rows(self, limit=None):
+        """รวมทุกปี เรียงจากปีเก่าไปใหม่ — หน้าดูทะเบียนจะได้เห็นย้อนหลังข้ามปีได้"""
         if not os.path.exists(core.REGISTRY_XLSX):
             return []
         from openpyxl import load_workbook
-        ws = load_workbook(core.REGISTRY_XLSX).active
-        rows = [[c.value for c in ws[r]] for r in range(2, ws.max_row + 1)]
+        wb = load_workbook(core.REGISTRY_XLSX)
+        rows = []
+        for ws in self._all_sheets(wb, "ทะเบียนรับ"):
+            rows += [[c.value for c in ws[r]] for r in range(2, ws.max_row + 1)]
         return rows[-limit:] if limit else rows
 
     # ---- ผู้ใช้เว็บ ----
@@ -515,15 +582,16 @@ class LocalStore(StatusMixin, UsersMixin):
                 return {}
             from openpyxl import load_workbook
             wb = load_workbook(core.REGISTRY_XLSX)
-            ws = wb.active
-            for r in range(ws.max_row, 1, -1):
-                v = ws.cell(row=r, column=1).value
-                if v is not None and core.to_arabic_digits(str(v).strip()) == want:
-                    row = [c.value for c in ws[r]]
-                    was_last = (r == ws.max_row)
-                    ws.delete_rows(r)
-                    self._save_ws(wb)
-                    return {"row": row, "reusable": was_last}
+            # ค้นจากชีตปีล่าสุดย้อนไป — เลขที่ถอยมักเป็นของปีปัจจุบัน
+            for ws in reversed(self._all_sheets(wb, "ทะเบียนรับ")):
+                for r in range(ws.max_row, 1, -1):
+                    v = ws.cell(row=r, column=1).value
+                    if v is not None and core.to_arabic_digits(str(v).strip()) == want:
+                        row = [c.value for c in ws[r]]
+                        was_last = (r == ws.max_row)
+                        ws.delete_rows(r)
+                        self._save_ws(wb)
+                        return {"row": row, "reusable": was_last}
             return {}
 
 
@@ -688,6 +756,66 @@ class SheetsStore(StatusMixin, UsersMixin):
                          [[book_id, now_th().strftime("%Y-%m-%d %H:%M:%S")]])
             self._hist_cache = None
 
+    # ---- แท็บแยกตามปี ----
+    # ขึ้นปีใหม่ = ขึ้นแท็บใหม่ ("ทะเบียนรับ ๒๕๗๐") ไม่ให้เลข ๑ ของหลายปีปนกัน
+    # แท็บเดิมที่มีข้อมูลอยู่แล้วไม่ต้องย้าย/เปลี่ยนชื่อ ถือเป็นของปีที่มันเก็บอยู่
+    def _base_year(self, base: str, date_cols) -> int:
+        """ปีของแท็บชื่อเดิม — จำไว้ ไม่ต้องอ่านซ้ำทุกครั้ง"""
+        cache = getattr(self, "_base_year_cache", None) or {}
+        if base not in cache:
+            rows = self._get(base)[1:] if base in self._tab_titles() else []
+            cache[base] = newest_year_in(rows, date_cols) or (now_th().year + 543)
+            self._base_year_cache = cache
+        return cache[base]
+
+    def _tab_titles(self, fresh: bool = False) -> list:
+        """ชื่อแท็บทั้งหมด — แคชไว้สั้นๆ เพราะถูกเรียกทุกครั้งที่อ่าน/เขียนทะเบียน
+        ถ้ายิง API ทุกครั้งจะเปลืองโควตาและหน้าเว็บช้า"""
+        import time
+        now = time.time()
+        c = getattr(self, "_titles_cache", None)
+        if not fresh and c and now - c[0] < self.CACHE_TTL:
+            return list(c[1])
+        meta = self._run(self._api.get(spreadsheetId=self.sheet_id))
+        titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        self._titles_cache = (now, titles)
+        return list(titles)
+
+    def _tab_for_now(self, base: str, headers: list, date_cols) -> str:
+        """แท็บของปีปัจจุบัน สร้างให้อัตโนมัติถ้ายังไม่มี"""
+        tab = year_tab(base, now_th().year + 543, self._base_year(base, date_cols))
+        if tab not in self._tab_titles():
+            # เช็คซ้ำแบบสดก่อนสร้าง — แคชอาจเก่า และอีกเครื่องอาจสร้างไปแล้ว
+            if tab not in self._tab_titles(fresh=True):
+                self._run(self._api.batchUpdate(spreadsheetId=self.sheet_id, body={
+                    "requests": [{"addSheet": {"properties": {"title": tab}}}]}))
+                self._append(tab, [headers])
+                self._titles_cache = None
+                self._drop_cache()
+        return tab
+
+    def _tabs_of(self, base: str) -> list:
+        """แท็บทั้งหมดของทะเบียนเล่มนี้ เรียงจากปีเก่าไปใหม่"""
+        titles = self._tab_titles()
+        found = []
+        for t in titles:
+            if t == base:
+                found.append((0, t))                 # แท็บเดิม = เก่าสุดเสมอ
+            elif t.startswith(base + " "):
+                y = core.to_arabic_digits(t[len(base) + 1:].strip())
+                if y.isdigit():
+                    found.append((int(y), t))
+        return [t for _, t in sorted(found)]
+
+    def _reg_tabs(self) -> list:
+        return self._tabs_of(self.TAB_REG) or [self.TAB_REG]
+
+    def _reg_tab_now(self) -> str:
+        return self._tab_for_now(self.TAB_REG, HEADERS, REG_DATE_COLS)
+
+    def _send_tab_now(self) -> str:
+        return self._tab_for_now(self.TAB_SEND, SEND_HEADERS, SEND_DATE_COLS)
+
     # ---- ทะเบียนรับ ----
     def _last_no(self, vals):
         for row in reversed(vals[1:]):
@@ -696,8 +824,8 @@ class SheetsStore(StatusMixin, UsersMixin):
         return None
 
     def peek_receipt_no(self) -> str:
-        return core.to_thai_digits(
-            _next_no_this_year(self._get(self.TAB_REG)[1:], REG_DATE_COLS, REG_DATA_COLS))
+        return core.to_thai_digits(_next_no_this_year(
+            self._get(self._reg_tab_now())[1:], REG_DATE_COLS, REG_DATA_COLS))
 
     def register(self, doc_no="", doc_date="", sender="", doc_title="", receive_date="") -> str:
         """จองเลขรับบน Sheets
@@ -707,10 +835,11 @@ class SheetsStore(StatusMixin, UsersMixin):
           ๒. อ่านกลับมาดู ถ้าเลขที่ได้ดันซ้ำกับใคร ให้เลื่อนเป็นเลขถัดไปแล้วแก้เฉพาะช่องตัวเอง
         """
         with _mem_lock:
-            vals = self._get(self.TAB_REG, fresh=True)   # ต้องสด กันเลขซ้ำ
+            tab = self._reg_tab_now()
+            vals = self._get(tab, fresh=True)   # ต้องสด กันเลขซ้ำ
             no = core.to_thai_digits(_next_no_this_year(vals[1:], REG_DATE_COLS, REG_DATA_COLS))
             row = _row(no, doc_no, doc_date, sender, doc_title, receive_date, core.get_thai_date)
-            res = self._append(self.TAB_REG, [row])
+            res = self._append(tab, [row])
 
             # หาว่าแถวเราไปลงที่บรรทัดไหน เช่น 'ทะเบียนรับ'!A387:I387
             m = re.search(r"!\D+(\d+)", res.get("updates", {}).get("updatedRange", ""))
@@ -718,14 +847,14 @@ class SheetsStore(StatusMixin, UsersMixin):
                 return no
             my_row = int(m.group(1))
 
-            after = self._get(self.TAB_REG, "A:A", fresh=True)
+            after = self._get(tab, "A:A", fresh=True)
             used = [str(r[0]).strip() for i, r in enumerate(after[1:], start=2)
                     if r and str(r[0]).strip() and i != my_row]
             if no in used:                    # มีคนอื่นแทรกเลขเดียวกันมาก่อน
                 no = _next_no(self._last_no([[""]] + [[u] for u in used]))
                 self._run(self._api.values().update(
                     spreadsheetId=self.sheet_id,
-                    range=f"'{self.TAB_REG}'!A{my_row}",
+                    range=f"'{tab}'!A{my_row}",
                     valueInputOption="RAW", body={"values": [[no]]}))
                 self._drop_cache()
             return no
@@ -733,7 +862,7 @@ class SheetsStore(StatusMixin, UsersMixin):
     def register_with_no(self, receipt_no, doc_no="", doc_date="", sender="",
                          doc_title="", receive_date="") -> str:
         with _mem_lock:
-            self._append(self.TAB_REG, [_row(receipt_no, doc_no, doc_date, sender,
+            self._append(self._reg_tab_now(), [_row(receipt_no, doc_no, doc_date, sender,
                                              doc_title, receive_date, core.get_thai_date)])
             return receipt_no
 
@@ -745,16 +874,17 @@ class SheetsStore(StatusMixin, UsersMixin):
         ๒. อ่านกลับมาดู ถ้าเลขที่ได้ซ้ำกับใคร ให้เลื่อนเป็นเลขถัดไปแล้วแก้เฉพาะช่องตัวเอง
         """
         with _mem_lock:
-            vals = self._get(self.TAB_SEND, fresh=True)
+            tab = self._send_tab_now()
+            vals = self._get(tab, fresh=True)
             no = str(_next_no_this_year(vals[1:], SEND_DATE_COLS, SEND_DATA_COLS))
-            res = self._append(self.TAB_SEND, [_send_row(no, doc_date, to, title, requester, note)])
+            res = self._append(tab, [_send_row(no, doc_date, to, title, requester, note)])
 
             m = re.search(r"!\D+(\d+)", res.get("updates", {}).get("updatedRange", ""))
             if not m:
                 return no
             my_row = int(m.group(1))
 
-            after = self._get(self.TAB_SEND, "A:A", fresh=True)
+            after = self._get(tab, "A:A", fresh=True)
             used = [str(r[0]).strip() for i, r in enumerate(after[1:], start=2)
                     if r and str(r[0]).strip() and i != my_row]
             if no in used:
@@ -762,7 +892,7 @@ class SheetsStore(StatusMixin, UsersMixin):
                                         if core.to_arabic_digits(u).isdigit()), default=0))
                 self._run(self._api.values().update(
                     spreadsheetId=self.sheet_id,
-                    range=f"'{self.TAB_SEND}'!A{my_row}:B{my_row}",
+                    range=f"'{tab}'!A{my_row}:B{my_row}",
                     valueInputOption="RAW", body={"values": [[no, SEND_PREFIX + no]]}))
                 self._drop_cache()
             return no
@@ -798,24 +928,29 @@ class SheetsStore(StatusMixin, UsersMixin):
                             doc_title="", receive_date="") -> bool:
         want = core.to_arabic_digits(str(receipt_no).strip())
         with _mem_lock:
-            vals = self._get(self.TAB_REG)
-            for i in range(len(vals) - 1, 0, -1):
-                r = vals[i]
-                if r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want:
-                    old = list(r) + [""] * (9 - len(r))
-                    row = _row(r[0], doc_no, doc_date, sender, doc_title,
-                               receive_date, core.get_thai_date)
-                    row[6], row[7] = old[6], old[7]     # คงการปฏิบัติ/หมายเหตุเดิม
-                    self._run(self._api.values().update(
-                        spreadsheetId=self.sheet_id,
-                        range=f"'{self.TAB_REG}'!A{i+1}:I{i+1}",
-                        valueInputOption="RAW", body={"values": [row]}))
-                    self._drop_cache()
-                    return True
+            # ค้นจากแท็บปีล่าสุดย้อนไป — เลขที่แก้มักเป็นของปีปัจจุบัน
+            for tab in reversed(self._reg_tabs()):
+                vals = self._get(tab)
+                for i in range(len(vals) - 1, 0, -1):
+                    r = vals[i]
+                    if r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want:
+                        old = list(r) + [""] * (9 - len(r))
+                        row = _row(r[0], doc_no, doc_date, sender, doc_title,
+                                   receive_date, core.get_thai_date)
+                        row[6], row[7] = old[6], old[7]     # คงการปฏิบัติ/หมายเหตุเดิม
+                        self._run(self._api.values().update(
+                            spreadsheetId=self.sheet_id,
+                            range=f"'{tab}'!A{i+1}:I{i+1}",
+                            valueInputOption="RAW", body={"values": [row]}))
+                        self._drop_cache()
+                        return True
             return False
 
     def registry_rows(self, limit=None):
-        rows = self._get(self.TAB_REG)[1:]
+        """รวมทุกปี เรียงจากปีเก่าไปใหม่ — หน้าดูทะเบียนจะได้เห็นย้อนหลังข้ามปีได้"""
+        rows = []
+        for tab in self._reg_tabs():
+            rows += self._get(tab)[1:]
         return rows[-limit:] if limit else rows
 
     # ---- ผู้ใช้เว็บ ----
@@ -873,13 +1008,14 @@ class SheetsStore(StatusMixin, UsersMixin):
     def delete_receipt(self, receipt_no: str) -> dict:
         want = core.to_arabic_digits(str(receipt_no).strip())
         with _mem_lock:
-            vals = self._get(self.TAB_REG)
-            for i in range(len(vals) - 1, 0, -1):
-                r = vals[i]
-                if r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want:
-                    was_last = (i == len(vals) - 1)
-                    self._delete_row(self.TAB_REG, i + 1)   # +1 เพราะ vals เริ่มนับที่ ๐
-                    return {"row": r, "reusable": was_last}
+            for tab in reversed(self._reg_tabs()):
+                vals = self._get(tab)
+                for i in range(len(vals) - 1, 0, -1):
+                    r = vals[i]
+                    if r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want:
+                        was_last = (i == len(vals) - 1)
+                        self._delete_row(tab, i + 1)    # +1 เพราะ vals เริ่มนับที่ ๐
+                        return {"row": r, "reusable": was_last}
             return {}
 
 
