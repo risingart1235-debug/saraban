@@ -31,6 +31,9 @@ _mem_lock = threading.RLock()
 HEADERS = ['เลขทะเบียนรับ', 'ที่', 'ลงวันที่', 'จาก', 'ถึง', 'เรื่อง',
            'การปฏิบัติ', 'หมายเหตุ', 'วันที่ลงรับ']
 SCHOOL = "โรงเรียนบ้านโพนทองประชาอุทิศ"
+# คอลัมน์ที่ถือว่าเป็นข้อมูลที่คนกรอกจริง (ใช้แยกแถวขยะที่มีแต่เลข)
+REG_DATA_COLS = (2, 3, 5)          # ลงวันที่ / จาก / เรื่อง
+REG_DATE_COLS = (8, 2)             # ดูวันที่ลงรับก่อน ไม่มีค่อยใช้ลงวันที่
 
 
 def _next_no(last_value) -> str:
@@ -39,6 +42,64 @@ def _next_no(last_value) -> str:
         return core.to_thai_digits(int(core.to_arabic_digits(str(last_value))) + 1)
     except (ValueError, TypeError):
         return core.to_thai_digits(1)
+
+
+# ==========================================================
+# เลขทะเบียนเริ่มนับ ๑ ใหม่ทุกวันที่ ๑ มกราคม (ทั้งทะเบียนรับและส่ง)
+# ==========================================================
+def _year_of(value):
+    """ปี พ.ศ. จากข้อความวันที่ — คืน None ถ้าอ่านไม่ออก
+
+    ในทะเบียนมีหลายรูปแบบปนกัน: "๓๑ ส.ค. ๒๕๖๙", "2 มิถุนายน 2569", "2๕ พฤษภาคม ๒๕๖๙"
+    จึงดึงเลข ๔ หลักตัวท้ายมาใช้ และรับได้ทั้ง พ.ศ. และ ค.ศ.
+    """
+    digits = core.to_arabic_digits(str(value or ""))
+    years = re.findall(r"\d{4}", digits)
+    if not years:
+        return None
+    y = int(years[-1])
+    return y if y > 2400 else y + 543          # ๒๐๒๖ -> ๒๕๖๙
+
+
+def _next_no_this_year(rows, date_cols, data_cols) -> int:
+    """เลขถัดไปของ "ปีนี้" — ขึ้นปีใหม่แล้วเริ่มนับ ๑ ใหม่
+
+    ดูจากเลขมากสุดของแถวที่เป็นปีปัจจุบัน ไม่ใช่แค่แถวสุดท้าย
+    เผื่อมีการแทรก/ลบแถวจนลำดับไม่เรียง
+
+    แถวที่มีแต่เลข ช่องอื่นว่าง = "จองเลขไว้" ต้องนับด้วยเสมอ
+    เพราะคนจองตั้งใจจะใช้เลขนั้น ห้ามออกเลขเดิมให้คนอื่นหรือไปเขียนทับ
+
+    แถวจองไม่มีวันที่ จึงไม่รู้ว่าเป็นของปีไหน — ใช้ปีของแถวก่อนหน้าที่มีวันที่แทน
+    (ทะเบียนเรียงตามเวลาอยู่แล้ว) ไม่งั้นแถวจองค้างจากปีก่อน
+    จะกันไม่ให้เริ่มนับ ๑ ใหม่ตลอดไป
+
+    data_cols มีไว้บอกว่าคอลัมน์ไหนคือข้อมูลที่คนกรอกจริง — ต้องไม่รวมคอลัมน์ "ที่"
+    เพราะในไฟล์จริงเป็นสูตรที่คำนวณจากเลขทะเบียน จึงมีค่าเสมอแม้ไม่มีใครกรอก
+    """
+    this_year = now_th().year + 543
+    best = 0
+    last_year = None                            # ปีของแถวล่าสุดที่อ่านวันที่ออก
+    for r in rows:
+        if not r or not str(r[0] or "").strip():
+            continue
+        # ลองทีละคอลัมน์วันที่จนกว่าจะอ่านปีออก — แถวเก่าบางแถวสั้นกว่าปกติ
+        # (ไม่มีคอลัมน์ "วันที่ลงรับ") แต่ยังมี "ลงวันที่" ให้ใช้แทนได้
+        y = None
+        for dc in date_cols:
+            y = _year_of(r[dc] if len(r) > dc else "")
+            if y is not None:
+                break
+        if y is not None:
+            last_year = y
+        elif not any(str(r[c] or "").strip() for c in data_cols if len(r) > c):
+            y = last_year                       # แถวจอง — ถือว่าเป็นปีเดียวกับแถวก่อนหน้า
+        if y is not None and y != this_year:
+            continue                            # เป็นของปีก่อน ไม่นับ
+        n = core.to_arabic_digits(str(r[0]).strip())
+        if n.isdigit():
+            best = max(best, int(n))
+    return best + 1
 
 
 def _row(receipt_no, doc_no, doc_date, sender, doc_title, receive_date, thai_date_fn):
@@ -51,6 +112,36 @@ def _row(receipt_no, doc_no, doc_date, sender, doc_title, receive_date, thai_dat
             (doc_title or "").strip(),
             "", "",
             core.normalize_typed_date(receive_date or "") or thai_date_fn()]
+
+
+# ---- ทะเบียนหนังสือส่ง (คนละเล่มกับทะเบียนรับ) ----
+# คอลัมน์ตามไฟล์ที่โรงเรียนใช้อยู่จริง ห้ามสลับลำดับ
+SEND_HEADERS = ['เลขทะเบียนส่ง', 'ที่', 'ลงวันที่', 'จาก', 'ถึง', 'เรื่อง', 'หมายเหตุ']
+SEND_XLSX_NAME = "ทะเบียนหนังสือส่ง.xlsx"
+SEND_DATA_COLS = (2, 3, 4, 5)      # ลงวันที่ / จาก / ถึง / เรื่อง (ไม่รวม "ที่" ซึ่งเป็นสูตร)
+SEND_DATE_COLS = (2,)              # ทะเบียนส่งมีคอลัมน์วันที่เดียว
+
+# เลขที่หนังสือของโรงเรียน — ในไฟล์เดิมเป็นสูตร ="ศธ ๐๔๑๔๒.๐๓๕/"&A{แถว}
+# ที่นี่เขียนเป็นข้อความสำเร็จรูป จะได้ใช้ได้เหมือนกันทั้งไฟล์ Excel และ Google Sheets
+SEND_PREFIX = os.environ.get("SARABAN_SEND_PREFIX", "").strip() or "ศธ ๐๔๑๔๒.๐๓๕/"
+
+
+def _send_next_no(last_value) -> str:
+    """เลขส่งถัดไป — คงเป็นเลขอารบิกตามที่ทะเบียนเล่มนี้ใช้มาตลอด (ต่างจากทะเบียนรับ)"""
+    try:
+        return str(int(core.to_arabic_digits(str(last_value).strip())) + 1)
+    except (ValueError, TypeError):
+        return "1"
+
+
+def _send_row(no, doc_date, sender, to, title, note=""):
+    return [str(no),
+            SEND_PREFIX + str(no),
+            core.normalize_typed_date(doc_date or "") or core.get_thai_date(),
+            (sender or "").strip(),
+            (to or "").strip(),
+            (title or "").strip(),
+            (note or "").strip()]
 
 
 # คอลัมน์ของแท็บผู้ใช้ (เก็บเป็นคอลัมน์ ไม่ใช่ JSON ก้อนเดียว จะได้เปิดดูในชีตรู้เรื่อง)
@@ -233,18 +324,13 @@ class LocalStore(StatusMixin, UsersMixin):
             return self._peek()
 
     def _peek(self) -> str:
+        """เลขรับถัดไป — เริ่มนับ ๑ ใหม่ทุกวันที่ ๑ มกราคม"""
         if not os.path.exists(core.REGISTRY_XLSX):
             return core.to_thai_digits(1)
         from openpyxl import load_workbook
-        ws = load_workbook(core.REGISTRY_XLSX).active
-        for r in range(ws.max_row, 1, -1):
-            v = ws.cell(row=r, column=1).value
-            if v is not None:
-                try:
-                    return _next_no(v)
-                except Exception:
-                    continue
-        return core.to_thai_digits(1)
+        ws = load_workbook(core.REGISTRY_XLSX, read_only=True).active
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        return core.to_thai_digits(_next_no_this_year(rows, REG_DATE_COLS, REG_DATA_COLS))
 
     def register(self, doc_no="", doc_date="", sender="", doc_title="", receive_date="") -> str:
         """จองเลขรับและเขียนแถวทะเบียนในล็อกเดียว — กันเลขซ้ำ"""
@@ -264,6 +350,46 @@ class LocalStore(StatusMixin, UsersMixin):
                            receive_date, core.get_thai_date))
             self._save_ws(wb, path)
             return receipt_no
+
+    # ---- ทะเบียนหนังสือส่ง ----
+    def _send_path(self):
+        return os.path.join(core.OUTPUT_ROOT, SEND_XLSX_NAME)
+
+    def send_register(self, doc_date="", sender="", to="", title="", note="") -> str:
+        """จองเลขส่งและเขียนแถวในล็อกเดียว — คืนเลขที่ได้
+
+        เขียนลงแถวว่างท้ายสุด ไม่ใช่ ws.append() เพราะไฟล์จริงมีแถวเปล่าค้างอยู่
+        (คนกดขอเลขไว้แล้วไม่ได้กรอกข้อมูล) ถ้า append จะไปต่อท้ายแถวเปล่าพวกนั้น
+        """
+        from openpyxl import load_workbook, Workbook
+        with _mem_lock, self._lock:
+            path = self._send_path()
+            if os.path.exists(path):
+                wb = load_workbook(path)
+                ws = wb.active
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.append(SEND_HEADERS)
+
+            # หาแถวสุดท้ายที่มีเลขจริง (ข้ามแถวเปล่าท้ายไฟล์)
+            last_row = 1
+            for r in range(ws.max_row, 1, -1):
+                v = ws.cell(row=r, column=1).value
+                if v is not None and str(v).strip():
+                    last_row = r
+                    break
+            rows = [[ws.cell(row=r, column=c).value for c in range(1, len(SEND_HEADERS) + 1)]
+                    for r in range(2, last_row + 1)]
+            no = str(_next_no_this_year(rows, SEND_DATE_COLS, SEND_DATA_COLS))
+
+            # ต่อท้ายเสมอ — ไม่ไปเขียนทับแถวที่มีคนจองเลขไว้ (แถวที่มีแต่เลข)
+            # เพราะคนจองตั้งใจจะใช้เลขนั้น
+            write_row = last_row + 1
+            for col, val in enumerate(_send_row(no, doc_date, sender, to, title, note), start=1):
+                ws.cell(row=write_row, column=col, value=val)
+            self._save_ws(wb, path)
+            return no
 
     # ---- บันทึกสถานะแต่ละเรื่อง ----
     def _rec_path(self):
@@ -407,6 +533,7 @@ class SheetsStore(StatusMixin, UsersMixin):
     TAB_REG = "ทะเบียนรับ"
     TAB_HIST = "ประวัติที่ดึงแล้ว"
     TAB_USERS = "ผู้ใช้เว็บ"
+    TAB_SEND = "ทะเบียนส่ง"
     USERS_TTL = 15          # วินาที — current_user เรียกทุก request จึงต้องแคช
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -448,7 +575,8 @@ class SheetsStore(StatusMixin, UsersMixin):
     def _ensure_tabs(self):
         meta = self._run(self._api.get(spreadsheetId=self.sheet_id))
         have = {s["properties"]["title"] for s in meta.get("sheets", [])}
-        want = [t for t in (self.TAB_REG, self.TAB_HIST, self.TAB_USERS) if t not in have]
+        want = [t for t in (self.TAB_REG, self.TAB_HIST, self.TAB_USERS, self.TAB_SEND)
+                if t not in have]
         if want:
             self._run(self._api.batchUpdate(spreadsheetId=self.sheet_id, body={"requests": [
                 {"addSheet": {"properties": {"title": t}}} for t in want]}))
@@ -458,6 +586,8 @@ class SheetsStore(StatusMixin, UsersMixin):
             self._append(self.TAB_HIST, [["book_id", "เวลาที่บันทึก", "สถานะ", "เลขรับ"]])
         if self.TAB_USERS in want:
             self._append(self.TAB_USERS, [USER_COLS])
+        if self.TAB_SEND in want:
+            self._append(self.TAB_SEND, [SEND_HEADERS])
 
     RETRY = 3               # ลองซ้ำกี่ครั้งเมื่อเน็ตสะดุด
 
@@ -550,7 +680,8 @@ class SheetsStore(StatusMixin, UsersMixin):
         return None
 
     def peek_receipt_no(self) -> str:
-        return _next_no(self._last_no(self._get(self.TAB_REG)))
+        return core.to_thai_digits(
+            _next_no_this_year(self._get(self.TAB_REG)[1:], REG_DATE_COLS, REG_DATA_COLS))
 
     def register(self, doc_no="", doc_date="", sender="", doc_title="", receive_date="") -> str:
         """จองเลขรับบน Sheets
@@ -561,7 +692,7 @@ class SheetsStore(StatusMixin, UsersMixin):
         """
         with _mem_lock:
             vals = self._get(self.TAB_REG, fresh=True)   # ต้องสด กันเลขซ้ำ
-            no = _next_no(self._last_no(vals))
+            no = core.to_thai_digits(_next_no_this_year(vals[1:], REG_DATE_COLS, REG_DATA_COLS))
             row = _row(no, doc_no, doc_date, sender, doc_title, receive_date, core.get_thai_date)
             res = self._append(self.TAB_REG, [row])
 
@@ -589,6 +720,36 @@ class SheetsStore(StatusMixin, UsersMixin):
             self._append(self.TAB_REG, [_row(receipt_no, doc_no, doc_date, sender,
                                              doc_title, receive_date, core.get_thai_date)])
             return receipt_no
+
+    # ---- ทะเบียนหนังสือส่ง ----
+    def send_register(self, doc_date="", sender="", to="", title="", note="") -> str:
+        """จองเลขส่งบน Sheets — กันเลขซ้ำแบบเดียวกับทะเบียนรับ
+
+        ๑. ต่อท้ายด้วย INSERT_ROWS ซึ่งกูเกิลรับประกันว่าไม่ทับกัน
+        ๒. อ่านกลับมาดู ถ้าเลขที่ได้ซ้ำกับใคร ให้เลื่อนเป็นเลขถัดไปแล้วแก้เฉพาะช่องตัวเอง
+        """
+        with _mem_lock:
+            vals = self._get(self.TAB_SEND, fresh=True)
+            no = str(_next_no_this_year(vals[1:], SEND_DATE_COLS, SEND_DATA_COLS))
+            res = self._append(self.TAB_SEND, [_send_row(no, doc_date, sender, to, title, note)])
+
+            m = re.search(r"!\D+(\d+)", res.get("updates", {}).get("updatedRange", ""))
+            if not m:
+                return no
+            my_row = int(m.group(1))
+
+            after = self._get(self.TAB_SEND, "A:A", fresh=True)
+            used = [str(r[0]).strip() for i, r in enumerate(after[1:], start=2)
+                    if r and str(r[0]).strip() and i != my_row]
+            if no in used:
+                no = _send_next_no(max((int(core.to_arabic_digits(u)) for u in used
+                                        if core.to_arabic_digits(u).isdigit()), default=0))
+                self._run(self._api.values().update(
+                    spreadsheetId=self.sheet_id,
+                    range=f"'{self.TAB_SEND}'!A{my_row}:B{my_row}",
+                    valueInputOption="RAW", body={"values": [[no, SEND_PREFIX + no]]}))
+                self._drop_cache()
+            return no
 
     # ---- บันทึกสถานะแต่ละเรื่อง (เก็บในแท็บประวัติ คอลัมน์ C, D) ----
     def doc_records(self) -> dict:

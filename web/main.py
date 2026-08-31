@@ -283,6 +283,68 @@ def default_stamp_pos(stamp_w: int, stamp_h: int):
     return left_cm, top_cm, size_pct
 
 
+# ==========================================================
+# ขอเลขหนังสือส่ง — ใช้ได้โดยไม่ต้องล็อกอิน (ครูขอเองจากมือถือได้)
+# ==========================================================
+# เลขจะออกก็ต่อเมื่อกรอกข้อมูลครบเท่านั้น เพราะปัญหาเดิมคือมีคนกดขอเลขไว้
+# แล้วไม่กรอกอะไรเลย ทะเบียนจึงมีแถวที่มีแต่เลขลอยๆ ตามหาไม่ได้ว่าเป็นหนังสืออะไร
+#
+# เปิดสาธารณะจึงต้องจำกัดจำนวนครั้ง ไม่งั้นใครกดรัวก็เผาเลขทะเบียนราชการทิ้งได้
+_send_hits = {}
+_send_lock = threading.Lock()
+SEND_WINDOW = 3600          # นับย้อนหลัง ๑ ชั่วโมง
+SEND_MAX = 10               # ขอได้ไม่เกิน ๑๐ เลขต่อชั่วโมงต่อ ๑ ไอพี
+
+
+def _send_rate_ok(ip: str) -> bool:
+    import time
+    now = time.time()
+    with _send_lock:
+        hits = [t for t in _send_hits.get(ip, []) if now - t < SEND_WINDOW]
+        if len(hits) >= SEND_MAX:
+            _send_hits[ip] = hits
+            return False
+        hits.append(now)
+        _send_hits[ip] = hits
+        return True
+
+
+@app.post("/api/send/request")
+async def api_send_request(request: Request):
+    """ขอเลขหนังสือส่ง — ต้องกรอกครบทุกช่องก่อน ถึงจะได้เลข"""
+    d = await request.json()
+    fields = {
+        "sender": ("ผู้ขอ / เจ้าของเรื่อง", str(d.get("sender", "")).strip()),
+        "to": ("เรียน / ถึง", str(d.get("to", "")).strip()),
+        "title": ("เรื่อง", str(d.get("title", "")).strip()),
+    }
+    missing = [label for label, val in fields.values() if not val]
+    if missing:
+        raise HTTPException(status_code=400,
+                            detail="กรอกให้ครบก่อนจึงจะออกเลขให้: " + " · ".join(missing))
+    for label, val in fields.values():
+        if len(val) > 300:
+            raise HTTPException(status_code=400, detail=f"ช่อง{label}ยาวเกินไป")
+
+    ip = request.client.host if request.client else "?"
+    if not _send_rate_ok(ip):
+        raise HTTPException(status_code=429,
+                            detail=f"ขอเลขบ่อยเกินไป (จำกัด {SEND_MAX} เลข/ชั่วโมง) กรุณารอสักครู่")
+
+    import store as _s
+    try:
+        no = await asyncio.to_thread(
+            _s.get_store().send_register,
+            str(d.get("doc_date", "")).strip(),
+            fields["sender"][1], fields["to"][1], fields["title"][1],
+            str(d.get("note", "")).strip())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"บันทึกทะเบียนไม่สำเร็จ: {e}")
+
+    return {"ok": True, "no": no, "doc_no": _s.SEND_PREFIX + str(no),
+            "date": core.normalize_typed_date(str(d.get("doc_date", "")).strip()) or get_thai_date()}
+
+
 @app.get("/healthz")
 def healthz():
     """จุดให้ "ตัวปลุก" เรียกเป็นระยะ กัน hosting ฟรีพักเครื่อง

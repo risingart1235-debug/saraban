@@ -29,6 +29,36 @@
       ยังไม่มีบัญชี? <a href="/register" style="color:var(--blue); font-weight:700">สมัครสมาชิก</a>
       <br>(สมัครแล้วรอผู้ดูแลอนุมัติก่อนใช้งาน)
     </p>
+
+  <!-- ขอเลขหนังสือส่ง — ครูขอเองได้โดยไม่ต้องมีบัญชี จึงต้องอยู่หน้านี้ -->
+  <div class="card" style="margin-top:22px; border-color:#f59e0b; background:#fffbeb">
+    <button id="sendToggle" style="display:flex; align-items:center; justify-content:space-between;
+        gap:8px; width:100%; min-height:46px; padding:0; background:none; border:0;
+        font-family:inherit; font-size:16px; font-weight:700; color:#92400e; cursor:pointer">
+      <span>📤 ขอเลขหนังสือส่ง</span><span id="sendCaret">▾</span>
+    </button>
+    <p class="tiny" id="sendHint" style="margin:2px 0 0; color:#92400e">
+      ไม่ต้องเข้าสู่ระบบ — กรอกให้ครบแล้วระบบจะออกเลขให้ทันที
+    </p>
+
+    <div id="sendPanel" class="hidden" style="margin-top:14px">
+      <div id="sendMsg" class="hidden"></div>
+      <div id="sendForm">
+        <label for="sSender">ผู้ขอ / เจ้าของเรื่อง</label>
+        <input id="sSender" type="text" placeholder="เช่น ครูสมชาย (ฝ่ายวิชาการ)">
+        <label for="sTo">เรียน / ถึง</label>
+        <input id="sTo" type="text" placeholder="เช่น ผอ.สพป.สกลนคร เขต ๑">
+        <label for="sTitle">เรื่อง</label>
+        <input id="sTitle" type="text" placeholder="เช่น ขอความอนุเคราะห์วิทยากร">
+        <label for="sDate">ลงวันที่ <span class="tiny">(เว้นว่าง = วันนี้)</span></label>
+        <input id="sDate" type="text" placeholder="เช่น ๓๑ ส.ค. ๒๕๖๙">
+        <button class="btn" id="sSubmit" style="margin-top:16px">ขอเลข</button>
+        <p class="tiny" style="margin-top:10px">
+          ⚠️ เลขที่ได้จะถูกบันทึกลงทะเบียนหนังสือส่งทันที ขอแล้วยกเลิกเองไม่ได้
+        </p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -61,6 +91,68 @@ f.addEventListener('submit', async (e) => {
   btn.disabled = false;
   btn.textContent = 'เข้าสู่ระบบ';
 });
+
+// ---------- ขอเลขหนังสือส่ง (ไม่ต้องล็อกอิน) ----------
+const $ = (id) => document.getElementById(id);
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+$('sendToggle').onclick = () => {
+  const open = $('sendPanel').classList.toggle('hidden');
+  $('sendCaret').textContent = open ? '▾' : '▴';
+  if (!open) $('sSender').focus();
+};
+
+$('sSubmit').onclick = async () => {
+  const m = $('sendMsg');
+  const body = {
+    sender: $('sSender').value.trim(),
+    to: $('sTo').value.trim(),
+    title: $('sTitle').value.trim(),
+    doc_date: $('sDate').value.trim(),
+  };
+  // เช็คในเครื่องก่อน จะได้ไม่ต้องรอเซิร์ฟเวอร์บอก (เซิร์ฟเวอร์ก็เช็คซ้ำอยู่ดี)
+  const need = [];
+  if (!body.sender) need.push('ผู้ขอ / เจ้าของเรื่อง');
+  if (!body.to) need.push('เรียน / ถึง');
+  if (!body.title) need.push('เรื่อง');
+  if (need.length) {
+    m.className = 'err'; m.classList.remove('hidden');
+    m.textContent = 'กรอกให้ครบก่อนจึงจะออกเลขให้: ' + need.join(' · ');
+    return;
+  }
+
+  const b = $('sSubmit');
+  b.disabled = true; b.textContent = 'กำลังขอเลข...';
+  m.classList.add('hidden');
+  try {
+    const r = await fetch('/api/send/request', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    const text = await r.text();
+    let d = {};
+    try { d = JSON.parse(text); } catch (e) { throw new Error('เซิร์ฟเวอร์ผิดพลาด (' + r.status + ')'); }
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'ขอเลขไม่สำเร็จ');
+
+    // สำเร็จแล้วซ่อนฟอร์ม กันกดซ้ำจนได้เลขเกินมาโดยไม่ตั้งใจ
+    $('sendForm').classList.add('hidden');
+    $('sendHint').classList.add('hidden');
+    m.className = 'ok'; m.classList.remove('hidden');
+    m.innerHTML = '<b>ได้เลขหนังสือส่งแล้ว</b>'
+      + '<div style="font-size:30px;font-weight:700;color:var(--purple);margin:8px 0">'
+      + esc(d.no) + '</div>'
+      + 'เลขที่หนังสือ: <b>' + esc(d.doc_no) + '</b><br>'
+      + 'ลงวันที่ ' + esc(d.date) + '<br>'
+      + '<span class="tiny">บันทึกลงทะเบียนหนังสือส่งเรียบร้อยแล้ว</span>';
+  } catch (e) {
+    m.className = 'err'; m.classList.remove('hidden');
+    m.textContent = e.message;
+    b.disabled = false; b.textContent = 'ขอเลข';
+  }
+};
 </script>
 </body>
 </html>
