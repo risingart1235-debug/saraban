@@ -55,8 +55,18 @@ pinned: false
 ### ถ้าจะให้เก็บไฟล์ PDF ถาวร
 
 `SARABAN_DRIVE_UPLOAD=on` · `SARABAN_DRIVE_FOLDER=<รหัสโฟลเดอร์>` · `SARABAN_DRIVE_URL=<ลิงก์โฟลเดอร์>`
+· `SARABAN_DRIVE_OAUTH=<JSON บรรทัดเดียว>`
 
-> ต้องแชร์โฟลเดอร์ Drive ให้อีเมล service account เป็น "ผู้แก้ไข" ก่อน
+> **service account อัปไฟล์ขึ้น Drive ไม่ได้อีกแล้ว** Google เลิกให้พื้นที่เก็บกับมัน
+> สร้างโฟลเดอร์ได้ (โฟลเดอร์ไม่กินพื้นที่) แต่พออัปไฟล์จริงจะได้ 403
+> `Service Accounts do not have storage quota` เสมอ — และเดิมโค้ดกลืน error นี้ทิ้ง
+> จึงเห็นแค่โฟลเดอร์เปล่าโดยไม่มีอะไรบอก
+>
+> ทางแก้: ใช้สิทธิ์ของบัญชี Google คนจริง ไฟล์จะไปอยู่ในพื้นที่ ๑๕ GB ของบัญชีนั้น
+> ขอสิทธิ์ครั้งเดียวด้วย `python setup_drive_oauth.py` แล้วเอาค่าที่ได้ไปใส่
+> `SARABAN_DRIVE_OAUTH` (ในสคริปต์มีขั้นตอนตั้งค่าฝั่ง Google Cloud Console ครบ)
+>
+> ทดสอบว่าอัปได้จริงไหม: `python -c "import drive; print(drive.probe())"`
 
 ## ครั้งแรกที่เปิดใช้
 

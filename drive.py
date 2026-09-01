@@ -17,6 +17,7 @@
 import os
 import re
 import io
+import json
 import threading
 
 import core
@@ -48,15 +49,46 @@ def enabled() -> bool:
     return on in ("1", "true", "yes", "on") and bool(target_folder())
 
 
+def oauth_info():
+    """สิทธิ์ OAuth ของบัญชี Google คนจริง — คืน dict หรือ None ถ้ายังไม่ได้ตั้ง
+
+    ทำไมต้องมี: Google เลิกให้พื้นที่เก็บกับ service account แล้ว สร้างโฟลเดอร์ได้
+    (โฟลเดอร์ไม่กินพื้นที่) แต่พออัปไฟล์จริงจะได้ 403 "Service Accounts do not have
+    storage quota" ทุกครั้ง ไฟล์จึงต้องไปอยู่ในพื้นที่ของบัญชีคนจริงแทน
+    ขอสิทธิ์ครั้งเดียวด้วย  python setup_drive_oauth.py
+    """
+    raw = (core.load_config().get("drive_oauth") or "").strip()
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError(f"ค่า SARABAN_DRIVE_OAUTH ไม่ใช่ JSON ที่ถูกต้อง: {e}") from e
+    missing = [k for k in ("client_id", "client_secret", "refresh_token") if not d.get(k)]
+    if missing:
+        raise RuntimeError("ค่า SARABAN_DRIVE_OAUTH ขาดข้อมูล: " + ", ".join(missing))
+    return d
+
+
 def _service():
-    """สร้างตัวเชื่อม Drive (ใช้กุญแจเดียวกับ Sheets)"""
+    """สร้างตัวเชื่อม Drive — ใช้สิทธิ์ OAuth ก่อน ถ้าไม่มีค่อยถอยไปใช้ service account"""
     global _svc
     with _lock:
         if _svc is not None:
             return _svc
-        import json
-        from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
+
+        oauth = oauth_info()
+        if oauth:
+            from google.oauth2.credentials import Credentials as UserCredentials
+            creds = UserCredentials(
+                None, refresh_token=oauth["refresh_token"],
+                client_id=oauth["client_id"], client_secret=oauth["client_secret"],
+                token_uri="https://oauth2.googleapis.com/token", scopes=SCOPES)
+            _svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+            return _svc
+
+        from google.oauth2.service_account import Credentials
 
         cfg = core.load_config()
         raw = os.environ.get("SARABAN_SA_JSON", "").strip()
@@ -132,8 +164,50 @@ def upload(local_path: str, day: str = None, name: str = None) -> dict:
     return {"id": f.get("id"), "link": f.get("webViewLink")}
 
 
+def probe() -> dict:
+    """ทดสอบ "อัปไฟล์จริง" แล้วลบทิ้ง — เป็นวิธีเดียวที่บอกความจริงได้
+
+    ทำไมไม่ใช้ check() อย่างเดียว: สิทธิ์ที่เราขอคือ drive.file ซึ่งมองเห็นเฉพาะ
+    ไฟล์ที่โปรแกรมนี้สร้างเอง พอไปเรียก files.get กับโฟลเดอร์ที่ "คน" สร้างไว้
+    Google จะตอบ 404 ทั้งที่สิทธิ์เขียนมีครบ อ่านผลแล้วเข้าใจผิดได้ง่ายมาก
+    ส่วนการอัปไฟล์จริงจะเจอปัญหาที่แท้จริง เช่น service account ไม่มีพื้นที่เก็บ
+    """
+    import tempfile
+    if not target_folder():
+        return {"ok": False, "error": "ยังไม่ได้ตั้งโฟลเดอร์ปลายทาง"}
+    tmp = os.path.join(tempfile.gettempdir(), "_saraban_probe.pdf")
+    fid = None
+    try:
+        with open(tmp, "wb") as f:
+            f.write(b"%PDF-1.4 saraban upload probe")
+        from googleapiclient.http import MediaFileUpload
+        svc = _service()
+        made = _run(svc.files().create(
+            body={"name": "_ทดสอบสิทธิ์อัปไฟล์.pdf", "parents": [target_folder()]},
+            media_body=MediaFileUpload(tmp, mimetype="application/pdf", resumable=False),
+            fields="id", supportsAllDrives=True))
+        fid = made["id"]
+        return {"ok": True, "mode": "oauth" if oauth_info() else "service account"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        if fid:                      # ไฟล์ทดสอบต้องไม่ค้างอยู่ในไดร์ฟของครู
+            try:
+                _run(_service().files().delete(fileId=fid, supportsAllDrives=True))
+            except Exception:
+                pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def check() -> dict:
-    """ทดสอบว่าเข้าถึงโฟลเดอร์ได้จริงไหม"""
+    """ทดสอบว่าเข้าถึงโฟลเดอร์ได้จริงไหม
+
+    หมายเหตุ: ด้วยสิทธิ์ drive.file การเรียก files.get กับโฟลเดอร์ที่คนสร้างไว้เอง
+    จะได้ 404 เสมอ แม้เขียนไฟล์ลงไปได้จริง ถ้าอยากรู้ว่า "อัปได้จริงไหม" ใช้ probe()
+    """
     fid = target_folder()
     if not fid:
         return {"ok": False, "error": "ยังไม่ได้ตั้งโฟลเดอร์ปลายทาง"}

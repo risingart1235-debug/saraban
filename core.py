@@ -158,7 +158,11 @@ def load_config():
            'sheet_id': '',    # รหัสสเปรดชีต (เอามาจาก URL)
            'sa_file': '',     # ที่อยู่ไฟล์กุญแจ service account (.json)
            'drive_upload': '', # on = อัป PDF ขึ้น Drive ผ่าน API (จำเป็นเมื่อรันบน hosting)
-           'drive_folder_id': ''}  # โฟลเดอร์ปลายทางบน Drive
+           'drive_folder_id': '',  # โฟลเดอร์ปลายทางบน Drive
+           # สิทธิ์ OAuth ของบัญชี Google คนจริง (JSON บรรทัดเดียว) — ได้มาจาก
+           # setup_drive_oauth.py  ต้องใช้แทน service account เพราะ Google เลิกให้
+           # พื้นที่เก็บกับ service account แล้ว (403 "do not have storage quota")
+           'drive_oauth': ''}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -384,11 +388,27 @@ def reserve_receipt_once(state, register_fn=register_document, **fields):
 
 
 def upload_to_imgbb(image_path):
+    """อัปรูปขึ้น imgbb คืน URL — ไม่สำเร็จคืน None แต่ต้องบอกเหตุผลไว้ใน log ด้วย
+
+    เดิมเขียน except เปล่าๆ แล้วคืน None เงียบสนิท พอรูปไม่ไปกับ LINE จึงไม่มี
+    อะไรบอกเลยว่าเพราะอะไร (ที่เจอจริง: ลืมตั้ง SARABAN_IMGBB_API_KEY บนเซิร์ฟเวอร์
+    ข้อความเข้ากลุ่มปกติแต่รูปหาย ไล่หาสาเหตุอยู่นานเพราะ log ว่างเปล่า)
+    """
+    if not IMGBB_API_KEY:
+        print("อัปรูปขึ้น imgbb ไม่ได้: ยังไม่ได้ตั้งกุญแจ (ตัวแปรระบบ SARABAN_IMGBB_API_KEY)")
+        return None
     try:
         with open(image_path, "rb") as img:
-            res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY}, files={"image": img}, timeout=60)
-            return res.json()['data']['url']
-    except: return None
+            res = requests.post("https://api.imgbb.com/1/upload",
+                                data={"key": IMGBB_API_KEY}, files={"image": img}, timeout=60)
+        d = res.json()
+        if res.status_code != 200 or not d.get("success"):
+            print(f"อัปรูปขึ้น imgbb ไม่สำเร็จ {res.status_code}: {str(d)[:200]}")
+            return None
+        return d["data"]["url"]
+    except Exception as ex:
+        print(f"อัปรูปขึ้น imgbb ไม่สำเร็จ: {type(ex).__name__}: {ex}")
+        return None
 
 def send_line_with_image(text, image_url=None):
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'}

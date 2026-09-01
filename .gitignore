@@ -7,6 +7,7 @@ users.json
 secrets/
 service_account*.json
 credentials*.json
+client_secret*.json
 token*.json
 token.txt
 phone_config.json

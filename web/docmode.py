@@ -726,18 +726,26 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     # บน hosting ดิสก์ถูกล้างเมื่อรีสตาร์ท จึงต้องส่งขึ้น Drive ให้อยู่ถาวร
     # (บนคอมที่มี Drive for Desktop ซิงก์อยู่แล้ว ตัวนี้จะถูกปิดไว้ ไม่ทำงานซ้ำซ้อน)
     drive_link = ""
+    drive_error = ""
     try:
         import drive as _dr
         drive_link = (_dr.upload(out, day=today) or {}).get("link", "")
-    except Exception:
-        pass
+    except Exception as e:
+        # เดิมเป็น except: pass เงียบสนิท ไฟล์ไม่ขึ้นไดร์ฟโดยไม่มีอะไรบอกสักตัว
+        # (ที่เจอจริง: Google เลิกให้พื้นที่เก็บกับ service account แล้ว ตอบ 403
+        #  "Service Accounts do not have storage quota" แต่ log ว่างเปล่า
+        #  จนต้องไปไล่ถาม Drive API เองถึงรู้)
+        drive_error = f"{type(e).__name__}: {e}"
+        print("อัปไฟล์ขึ้นไดร์ฟไม่สำเร็จ: " + drive_error)
 
     # ---- ส่งเข้า LINE ----
     line_ok = None
+    photo_ok = False          # รูปกับข้อความล้มแยกกันได้ ต้องรายงานแยกกัน
     try:
         p1 = os.path.join(d, "line.jpg")
         layer(0).convert("RGB").save(p1, "JPEG", quality=88)
         url = upload_to_imgbb(p1)
+        photo_ok = bool(url)
         dd = job["doc_date"]
         shown = (format_scraped_date(dd) if ("ม.ค." not in dd and "ก.พ." not in dd and dd != "-")
                  else to_thai_digits(dd))
@@ -754,6 +762,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
         line_ok = False
 
     return {"ok": True, "receipt_no": receipt_no, "line_ok": line_ok,
+            "photo_ok": photo_ok, "drive_error": drive_error[:300],
             "drive_link": drive_link,
             "filename": os.path.basename(out),
             # เข้ารหัส URL — ที่อยู่มีอักษรไทยและเว้นวรรค ("๐๘ สิงหาคม")
