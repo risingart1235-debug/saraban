@@ -231,6 +231,81 @@ def ready(force: bool = False) -> dict:
     return result
 
 
+# ==========================================================
+# คิวรอลงรับ — เก็บไว้ให้รอดตอนเซิร์ฟเวอร์เกิดใหม่
+# ==========================================================
+# Render ฟรีล้างหน่วยความจำและดิสก์ทุกครั้งที่ deploy หรือหลับแล้วตื่น เรื่องที่
+# มือถือส่งเข้ามารอลงรับจึงหายหมด ต้องให้มือถือไปดึงจาก สพป. มาส่งใหม่ทั้งชุด
+# (เซิร์ฟเวอร์ดึงเองไม่ได้ เว็บ สพป. บล็อก IP ศูนย์ข้อมูล) ไฟล์พวกนี้จึงมีค่ามาก
+#
+# เก็บไว้ที่ไดร์ฟที่เดียว ไม่ต้องแตะชีต โดยฝากข้อมูลหนังสือไว้ในช่อง description
+# ของไฟล์ (ทดสอบแล้วใส่อักษรไทยได้เกิน ๖,๐๐๐ ตัว เหลือเฟือ)
+QUEUE_FOLDER_NAME = "คิวรอลงรับ"
+
+
+def _queue_folder() -> str:
+    return ensure_subfolder(QUEUE_FOLDER_NAME, target_folder())
+
+
+def queue_put(local_pdf: str, meta: dict) -> str:
+    """ฝากไฟล์ + ข้อมูลหนังสือไว้ คืน id ของไฟล์ (คืน "" ถ้าไม่ได้เปิดใช้ไดร์ฟ)"""
+    if not enabled():
+        return ""
+    from googleapiclient.http import MediaFileUpload
+    svc = _service()
+    name = re.sub(r"[^0-9A-Za-z_.-]", "", str(meta.get("book_id") or "")) or "ไม่ทราบเลข"
+    f = _run(svc.files().create(
+        body={"name": name + ".pdf", "parents": [_queue_folder()],
+              "description": json.dumps(meta, ensure_ascii=False)},
+        media_body=MediaFileUpload(local_pdf, mimetype="application/pdf", resumable=False),
+        fields="id", supportsAllDrives=True))
+    return f.get("id", "")
+
+
+def queue_list() -> list:
+    """รายการที่ฝากไว้ทั้งหมด — ใช้ตอนเซิร์ฟเวอร์เปิดใหม่"""
+    if not enabled():
+        return []
+    svc = _service()
+    res = _run(svc.files().list(
+        q=f"'{_queue_folder()}' in parents and trashed = false",
+        fields="files(id,description,createdTime)", pageSize=200,
+        supportsAllDrives=True, includeItemsFromAllDrives=True))
+    rows = []
+    for f in res.get("files", []):
+        try:
+            meta = json.loads(f.get("description") or "{}")
+        except Exception:
+            continue          # ไฟล์แปลกปลอมที่คนเอามาวางเอง ข้ามไป
+        if isinstance(meta, dict) and meta.get("book_id"):
+            rows.append({"id": f["id"], "meta": meta, "created": f.get("createdTime", "")})
+    return rows
+
+
+def queue_drop(file_id: str) -> bool:
+    """ลบของที่ฝากไว้ — เรียกตอนลงรับเสร็จหรือกดข้ามแล้ว"""
+    if not file_id or not enabled():
+        return False
+    try:
+        _run(_service().files().delete(fileId=file_id, supportsAllDrives=True))
+        return True
+    except Exception as e:
+        print(f"ลบไฟล์คิวบนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+        return False
+
+
+def queue_fetch(file_id: str, dest: str) -> str:
+    """ดึงไฟล์ที่ฝากไว้กลับลงเครื่อง — เรียกตอนผู้ใช้กดเปิดเรื่องนั้น"""
+    from googleapiclient.http import MediaIoBaseDownload
+    req = _service().files().get_media(fileId=file_id)
+    with open(dest, "wb") as fh:
+        dl = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = dl.next_chunk()
+    return dest
+
+
 def check() -> dict:
     """ทดสอบว่าเข้าถึงโฟลเดอร์ได้จริงไหม
 

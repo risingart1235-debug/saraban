@@ -225,11 +225,112 @@ def line_image_path(token: str) -> str:
         return _line_images.get(token, "")
 
 
+# ==========================================================
+# คิวที่รอดตอนเซิร์ฟเวอร์เกิดใหม่
+# ==========================================================
+# ของเดิมเก็บงานไว้ใน _jobs (หน่วยความจำ) กับดิสก์ชั่วคราว ซึ่ง Render ล้างทิ้ง
+# ทุกครั้งที่ deploy หรือหลับแล้วตื่น เรื่องที่รอลงรับหายหมด ต้องให้มือถือไปดึง
+# จาก สพป. มาส่งใหม่ทั้งชุด (เซิร์ฟเวอร์ดึงเองไม่ได้ เว็บ สพป. บล็อก IP ศูนย์ข้อมูล)
+
+
+def _backup_to_drive(job: dict, pdf: str):
+    """ฝากไฟล์ไว้บนไดร์ฟเบื้องหลัง ไม่ให้มือถือต้องรอ
+
+    ทำในเธรดแยกเพราะมือถือส่งรวดเดียวหลายเรื่อง ถ้ารออัปทีละไฟล์จะช้ามาก
+    แลกกับช่องว่างสั้นๆ ถ้าเครื่องดับพอดีในช่วงไม่กี่วินาทีนั้น เรื่องนั้นจะไม่ถูกสำรอง
+    """
+    def work():
+        try:
+            import drive as _dr
+            meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
+                                            "sender", "emoji", "attach", "redo_no", "user")}
+            meta["created"] = job["created"].isoformat()
+            fid = _dr.queue_put(pdf, meta)
+            if fid:
+                _set(job, drive_file_id=fid)
+        except Exception as e:
+            print(f"ฝากไฟล์คิวไว้บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+
+    threading.Thread(target=work, name="saraban-queue-backup", daemon=True).start()
+
+
+def _drop_backup(job: dict):
+    """เรื่องนี้จบแล้ว (ลงรับหรือข้าม) เอาของที่ฝากไว้ออก"""
+    fid = job.get("drive_file_id")
+    if not fid:
+        return
+    def work():
+        import drive as _dr
+        if _dr.queue_drop(fid):
+            _set(job, drive_file_id="")
+
+    threading.Thread(target=work, name="saraban-queue-drop", daemon=True).start()
+
+
+def restore_queue() -> int:
+    """ดึงคิวที่ฝากไว้กลับมาตอนเปิดเซิร์ฟเวอร์ คืนจำนวนเรื่องที่กู้ได้
+
+    กู้กลับมาเป็นสถานะ "รอเปิดอ่าน" เหมือนตอนมือถือเพิ่งส่งเข้ามา ไม่ได้เก็บผล
+    วิเคราะห์ของ AI ไว้ด้วย เรื่องที่เคยกดเปิดอ่านแล้วจึงต้องให้ AI อ่านใหม่
+    (เก็บด้วยก็ได้แต่ซับซ้อนขึ้นมากและกินที่ ไม่คุ้มกับที่ประหยัดได้)
+
+    ตัวไฟล์ยังไม่ดึงลงมาตอนนี้ รอจนผู้ใช้กดเปิดเรื่องนั้นจริงถึงค่อยดึง
+    (เหตุผลเดียวกับ prepare_stored — ไม่เปลืองแรงกับเรื่องที่ยังไม่มีใครดู)
+    """
+    try:
+        import drive as _dr
+        if not _dr.enabled():
+            return 0
+        items = _dr.queue_list()
+    except Exception as e:
+        print(f"กู้คิวจากไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+        return 0
+
+    restored = 0
+    for item in items:
+        meta = item["meta"]
+        bid = str(meta.get("book_id") or "")
+        try:
+            # ลงรับ/ข้ามไปแล้วระหว่างที่เซิร์ฟเวอร์ดับ ก็ไม่ต้องกู้ เก็บกวาดทิ้งเลย
+            if _durable_phone_record(bid):
+                _dr.queue_drop(item["id"])
+                continue
+        except Exception:
+            pass          # อ่านสถานะไม่ได้ก็กู้ไว้ก่อน ดีกว่าทำหาย
+        with _lock:
+            if any(j.get("source") == "phone" and j.get("book_id") == bid
+                   for j in _jobs.values()):
+                continue
+            fields = {k: meta.get(k) or d for k, d in (
+                ("doc_no", "-"), ("doc_title", "-"), ("doc_date", "-"),
+                ("sender", "-"), ("emoji", "🔵"), ("attach", ""))}
+            job = _new_job_locked(meta.get("user") or "phone", source="phone",
+                                  status="stored", step="รอเปิดอ่าน",
+                                  book_id=bid, redo_no=meta.get("redo_no") or None,
+                                  drive_file_id=item["id"], **fields)
+            try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
+                job["created"] = datetime.fromisoformat(meta["created"])
+            except Exception:
+                pass
+        restored += 1
+    if restored:
+        print(f"กู้คิวรอลงรับจากไดร์ฟกลับมาได้ {restored} เรื่อง")
+    return restored
+
+
 def _cleanup():
-    """ลบงานเก่าที่ค้างไว้ กันหน่วยความจำบวม"""
+    """ลบงานเก่าที่ค้างไว้ กันหน่วยความจำบวม
+
+    ยกเว้นเรื่องที่ยังมีของฝากอยู่บนไดร์ฟ (drive_file_id) เพราะนั่นแปลว่ายังไม่ได้
+    ลงรับและยังไม่ได้ข้าม — เป็นงานค้างจริงที่ต้องคาไว้ให้เห็น ไม่ใช่ขยะ
+    สำคัญกับเรื่องที่กู้กลับมาหลังเซิร์ฟเวอร์เกิดใหม่ ซึ่งเวลาสร้างเป็นของเมื่อวาน
+    ถ้าไม่ยกเว้นไว้ พอมีใครนำเข้าไฟล์ในโหมด ๓ ทีเดียว คิวที่เพิ่งกู้มาจะหายเกลี้ยง
+    """
     now = now_th()
     with _lock:
-        for jid in [j for j, v in _jobs.items() if now - v["created"] > JOB_TTL]:
+        stale = [j for j, v in _jobs.items()
+                 if now - v["created"] > JOB_TTL and not v.get("drive_file_id")]
+        for jid in stale:
             v = _jobs.pop(jid)
             shutil.rmtree(v.get("dir", ""), ignore_errors=True)
 
@@ -261,6 +362,11 @@ def _phone_prepare_work(job: dict):
 
     def work():
         try:
+            # กู้มาจากไดร์ฟหลังเซิร์ฟเวอร์เกิดใหม่ ตัวไฟล์ยังไม่ได้ดึงลงมา
+            if not os.path.exists(pdf) and job.get("drive_file_id"):
+                _set(job, status="analyzing", step="กำลังดึงไฟล์กลับจากไดร์ฟ...")
+                import drive as _dr
+                _dr.queue_fetch(job["drive_file_id"], pdf)
             _set(job, status="analyzing", step="กำลังเตรียมเอกสารจากมือถือ...")
             _prepare(job, pdf, doc_no=job["doc_no"], doc_title=job["doc_title"],
                      doc_date=job["doc_date"], sender=job["sender"],
@@ -526,6 +632,7 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
     # เก็บไฟล์ไว้เฉยๆ ยังไม่เข้าคิวประมวลผล — รอผู้ใช้แตะเปิดเรื่องนี้ก่อน
     # (ดูเหตุผลที่ prepare_stored)
     _set(job, status="stored", step="รอเปิดอ่าน")
+    _backup_to_drive(job, pdf)
     return job, True
 
 
@@ -720,6 +827,7 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
              error=f"{type(e).__name__}: {e}")
         raise
     _set(job, status="done", step="บันทึกเรียบร้อย", error="", result=result)
+    _drop_backup(job)
     return result
 
 
@@ -867,4 +975,5 @@ def skip(job):
         raise
     result = {"ok": True}
     _set(job, status="skipped", step="ข้ามเอกสารแล้ว", result=result)
+    _drop_backup(job)
     return result

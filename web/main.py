@@ -1178,6 +1178,11 @@ def _warm_up():
                   + ("พร้อมใช้งาน" if st.get("ok") else "ใช้ไม่ได้ — " + str(st.get("error"))[:200]))
         except Exception as e:
             print(f"ตรวจไดร์ฟตอนเปิดเซิร์ฟเวอร์ไม่ได้: {type(e).__name__}: {e}")
+        # กู้คิวที่ค้างไว้ก่อนเซิร์ฟเวอร์เกิดใหม่ ต้องทำหลังตรวจไดร์ฟ เพราะใช้ไดร์ฟอ่าน
+        try:
+            docmode.restore_queue()
+        except Exception as e:
+            print(f"กู้คิวไม่สำเร็จ: {type(e).__name__}: {e}")
 
     threading.Thread(target=work, name="saraban-warmup", daemon=True).start()
 
