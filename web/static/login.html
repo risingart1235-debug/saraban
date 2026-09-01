@@ -136,6 +136,20 @@ $('sendToggle').onclick = () => {
   if (!open) $('sSender').focus();
 };
 
+// ขอเลขได้ทีละเลข พอได้แล้วฟอร์มจะถูกซ่อน ต้องกด "ตกลง" ก่อนถึงจะขอเลขต่อไปได้
+// (เจตนาให้กดสองจังหวะ กันกดรัวจนเผาเลขทะเบียนทิ้ง)
+function sendAgain() {
+  $('sendMsg').classList.add('hidden');
+  $('sendForm').classList.remove('hidden');
+  $('sendHint').classList.remove('hidden');
+  // คงชื่อผู้ขอกับวันที่ไว้ เพราะคนเดิมมักขอหลายเลขรวดเดียวในวันเดียวกัน
+  $('sTo').value = '';
+  $('sTitle').value = '';
+  const b = $('sSubmit');
+  b.disabled = false; b.textContent = 'ขอเลข';
+  $('sTo').focus();
+}
+
 $('sSubmit').onclick = async () => {
   const m = $('sendMsg');
   const body = {
@@ -176,7 +190,10 @@ $('sSubmit').onclick = async () => {
       + esc(d.no) + '</div>'
       + 'เลขที่หนังสือ: <b>' + esc(d.doc_no) + '</b><br>'
       + 'ลงวันที่ ' + esc(d.date) + '<br>'
-      + '<span class="tiny">บันทึกลงทะเบียนหนังสือส่งเรียบร้อยแล้ว</span>';
+      + '<span class="tiny">บันทึกลงทะเบียนหนังสือส่งเรียบร้อยแล้ว</span>'
+      + '<button class="btn grey" id="sAgain" style="margin-top:12px">'
+      + 'ตกลง — ขอเลขต่อไป</button>';
+    $('sAgain').onclick = sendAgain;
   } catch (e) {
     m.className = 'err'; m.classList.remove('hidden');
     m.textContent = e.message;
