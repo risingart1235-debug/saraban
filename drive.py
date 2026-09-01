@@ -147,6 +147,23 @@ def ensure_subfolder(name: str, parent: str = None) -> str:
     return made["id"]
 
 
+def ensure_path(path: str, parent: str = None) -> str:
+    """สร้างโฟลเดอร์ซ้อนกันตามเส้นทาง คืน id ของชั้นในสุด
+
+    day_folder() คืนค่าเป็น "๒๕๖๙/๐๙ กันยายน/๐๑" ซึ่งเป็นเส้นทาง ๓ ชั้น
+    ของเดิมเอาทั้งก้อนไปตั้งเป็นชื่อโฟลเดอร์เดียว (มีสแลชอยู่ในชื่อ) ทำให้ไดร์ฟ
+    มีโฟลเดอร์งอกที่ชั้นบนสุดวันละอัน ปีละ ๒๐๐ กว่าอัน — เป็นปัญหาเดียวกับที่
+    จัดแฟ้มใหม่.py แก้ไปแล้วในเครื่อง แต่ฝั่งไดร์ฟยังเป็นแบบเก่าอยู่
+    ทำให้ไฟล์ชุดเดียวกันถูกเก็บคนละโครงสร้างแล้วแต่ว่าใครเป็นคนเซฟ
+    """
+    fid = parent or target_folder()
+    for part in str(path or "").split("/"):
+        part = part.strip()
+        if part:
+            fid = ensure_subfolder(part, fid)
+    return fid
+
+
 def upload(local_path: str, day: str = None, name: str = None) -> dict:
     """ส่งไฟล์ขึ้น Drive คืน {'id','link'} — ถ้าไม่ได้เปิดใช้จะคืน {} เฉยๆ"""
     if not enabled():
@@ -155,7 +172,7 @@ def upload(local_path: str, day: str = None, name: str = None) -> dict:
 
     svc = _service()
     name = name or os.path.basename(local_path)
-    parent = ensure_subfolder(day, target_folder()) if day else target_folder()
+    parent = ensure_path(day) if day else target_folder()
 
     media = MediaFileUpload(local_path, mimetype="application/pdf", resumable=False)
     f = _run(svc.files().create(
@@ -229,6 +246,50 @@ def ready(force: bool = False) -> dict:
     else:
         _ready_cache = None
     return result
+
+
+def reorganize(dry_run: bool = True) -> list:
+    """ย้ายไฟล์จากโฟลเดอร์แบบเก่า (ชื่อมีสแลช) เข้าโครงสร้าง ปี/เดือน/วัน
+
+    คู่กับ จัดแฟ้มใหม่.py ที่ทำให้ฝั่งเครื่องไปแล้ว ฝั่งไดร์ฟเคยเอา
+    "๒๕๖๙/๐๙ กันยายน/๐๑" ไปตั้งเป็นชื่อโฟลเดอร์เดียวทั้งก้อน ไฟล์ชุดเดียวกัน
+    จึงถูกเก็บคนละโครงสร้างแล้วแต่ว่าเซฟจากเครื่องหรือจากเซิร์ฟเวอร์
+
+    ใช้การย้าย (เปลี่ยนโฟลเดอร์แม่) ไม่ใช่คัดลอกแล้วลบ ไฟล์จึงไม่มีทางหาย
+    และลบโฟลเดอร์เก่าเฉพาะตอนที่ย้ายออกหมดจริงๆ แล้วเท่านั้น
+    dry_run=True คือดูผลเฉยๆ ยังไม่แตะอะไร
+    """
+    svc = _service()
+    root = target_folder()
+    plan = []
+    tops = _run(svc.files().list(
+        q=f"'{root}' in parents and mimeType = 'application/vnd.google-apps.folder' "
+          f"and trashed = false",
+        fields="files(id,name)", pageSize=200,
+        supportsAllDrives=True, includeItemsFromAllDrives=True)).get("files", [])
+    for folder in tops:
+        if "/" not in folder["name"]:
+            continue                      # โครงสร้างใหม่อยู่แล้ว ไม่ต้องแตะ
+        kids = _run(svc.files().list(
+            q=f"'{folder['id']}' in parents and trashed = false",
+            fields="files(id,name)", pageSize=500,
+            supportsAllDrives=True, includeItemsFromAllDrives=True)).get("files", [])
+        for k in kids:
+            plan.append({"file": k["name"], "from": folder["name"], "to": folder["name"]})
+        if dry_run:
+            continue
+        dest = ensure_path(folder["name"])
+        for k in kids:
+            _run(svc.files().update(fileId=k["id"], addParents=dest,
+                                    removeParents=folder["id"],
+                                    fields="id", supportsAllDrives=True))
+        left = _run(svc.files().list(
+            q=f"'{folder['id']}' in parents and trashed = false",
+            fields="files(id)", pageSize=10,
+            supportsAllDrives=True, includeItemsFromAllDrives=True)).get("files", [])
+        if not left:                      # ลบเฉพาะตอนว่างจริง
+            _run(svc.files().delete(fileId=folder["id"], supportsAllDrives=True))
+    return plan
 
 
 # ==========================================================
