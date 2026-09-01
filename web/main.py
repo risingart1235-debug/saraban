@@ -347,6 +347,20 @@ async def api_send_request(request: Request):
             "date": core.normalize_typed_date(str(d.get("doc_date", "")).strip()) or get_thai_date()}
 
 
+@app.get("/api/line-image/{token}.jpg")
+def api_line_image(token: str):
+    """ให้เซิร์ฟเวอร์ของ LINE มาดึงรูปหน้าที่ลงรับ
+
+    ต้องเปิดสาธารณะ ไม่มีล็อกอิน เพราะ LINE มาดึงแบบไม่มีตัวตน กันด้วยโทเคน
+    สุ่ม ๒๔ ไบต์แทน เดาไม่ได้ ไม่ถูกลิสต์ที่ไหน และหายไปเองเมื่อเซิร์ฟเวอร์รีสตาร์ท
+    ปลอดภัยกว่าเดิมที่อัปหนังสือราชการขึ้นเว็บฝากรูปสาธารณะแบบถาวร
+    """
+    path = docmode.line_image_path(token)
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="ไม่พบรูป")
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @app.get("/healthz")
 def healthz():
     """จุดให้ "ตัวปลุก" เรียกเป็นระยะ กัน hosting ฟรีพักเครื่อง

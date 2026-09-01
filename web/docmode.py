@@ -10,6 +10,7 @@ import io
 import re
 import base64
 import queue
+import secrets
 import shutil
 import threading
 import traceback
@@ -161,6 +162,63 @@ def contained_path(root: str, *parts: str):
         return candidate if os.path.commonpath((root_abs, candidate)) == root_abs else None
     except ValueError:  # คนละ drive บน Windows
         return None
+
+
+# ==========================================================
+# รูปที่ส่งเข้า LINE — บน hosting ให้ LINE มาดึงจากเราเอง
+# ==========================================================
+# imgbb บล็อก IP ของศูนย์ข้อมูล ตอบ 400 code 103 "You have been forbidden to use
+# this website" (อาการเดียวกับที่เว็บ สพป. บล็อก Render จนต้องให้มือถือไปดึงแทน)
+# บน hosting จึงตัดคนกลางทิ้ง ให้เซิร์ฟเวอร์ของ LINE มาดึงรูปจากเราตรงๆ
+#
+# บนเครื่องตัวเองยังใช้ imgbb เหมือนเดิม เพราะเซิร์ฟเวอร์อยู่หลังเราเตอร์บ้าน
+# LINE เข้าไม่ถึง — public_base_url() จะว่าง แล้วโค้ดถอยไปใช้ imgbb เอง
+_LINE_IMG_DIR = core._w("_lineimg")
+_LINE_IMG_KEEP = 60            # เก็บรูปล่าสุดเท่านี้ เกินแล้วลบตัวเก่าทิ้ง
+_line_images = {}              # โทเคน -> ที่อยู่ไฟล์
+
+
+def public_base_url() -> str:
+    """ที่อยู่สาธารณะของเซิร์ฟเวอร์ — ว่างแปลว่ารันในเครื่อง
+
+    RENDER_EXTERNAL_URL เป็นตัวแปรที่ Render ใส่ให้เองอัตโนมัติ ไม่ต้องตั้งเพิ่ม
+    ถ้าย้ายไป hosting เจ้าอื่นค่อยตั้ง SARABAN_PUBLIC_URL เอง
+    """
+    return (os.environ.get("SARABAN_PUBLIC_URL", "").strip()
+            or os.environ.get("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
+
+
+def publish_line_image(src_path: str) -> str:
+    """คัดลอกรูปไปที่ที่เปิดให้ดึงได้ แล้วคืน URL — คืน "" ถ้ารันในเครื่อง
+
+    คัดลอกออกมาแทนที่จะเสิร์ฟจากโฟลเดอร์งานโดยตรง เพราะ _cleanup() ลบโฟลเดอร์งาน
+    ทิ้งตาม JOB_TTL ถ้า LINE มาดึงช้ากว่านั้นจะได้รูปหาย
+    """
+    base = public_base_url()
+    if not base:
+        return ""
+    os.makedirs(_LINE_IMG_DIR, exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    dest = os.path.join(_LINE_IMG_DIR, token + ".jpg")
+    shutil.copyfile(src_path, dest)
+    with _lock:
+        _line_images[token] = dest
+        while len(_line_images) > _LINE_IMG_KEEP:
+            old = _line_images.pop(next(iter(_line_images)))
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+    return f"{base}/api/line-image/{token}.jpg"
+
+
+def line_image_path(token: str) -> str:
+    """หาที่อยู่ไฟล์จากโทเคน — ดูจากทะเบียนในหน่วยความจำเท่านั้น
+
+    ไม่เอาโทเคนไปต่อเป็นชื่อไฟล์ตรงๆ จะได้ไม่มีทางหลุดไปอ่านไฟล์อื่นในเครื่อง
+    """
+    with _lock:
+        return _line_images.get(token, "")
 
 
 def _cleanup():
@@ -744,7 +802,8 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
     try:
         p1 = os.path.join(d, "line.jpg")
         layer(0).convert("RGB").save(p1, "JPEG", quality=88)
-        url = upload_to_imgbb(p1)
+        # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
+        url = publish_line_image(p1) or upload_to_imgbb(p1)
         photo_ok = bool(url)
         dd = job["doc_date"]
         shown = (format_scraped_date(dd) if ("ม.ค." not in dd and "ก.พ." not in dd and dd != "-")

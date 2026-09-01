@@ -36,6 +36,7 @@ blank.pdf
 
 # ===== Python =====
 _jobs/
+_lineimg/
 .claude/
 __pycache__/
 *.py[cod]
