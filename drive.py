@@ -202,6 +202,35 @@ def probe() -> dict:
             pass
 
 
+_ready_cache = None            # (เวลาที่ตรวจ, ผลลัพธ์) — กันตรวจซ้ำทุกครั้งที่ลงรับ
+_READY_TTL = 600               # ผลว่า "ใช้ได้" เชื่อได้นานเท่านี้ (วินาที)
+
+
+def ready(force: bool = False) -> dict:
+    """พร้อมอัปไฟล์จริงไหม — ใช้เป็นด่านตรวจ "ก่อน" จะกินเลขรับ
+
+    ทำไมต้องตรวจก่อน: เลขรับถูกปั๊มลงบนหน้ากระดาษ จึงต้องจองเลขและเขียนแถวทะเบียน
+    ก่อนสร้างไฟล์เสมอ สลับลำดับไม่ได้ ถ้าปล่อยให้อัปไดร์ฟพังทีหลัง จะได้เลขรับที่มี
+    ในทะเบียนแต่ไม่มีเอกสารให้ตามหา และไฟล์บน hosting ถูกล้างตอนรีสตาร์ทจนกู้ไม่ได้
+    (เกิดขึ้นจริงกับเลขรับ ๔๗๔ วันที่ ๑ ก.ย. ๒๕๖๙ ตอนตั้ง SARABAN_DRIVE_OAUTH ผิด)
+
+    ไม่ได้เปิดใช้ไดร์ฟ = ผ่าน (เครื่องที่บ้านมี Drive for Desktop ซิงก์ให้อยู่แล้ว)
+    ผลว่าใช้ได้จำไว้ ๑๐ นาที ส่วนผลว่าพังไม่จำ จะได้หายทันทีที่แก้ถูก
+    """
+    global _ready_cache
+    import time
+    if not enabled():
+        return {"ok": True, "skipped": "ไม่ได้เปิดใช้การอัปขึ้นไดร์ฟ"}
+    if not force and _ready_cache and time.time() - _ready_cache[0] < _READY_TTL:
+        return _ready_cache[1]
+    result = probe()
+    if result.get("ok"):
+        _ready_cache = (time.time(), result)
+    else:
+        _ready_cache = None
+    return result
+
+
 def check() -> dict:
     """ทดสอบว่าเข้าถึงโฟลเดอร์ได้จริงไหม
 

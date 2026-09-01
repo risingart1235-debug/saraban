@@ -121,6 +121,14 @@
     <p class="hint">เลือก PDF หรือรูปจากเครื่อง/มือถือ ให้ AI อ่านและเกษียณให้</p>
     <input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png" class="hidden">
     <button class="btn blue" id="pick">📂 เลือกไฟล์</button>
+    <!-- ลงรับใหม่ด้วยเลขเดิม — ไว้กู้เรื่องที่มีแถวในทะเบียนแล้วแต่ไฟล์หาย
+         (เช่นอัปขึ้นไดร์ฟไม่สำเร็จ) จะได้ไม่ต้องลบแถวทิ้งจนทะเบียนมีช่องว่าง -->
+    <label for="redo" style="margin-top:14px">ลงรับใหม่ด้วยเลขเดิม
+      <span class="tiny">(เว้นว่างถ้าลงรับตามปกติ)</span></label>
+    <input id="redo" type="text" inputmode="numeric" placeholder="เช่น 474">
+    <p class="tiny" style="margin-top:4px">
+      ใส่เลขรับที่มีอยู่แล้วในทะเบียน ระบบจะเขียนทับแถวเดิมและไม่กินเลขใหม่
+    </p>
   </div>
 
   <div class="card">
@@ -231,6 +239,8 @@ $('file').onchange = async () => {
   const f = $('file').files[0]; if (!f) return;
   const b = $('pick'); b.disabled = true; b.innerHTML = '<span class="spin"></span> กำลังอัปโหลด...';
   const fd = new FormData(); fd.append('file', f);
+  const redo = $('redo').value.trim();
+  if (redo) fd.append('redo_no', redo);
   try {
     const r = await fetch('/api/doc/upload', { method: 'POST', body: fd });
     const d = await r.json();

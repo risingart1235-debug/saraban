@@ -441,7 +441,11 @@ $('save').onclick = async () => {
       (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +
       // รูปกับข้อความล้มคนละเรื่อง เคยเจอข้อความเข้าแต่รูปหาย แล้วไม่มีอะไรบอก
       (d.line_ok && !d.photo_ok ? '<br>⚠️ แต่รูปหน้าที่ลงรับไม่ได้แนบไป (อัป imgbb ไม่สำเร็จ)' : '') +
-      (d.drive_error ? '<br>⚠️ ไม่ได้อัปขึ้นไดร์ฟ: ' + esc(d.drive_error) : '') +
+      // ถึงตรงนี้เลขรับถูกกินไปแล้ว ถอยกลับเองไม่ได้ ต้องบอกทางแก้ให้ชัด
+      (d.drive_error ? '<br>⚠️ ไม่ได้อัปขึ้นไดร์ฟ: ' + esc(d.drive_error)
+        + '<br><b>เลขรับนี้จะไม่มีเอกสารเก็บไว้</b> — ถ้าต้องการให้มีไฟล์ในไดร์ฟ '
+        + 'ให้ <a href="/fix" style="color:inherit;font-weight:700">ถอยเลขรับ</a> '
+        + 'แล้วลงรับใหม่หลังแก้ไดร์ฟเสร็จ' : '') +
       `<a class="btn" href="${d.download}" download style="margin-top:12px;text-decoration:none;text-align:center;line-height:28px">⬇️ ดาวน์โหลด PDF</a>` +
       `<a class="btn" href="${backUrl()}" style="margin-top:8px;text-decoration:none;text-align:center;line-height:28px">${backLabel()}</a>` +
       (D.book_id ? `<a class="btn grey" href="/" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">กลับหน้าแรก</a>` : ''));

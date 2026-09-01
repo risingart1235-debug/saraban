@@ -965,12 +965,25 @@ async def api_doc_upload(request: Request):
     upload = form.get("file")
     if upload is None or not callable(getattr(upload, "read", None)):
         raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์")
+    # ลงรับใหม่ด้วยเลขเดิม — ต้องมีแถวนั้นอยู่จริงก่อน ไม่งั้นผู้ใช้จะรอ AI อ่านจนจบ
+    # แล้วค่อยมาเจอว่าเลขไม่มีในทะเบียน เสียเวลาเปล่า
+    redo_no = str(form.get("redo_no") or "").strip()
+    if redo_no:
+        want = core.to_arabic_digits(redo_no)
+        st = _store_mod.get_store()
+        have = any(r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want
+                   for r in st.registry_rows())
+        if not have:
+            raise HTTPException(status_code=404,
+                                detail=f"ไม่พบเลขรับ {redo_no} ในทะเบียน จึงลงรับใหม่ด้วยเลขนี้ไม่ได้")
+
     incoming = _new_incoming_path()
     try:
         await _stream_upload(upload, incoming, "document")
         try:
             job = docmode.start_from_upload_path(
-                user, getattr(upload, "filename", "") or "upload.pdf", incoming)
+                user, getattr(upload, "filename", "") or "upload.pdf", incoming,
+                redo_no=redo_no or None)
         except docmode.QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "30"})
     finally:
@@ -1053,6 +1066,9 @@ async def api_doc_save(job_id: str, request: Request, user: str = Depends(curren
         # เรื่องนี้ถูกลงรับ/ข้ามจากที่อื่นไปแล้วระหว่างที่เปิดหน้านี้ค้างไว้
         # (เช่นเปิดค้างในโหมด ๒ แล้วไปกดลงรับเรื่องเดียวกันในโหมด ๑)
         raise HTTPException(status_code=409, detail=str(e))
+    except docmode.DriveNotReadyError as e:
+        # ๕๐๓ = ยังไม่ได้ทำอะไรเลย เลขรับไม่ถูกกิน กดใหม่ได้เมื่อไดร์ฟกลับมา
+        raise HTTPException(status_code=503, detail=str(e))
     except docmode.JobStateError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -1152,6 +1168,16 @@ def _warm_up():
             _s.get_store().load_users()
         except Exception:
             pass
+        # ตรวจไดร์ฟไว้ล่วงหน้าด้วย เพราะตอนลงรับมีด่านตรวจว่าอัปไฟล์ได้จริงไหม
+        # ก่อนจะกินเลขรับ ถ้าไม่อุ่นไว้ คนแรกที่กดลงรับต้องรอ ~๕ วินาที
+        # ผลตรวจยังโผล่ใน log ตอนเปิดเซิร์ฟเวอร์ด้วย รู้ตั้งแต่ต้นว่าไดร์ฟพังไหม
+        try:
+            import drive as _dr
+            st = _dr.ready()
+            print("ตรวจไดร์ฟตอนเปิดเซิร์ฟเวอร์: "
+                  + ("พร้อมใช้งาน" if st.get("ok") else "ใช้ไม่ได้ — " + str(st.get("error"))[:200]))
+        except Exception as e:
+            print(f"ตรวจไดร์ฟตอนเปิดเซิร์ฟเวอร์ไม่ได้: {type(e).__name__}: {e}")
 
     threading.Thread(target=work, name="saraban-warmup", daemon=True).start()
 

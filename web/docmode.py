@@ -73,6 +73,10 @@ class AlreadyHandledError(RuntimeError):
                          (f" (เลขรับ {self.receipt_no})" if self.receipt_no else ""))
 
 
+class DriveNotReadyError(RuntimeError):
+    """อัปไฟล์ขึ้นไดร์ฟไม่ได้ — ต้องหยุดก่อนกินเลขรับ ไม่ใช่ปล่อยให้ลงทะเบียนแล้วไฟล์หาย"""
+
+
 class JobStateError(RuntimeError):
     def __init__(self, message: str, *, status: str = "", result=None):
         super().__init__(message)
@@ -339,7 +343,8 @@ def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
                 return existing, True
             # uploading/queued/analyzing/ready/saving/save_error/error ล้วนต้องใช้ job เดิม
             return existing, False
-        if durable:
+        if durable and not clean.get("redo_no"):
+            # มี redo_no = ตั้งใจลงรับซ้ำด้วยเลขเดิม จึงไม่ใช่การลงรับซ้ำโดยพลาด
             raise AlreadyHandledError(durable.get("status", "registered"),
                                       durable.get("receipt_no", ""))
         job = _new_job_locked(user, source="phone", status="uploading",
@@ -469,8 +474,14 @@ def start_from_upload(user: str, filename: str, data: bytes) -> dict:
     return job
 
 
-def start_from_upload_path(user: str, filename: str, source_path: str) -> dict:
-    """รับ ownership ของไฟล์ที่ API stream ลงดิสก์แล้ว จึงไม่ต้องเก็บทั้งไฟล์ใน RAM"""
+def start_from_upload_path(user: str, filename: str, source_path: str,
+                           redo_no: str = None) -> dict:
+    """รับ ownership ของไฟล์ที่ API stream ลงดิสก์แล้ว จึงไม่ต้องเก็บทั้งไฟล์ใน RAM
+
+    redo_no = ลงรับใหม่ด้วยเลขเดิม ไม่กินเลขใหม่ ใช้ตอนที่แถวทะเบียนมีอยู่แล้ว
+    แต่ไฟล์หาย (เช่นอัปขึ้นไดร์ฟไม่สำเร็จตอนนั้น) จะได้ไม่ต้องลบแถวทิ้งแล้ว
+    เหลือช่องว่างในทะเบียนราชการ
+    """
     job = create_job(user)
     pdf = os.path.join(job["dir"], "doc.pdf")
     os.replace(source_path, pdf)
@@ -485,7 +496,7 @@ def start_from_upload_path(user: str, filename: str, source_path: str) -> dict:
                 os.replace(converted, pdf)
             _prepare(job, pdf, doc_no="-", doc_title="-", doc_date="-", sender="-",
                      emoji="🔵", attach="📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)",
-                     book_id=None, redo_no=None)
+                     book_id=None, redo_no=redo_no)
         except Exception as e:
             _fail(job, e)
 
@@ -690,6 +701,15 @@ def _reserve_for_job(job: dict, reserve_fn, store):
 
 
 def finalize(job, payload: dict, reserve_fn) -> dict:
+    # ด่านตรวจก่อนแตะเลขรับ — ต้องมั่นใจว่าอัปไฟล์ขึ้นไดร์ฟได้จริงก่อน
+    # เช็คตรงนี้ (ก่อน _claim_save) เพื่อให้งานยังอยู่สถานะ ready กดใหม่ได้เลย
+    import drive as _dr
+    st = _dr.ready()
+    if not st.get("ok"):
+        raise DriveNotReadyError(
+            "อัปไฟล์ขึ้นไดร์ฟไม่ได้ จึงยังไม่ลงรับให้ เพราะจะได้เลขที่ไม่มีเอกสาร: "
+            + str(st.get("error", ""))[:200])
+
     existing = _claim_save(job)
     if existing is not None:
         return existing
