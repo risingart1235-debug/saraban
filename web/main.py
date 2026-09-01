@@ -378,6 +378,18 @@ def healthz():
 # ==========================================================
 # ๔. หน้าเว็บ
 # ==========================================================
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_page():
+    """นโยบายความเป็นส่วนตัว — ต้องเปิดสาธารณะ ไม่ต้องล็อกอิน
+
+    Google บังคับให้กรอก Homepage + Privacy policy + Authorized domains ที่หน้า
+    Branding ก่อนถึงจะกด "Publish app" ได้ ทั้งที่ไม่ได้ติดดาวว่าเป็นช่องบังคับ
+    (บั๊กของคอนโซล มีคนเจอตรงกันหลายรายช่วงปลายสิงหาคม ๒๕๖๙) หน้านี้จึงมีไว้
+    ให้มี URL จริงไปกรอก และเพื่อบอกครูตามจริงว่าระบบเก็บอะไรไว้บ้าง
+    """
+    return FileResponse(os.path.join(STATIC_DIR, "privacy.html"))
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page():
     return FileResponse(os.path.join(STATIC_DIR, "login.html"))

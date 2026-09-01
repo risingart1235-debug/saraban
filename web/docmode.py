@@ -397,6 +397,9 @@ def prepare_stored(job: dict) -> bool:
             _set(job, status="error", step=label,
                  error=f"หนังสือเรื่องนี้{label}" + (f" (เลขรับ {rno})" if rno else "") +
                        " — ไม่ต้องลงรับซ้ำ")
+            # จบไปทางอื่นแล้ว (เช่นลงรับจากเครื่องที่บ้านผ่านโปรแกรมเดสก์ท็อป)
+            # เอาของที่ฝากไว้บนไดร์ฟออกเลย ไม่ต้องรอให้เซิร์ฟเวอร์เกิดใหม่มาเก็บกวาด
+            _drop_backup(job)
             return False
 
     with _lock:
