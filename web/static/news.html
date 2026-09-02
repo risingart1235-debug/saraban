@@ -141,8 +141,31 @@ function blockedNotice(msg) {
   $('tabs').innerHTML = ''; $('list').innerHTML = '';
 }
 
+// คิวว่าง — ไม่ใช่ error ต้องบอกว่าจะเอาเรื่องใหม่เข้ามาได้ยังไง
+function emptyNotice() {
+  const cloud = DATA.spp_ok === false;
+  $('sum').innerHTML = `
+    <div class="card" style="margin:0">
+      <h2 style="margin:0 0 6px">📭 ยังไม่มีเรื่องรอลงรับ</h2>
+      <p class="hint" style="margin:0 0 10px">${cloud
+        ? 'ลงรับครบหมดแล้ว — เรื่องใหม่ต้องให้มือถือไปดึงมาให้ เพราะเครื่องนี้ต่อเว็บ สพป. ไม่ได้'
+        : 'ลงรับครบหมดแล้ว ไม่มีหนังสือใหม่ที่ยังไม่ได้จัดการ'}</p>
+      ${cloud ? `<p class="tiny" style="margin:0 0 12px">
+        เปิด <b>phone_fetch.py</b> บนมือถือ ดึงหนังสือใหม่ส่งเข้ามา แล้วกด ↻ ที่มุมบนเพื่อดูอีกครั้ง
+      </p>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a class="btn purple" href="/stamp" style="flex:1;min-width:150px;text-decoration:none;
+           text-align:center;line-height:28px">🔢 ลงตรายางเลขรับ</a>
+        <a class="btn grey" href="/fix" style="flex:1;min-width:150px;text-decoration:none;
+           text-align:center;line-height:24px">🔧 ดูทะเบียน / ถอยเลข</a>
+      </div>
+    </div>`;
+  $('tabs').innerHTML = ''; $('list').innerHTML = '';
+}
+
 function render() {
   const t = DATA.total;
+  if (!DATA.count) { emptyNotice(); return; }
   // ดึงเว็บ สพป. ไม่ได้ (เช่นรันบนคลาวด์) แต่ยังมีเรื่องที่มือถือส่งมาให้ทำ
   // ต้องบอกให้ชัด ไม่งั้นผู้ใช้จะนึกว่าหนังสือหายไปไหนหมด
   const partial = DATA.spp_ok === false

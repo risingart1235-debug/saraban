@@ -39,6 +39,21 @@ from core import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
+
+def _page(name: str) -> FileResponse:
+    """ส่งหน้า HTML โดยบังคับให้เบราว์เซอร์ถามเซิร์ฟเวอร์ก่อนใช้ของเก่าเสมอ
+
+    เดิมหน้าพวกนี้ไม่ได้ส่งหัวข้อมูลเรื่องแคชเลยสักตัว (ไม่มีทั้ง cache-control,
+    etag, last-modified) เบราว์เซอร์จึงเดาเองว่าจะเก็บไว้นานแค่ไหน มือถือมักเดายาว
+    แล้วหยิบของเก่ามาใช้โดยไม่ถามซ้ำ พอแก้หน้าเว็บแล้ว deploy ผู้ใช้จึงยังเห็นหน้าเดิม
+    ทั้งที่เซิร์ฟเวอร์เปลี่ยนไปแล้ว — หาสาเหตุยากมากเพราะฝั่งเซิร์ฟเวอร์ถูกทุกอย่าง
+
+    no-cache ไม่ได้แปลว่า "ห้ามเก็บ" แต่แปลว่า "เก็บได้ แต่ต้องถามก่อนใช้"
+    ไฟล์ static (css/รูป) ไม่ต้องทำ เพราะ StaticFiles ใส่ etag ให้ตรวจซ้ำอยู่แล้ว
+    """
+    return FileResponse(os.path.join(STATIC_DIR, name),
+                        headers={"Cache-Control": "no-cache"})
+
 # ขนาดกระดาษ A4 ที่ ๒๐๐ DPI — ต้องตรงกับเวอร์ชันเดสก์ท็อป
 A4_DPI = 200
 A4_W, A4_H = 1654, 2339
@@ -387,17 +402,17 @@ def privacy_page():
     (บั๊กของคอนโซล มีคนเจอตรงกันหลายรายช่วงปลายสิงหาคม ๒๕๖๙) หน้านี้จึงมีไว้
     ให้มี URL จริงไปกรอก และเพื่อบอกครูตามจริงว่าระบบเก็บอะไรไว้บ้าง
     """
-    return FileResponse(os.path.join(STATIC_DIR, "privacy.html"))
+    return _page("privacy.html")
 
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page():
-    return FileResponse(os.path.join(STATIC_DIR, "login.html"))
+    return _page("login.html")
 
 
 @app.get("/register", response_class=HTMLResponse)
 def register_page():
-    return FileResponse(os.path.join(STATIC_DIR, "register.html"))
+    return _page("register.html")
 
 
 @app.post("/register")
@@ -445,7 +460,7 @@ def home(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return _page("index.html")
 
 
 @app.get("/stamp", response_class=HTMLResponse)
@@ -453,7 +468,7 @@ def stamp_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "stamp.html"))
+    return _page("stamp.html")
 
 
 # ==========================================================
@@ -469,7 +484,7 @@ def admin_page(session: str = Cookie(default=None)):
         return HTMLResponse("<h3 style='font-family:sans-serif;padding:40px'>"
                             "เฉพาะผู้ดูแลระบบเท่านั้น <a href='/'>กลับหน้าแรก</a></h3>",
                             status_code=403)
-    return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
+    return _page("admin.html")
 
 
 @app.post("/api/me/password")
@@ -719,7 +734,7 @@ def doc_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "doc.html"))
+    return _page("doc.html")
 
 
 @app.get("/api/spp/check")
@@ -740,7 +755,7 @@ def news_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "news.html"))
+    return _page("news.html")
 
 
 @app.get("/api/spp/list")
@@ -788,8 +803,11 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
                      "sent_time": r["sent_time"], "source": "phone",
                      "job_id": r["job_id"]})
 
-    # ดึงเว็บไม่ได้ "และ" มือถือก็ยังไม่ได้ส่งอะไรมา ถึงจะถือว่าไม่มีอะไรให้ดูจริงๆ
-    if not docs and spp_error:
+    # ถูกเว็บ สพป. ปิดกั้น + คิวว่าง = "ยังไม่มีเรื่องรอลงรับ" ไม่ใช่ความผิดพลาด
+    # บนคลาวด์การดึงเว็บไม่ได้เป็นสภาพปกติตลอดเวลา ถ้าขึ้นหน้าแดงทุกครั้งที่คิวว่าง
+    # ก็เท่ากับยกโหมดเก่ากลับมาทั้งที่เพิ่งรวมหน้าไป ให้หน้าเว็บไปขึ้นสถานะว่างแทน
+    # คืน error ไว้เฉพาะกรณีพังจริงที่ไม่ใช่การถูกปิดกั้น เพราะนั่นต้องให้คนเห็น
+    if not docs and spp_error and not blocked:
         return JSONResponse({"ok": False, "error": spp_error, "blocked": blocked},
                             status_code=502)
     docs = _s.get_store().status_of(docs)
@@ -978,7 +996,7 @@ def queue_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "queue.html"))
+    return _page("queue.html")
 
 
 @app.post("/api/doc/{job_id}/prepare")
@@ -1145,7 +1163,7 @@ def fix_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:
             return RedirectResponse("/login", status_code=302)
-    return FileResponse(os.path.join(STATIC_DIR, "fix.html"))
+    return _page("fix.html")
 
 
 @app.get("/api/fix/recent")
