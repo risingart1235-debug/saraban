@@ -35,6 +35,7 @@ from core import (
 
 DPI = 200                      # ความละเอียดที่ใช้ทำงานจริง (เท่ากับเวอร์ชันเดสก์ท็อป)
 PREVIEW_DPI = 100              # ความละเอียดภาพที่ส่งให้เบราว์เซอร์ (เล็กลงครึ่ง โหลดเร็วบนมือถือ)
+MAX_REVIEW_PAGES = 20          # เรื่องที่ต้องตรวจ แสดงได้ถึงหน้านี้ (กันเอกสารหนามากจนโหลดไม่ไหว)
 CM = DPI / 2.54
 
 # ค่าเริ่มต้นสำหรับเรียงลำดับเมื่อไม่มีเวลาสร้าง — ต้องมีโซนเวลาเหมือน now_th()
@@ -109,6 +110,19 @@ def _png_uri(img) -> str:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _jpg_uri(img) -> str:
+    """รูปหน้าเอกสารแบบ JPEG — ใช้กับหน้าที่เอาไว้ "ดูเพื่อตรวจ" เท่านั้น
+
+    หน้าเอกสารสแกนถ้าเก็บเป็น PNG จะหนักราว ๕๘๐ KB ต่อหน้า (วัดจากของจริง)
+    เอกสาร ๖ หน้าก็ ๓.๔ MB แล้ว โหลดบนมือถือช้ามาก
+    JPEG คุณภาพ ๗๐ เหลือ ~๑๑๖ KB ต่อหน้า เล็กลง ๕ เท่า และยังอ่านชื่อโรงเรียน
+    ในบัญชีรายชื่อแนบท้ายออกสบาย ซึ่งเป็นเหตุผลเดียวที่ต้องดูหน้าพวกนี้
+    """
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=70, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _render_pdf_page(pdf_path: str, page_no: int, dpi: int = DPI):
@@ -725,7 +739,6 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     kx, ky, fits = find_kasien_pos(target, kbox.width, kbox.height, s_y, e_y,
                                    int(target.width * 0.08), return_fit=True)
 
-    kpage = 1 if psig is not None else 0
     pages = [{"name": "หน้าแรก", "png": _png_uri(_render_pdf_page(pdf_path, 1, PREVIEW_DPI)[0]),
               "w": p1.width, "h": p1.height, "index": 1}]
     if psig is not None:
@@ -733,12 +746,35 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                       "png": _png_uri(_render_pdf_page(pdf_path, sig_page, PREVIEW_DPI)[0]),
                       "w": psig.width, "h": psig.height, "index": sig_page})
 
+    # เรื่องที่ขึ้นคำเตือน "อาจไม่ใช่หนังสือของโรงเรียนเรา" ต้องเห็นครบทุกหน้า
+    # เพราะบัญชีรายชื่อที่ส่งมาด้วยมักอยู่หน้าท้ายๆ ไม่ใช่หน้าแรก ถ้าเห็นแค่หน้าแรก
+    # กับหน้าลายเซ็น ก็ตัดสินไม่ได้ว่าโรงเรียนเราอยู่ในรายชื่อหรือเปล่า
+    # เรื่องที่เรียนถึงทุกแห่งในสังกัด (auto) ไม่ต้องทำ เพราะไม่ต้องตรวจอะไร
+    all_pages = False
+    if category != "auto" and total > len(pages):
+        shown = {pg["index"] for pg in pages}
+        scale = DPI // PREVIEW_DPI          # w/h ต้องเป็นขนาดที่ DPI เต็ม เพราะใช้คิดตำแหน่งเป็นซม.
+        for n in range(1, min(total, MAX_REVIEW_PAGES) + 1):
+            if n in shown:
+                continue
+            img = _render_pdf_page(pdf_path, n, PREVIEW_DPI)[0]
+            pages.append({"name": f"หน้า {n}", "png": _jpg_uri(img),
+                          "w": img.width * scale, "h": img.height * scale, "index": n})
+        pages.sort(key=lambda pg: pg["index"])
+        all_pages = True
+
+    # หาลำดับของหน้าที่มีลายเซ็นจากลิสต์จริง "หลังเรียงแล้ว" ไม่ใช่เดาว่าเป็นตัวที่ ๑
+    # ไม่งั้นพอแทรกหน้าอื่นเข้ามา คำเกษียณจะไปตกผิดหน้า
+    kpage = (next((i for i, pg in enumerate(pages) if pg["index"] == sig_page), 0)
+             if psig is not None else 0)
+
     _set(job,
          status="ready", step="พร้อมแล้ว",
          pdf_path=pdf_path, book_id=book_id, total_pages=total, sig_page=sig_page,
          redo_no=(str(redo_no) if redo_no else None),
          doc_no=doc_no, doc_title=doc_title, doc_date=doc_date, sender=sender,
          emoji=emoji, attach=attach, recipient=recipient, category=category,
+         all_pages=all_pages,
          receipt_no=receipt_no, pages=pages,
          stamp={"size_pct": 100, "page": 0,
                 "left_cm": round(sx / CM, 2), "top_cm": round(sy / CM, 2),
