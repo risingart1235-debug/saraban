@@ -473,6 +473,16 @@ def get_job(job_id: str, user: str):
     return j
 
 
+def _sent_key(dt):
+    return dt.strftime("%Y-%m-%d") if dt else "-"
+
+
+def _sent_thai(dt):
+    if not dt:
+        return ""
+    return to_thai_digits(f"{dt.day} {core.THAI_MONTHS_ABBR[dt.month - 1]} {dt.year + 543}")
+
+
 def phone_queue() -> list:
     """งานที่มือถือส่งเข้ามาและยังไม่จบ (ยังไม่ done/skip) — ใหม่สุดอยู่บน
 
@@ -499,6 +509,12 @@ def phone_queue() -> list:
                 "emoji": j.get("emoji", ""),
                 "book_id": j.get("book_id", ""),
                 "time": j["created"].strftime("%H:%M") if j.get("created") else "",
+                # เติมให้หน้ารายการรวมใช้ได้เหมือนของที่ดึงจากเว็บ สพป.
+                # ของ สพป. คือ "วันที่เว็บอัปโหลด" ของทางนี้คือ "วันที่มือถือส่งเข้ามา"
+                "sent_key": _sent_key(j.get("created")),
+                "sent_date": _sent_thai(j.get("created")),
+                "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
+                "source": "phone",
             }))
     rows.sort(key=lambda r: r[0] or _OLDEST, reverse=True)
     return [r[1] for r in rows]

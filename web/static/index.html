@@ -98,23 +98,19 @@
     <p class="hint" style="margin:0">ดูไฟล์ที่ลงรับแล้วทั้งหมด · เปิดจากมือถือได้เลย</p>
   </a>
 
+  <!-- รวมโหมด ๑ กับ ๒ ไว้ใบเดียว — เรื่องจากเว็บ สพป. กับเรื่องที่มือถือส่งมา
+       ไปโผล่หน้าเดียวกัน ผู้ใช้ไม่ต้องจำว่าเรื่องไหนอยู่หน้าไหนอีก -->
   <div class="card">
-    <h2>โหมดที่ ๑ — ตรวจสอบจากเว็บ สพป.</h2>
-    <p class="hint">ดึงหนังสือใหม่จากระบบ สพป. ให้ AI อ่านและเกษียณ แล้วส่งเข้ากลุ่ม LINE</p>
+    <h2>โหมดที่ ๑ — หนังสือจากเว็บ สพป. <span id="qbadge"></span></h2>
+    <p class="hint">ดึงหนังสือใหม่ ให้ AI อ่านและเกษียณ แล้วส่งเข้ากลุ่ม LINE</p>
     <a href="/news" class="btn" style="text-decoration:none;text-align:center;line-height:28px">
       📰 เปิดรายการหนังสือ
     </a>
     <p class="tiny" style="margin-top:8px">
-      แยกตามวันที่เว็บอัปโหลด · บอกสถานะ รับแล้ว / ข้าม / ยังไม่ลงรับ
+      แยกตามวัน · บอกสถานะ รับแล้ว / ข้าม / ยังไม่ลงรับ<br>
+      รวมเรื่องที่ดึงจากมือถือ (phone_fetch.py) ไว้หน้าเดียวกันแล้ว — เดิมคือโหมดที่ ๒
     </p>
   </div>
-
-  <a href="/queue" class="card" id="modePhone" style="display:block; text-decoration:none; border-color:#0ea5e9; background:#f0f9ff">
-    <h2 style="color:#075985">📲 โหมดที่ ๒ — ลงรับจากมือถือ <span id="qbadge"></span></h2>
-    <p class="hint" style="margin:0">
-      เรื่องที่ดึงจากเว็บ สพป. ด้วยมือถือ (phone_fetch.py) รอตรวจ/ลงรับ — เหมือนโหมด ๑ แต่ทำได้แม้ไม่อยู่หน้าคอม
-    </p>
-  </a>
 
   <div class="card">
     <h2>โหมดที่ ๓ — นำเข้าไฟล์ (AI)</h2>

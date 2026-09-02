@@ -745,21 +745,54 @@ def news_page(session: str = Cookie(default=None)):
 
 @app.get("/api/spp/list")
 def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
-    """รายการหนังสือทั้งหมดจากเว็บข่าว พร้อมสถานะ จัดกลุ่มตามวันที่เว็บอัปโหลด"""
+    """รายการหนังสือทั้งหมด พร้อมสถานะ จัดกลุ่มตามวัน — รวมสองแหล่งไว้ที่เดียว
+
+    เดิมแยกเป็นโหมด ๑ (เซิร์ฟเวอร์ดึงจากเว็บ สพป. เอง) กับโหมด ๒ (มือถือดึงมาส่งให้)
+    ผู้ใช้ต้องจำว่าเรื่องไหนอยู่หน้าไหน และบนมือถือได้แค่รายการเปล่าๆ ไม่มีตัวกรอง
+    ไม่มีปุ่มข้าม ทั้งที่ขั้นตอนลงรับใช้ทางเดียวกันอยู่แล้ว
+
+    ที่แยกกันแต่แรกเพราะเว็บ สพป. อยู่หลัง Cloudflare ซึ่งบล็อก IP ของศูนย์ข้อมูล
+    เซิร์ฟเวอร์คลาวด์จึงดึงเองไม่ได้ ต้องให้มือถือไปเอามาให้ — ข้อจำกัดนี้ยังอยู่
+    แต่ไม่จำเป็นต้องโผล่มาเป็นสองเมนูให้ผู้ใช้ต้องเลือกเอง
+
+    รวมตาม book_id เรื่องที่มือถือส่งไฟล์มาแล้วจะพ่วง job_id ไปด้วย หน้าเว็บจะได้
+    เปิดงานเดิมตรงๆ ไม่ต้องสั่งเซิร์ฟเวอร์ไปโหลดซ้ำ (ซึ่งบนคลาวด์ก็โหลดไม่ได้อยู่ดี)
+    """
     import store as _s
+    spp_error, blocked, fetched = "", False, []
     try:
         fetched = _with_spp_session(
             lambda sess: sppweb.list_documents(sess, pages=max(1, min(pages, 8))))
-        docs = _s.get_store().status_of(fetched)
     except sppweb.LoginError as e:
-        # เว็บ สพป. อยู่หลัง Cloudflare ซึ่งบล็อก IP ของศูนย์ข้อมูล
-        # เปิดจากคอมที่โรงเรียนได้ แต่เปิดจากเซิร์ฟเวอร์คลาวด์ไม่ได้
-        # กรณีนี้ต้องบอกทางออกให้ผู้ใช้ ไม่ใช่โยน error ดิบๆ ใส่
-        blocked = "Cloudflare" in str(e) or "403" in str(e)
-        return JSONResponse({"ok": False, "error": str(e), "blocked": blocked},
-                            status_code=502)
+        spp_error = str(e)
+        blocked = "Cloudflare" in spp_error or "403" in spp_error
     except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=502)
+        spp_error = f"{type(e).__name__}: {e}"
+
+    jobs = {r["book_id"]: r for r in docmode.phone_queue() if r.get("book_id")}
+    docs, seen = [], set()
+    for d in fetched:
+        d = dict(d)
+        bid = str(d.get("book_id", ""))
+        seen.add(bid)
+        d["source"] = "spp"
+        if bid in jobs:                    # ไฟล์อยู่บนเซิร์ฟเวอร์แล้ว เปิดได้เลย
+            d["job_id"] = jobs[bid]["job_id"]
+        docs.append(d)
+    for bid, r in jobs.items():
+        if bid in seen:
+            continue
+        docs.append({"book_id": bid, "doc_no": r["doc_no"], "doc_title": r["doc_title"],
+                     "doc_date": r["doc_date"], "sender": r["sender"],
+                     "sent_key": r["sent_key"], "sent_date": r["sent_date"],
+                     "sent_time": r["sent_time"], "source": "phone",
+                     "job_id": r["job_id"]})
+
+    # ดึงเว็บไม่ได้ "และ" มือถือก็ยังไม่ได้ส่งอะไรมา ถึงจะถือว่าไม่มีอะไรให้ดูจริงๆ
+    if not docs and spp_error:
+        return JSONResponse({"ok": False, "error": spp_error, "blocked": blocked},
+                            status_code=502)
+    docs = _s.get_store().status_of(docs)
 
     # จัดกลุ่มตามวันที่เว็บอัปโหลด ใหม่สุดขึ้นก่อน
     groups = {}
@@ -776,7 +809,9 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
     total = {"registered": sum(g["registered"] for g in ordered),
              "skipped": sum(g["skipped"] for g in ordered),
              "new": sum(g["new"] for g in ordered)}
-    return {"ok": True, "days": ordered, "total": total, "count": len(docs)}
+    return {"ok": True, "days": ordered, "total": total, "count": len(docs),
+            "spp_ok": not spp_error, "spp_error": spp_error, "blocked": blocked,
+            "phone_count": len(jobs)}
 
 
 @app.post("/api/spp/skip")
@@ -932,7 +967,13 @@ async def api_phone_submit(request: Request):
             "review_url": (f"{pub}/doc?job={job['id']}" if pub else f"/doc?job={job['id']}")}
 
 
-@app.get("/queue", response_class=HTMLResponse)
+@app.get("/queue")
+def queue_page_moved():
+    """รวมเข้าหน้าเดียวกับ /news แล้ว — คงเส้นทางเดิมไว้เผื่อมีคนคั่นหน้าไว้"""
+    return RedirectResponse("/news", status_code=302)
+
+
+@app.get("/queue-old", response_class=HTMLResponse)
 def queue_page(session: str = Cookie(default=None)):
     with _session_lock:
         if session not in _sessions:

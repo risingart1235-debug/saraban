@@ -143,7 +143,15 @@ function blockedNotice(msg) {
 
 function render() {
   const t = DATA.total;
-  $('sum').innerHTML =
+  // ดึงเว็บ สพป. ไม่ได้ (เช่นรันบนคลาวด์) แต่ยังมีเรื่องที่มือถือส่งมาให้ทำ
+  // ต้องบอกให้ชัด ไม่งั้นผู้ใช้จะนึกว่าหนังสือหายไปไหนหมด
+  const partial = DATA.spp_ok === false
+    ? `<div class="err" style="margin:0 0 10px;font-size:13px">
+         📲 ตอนนี้แสดงเฉพาะเรื่องที่ <b>มือถือส่งเข้ามาแล้ว</b>
+         — เครื่องนี้ต่อเว็บ สพป. ไม่ได้ ถ้าจะเอาเรื่องใหม่เพิ่ม ให้รัน phone_fetch.py บนมือถือ
+       </div>`
+    : '';
+  $('sum').innerHTML = partial +
     `<h2 style="margin:0 0 8px">รายการทั้งหมด ${DATA.count} เรื่อง</h2>
      <div style="display:flex;gap:6px;flex-wrap:wrap">
        ${chip('all', 'ทั้งหมด', DATA.count)}
@@ -187,18 +195,21 @@ function chip(f, label, n) {
 
 function card(d) {
   const no = d.receipt_no ? ` · เลขรับ <b>${esc(d.receipt_no)}</b>` : '';
+  // มี job_id = มือถือส่งไฟล์เข้ามาแล้ว เปิดงานเดิมได้เลย ไม่ต้องสั่งเซิร์ฟเวอร์ไปโหลดใหม่
+  // (บนคลาวด์สั่งไปก็โหลดไม่ได้ เพราะเว็บ สพป. บล็อก IP ของศูนย์ข้อมูล)
+  const openBtn = d.job_id
+    ? `<button class="a-new" onclick="location.href='/doc?job=${esc(d.job_id)}'">📥 ลงรับเรื่องนี้</button>`
+    : `<button class="a-new" onclick="open_('${esc(d.book_id)}','')">📥 ลงรับเรื่องนี้</button>`;
   let acts = '';
   if (d.status === 'new') {
-    acts = `<div class="acts">
-      <button class="a-new" onclick="open_('${esc(d.book_id)}','')">📥 ลงรับเรื่องนี้</button>
+    acts = `<div class="acts">${openBtn}
       <button class="a-skip" onclick="skip('${esc(d.book_id)}')">ข้าม</button></div>`;
   } else if (d.status === 'registered') {
     acts = `<div class="acts">
       <button class="a-redo" onclick="open_('${esc(d.book_id)}','${esc(d.receipt_no)}')">
         ♻️ ลงรับใหม่${d.receipt_no ? ' (ใช้เลข ' + d.receipt_no + ')' : ''}</button></div>`;
   } else {
-    acts = `<div class="acts">
-      <button class="a-new" onclick="open_('${esc(d.book_id)}','')">📥 ลงรับเรื่องนี้</button></div>`;
+    acts = `<div class="acts">${openBtn}</div>`;
   }
   return `<div class="doc ${d.status}" id="d${esc(d.book_id)}">
     <div style="display:flex;gap:8px;align-items:flex-start">
@@ -206,7 +217,7 @@ function card(d) {
       <span class="tag ${d.status}">${LBL[d.status]}</span>
     </div>
     <div class="meta">${esc(d.doc_no)} · ลงวันที่ ${esc(d.doc_date)} · ${esc(d.sender)}<br>
-      เว็บอัปโหลด ${esc(d.sent_date)} ${esc(d.sent_time)} น.${no}</div>
+      ${d.source === 'phone' ? 'มือถือส่งเข้ามา' : 'เว็บอัปโหลด'} ${esc(d.sent_date)} ${esc(d.sent_time)} น.${no}</div>
     ${acts}</div>`;
 }
 
