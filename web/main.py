@@ -827,8 +827,11 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
     total = {"registered": sum(g["registered"] for g in ordered),
              "skipped": sum(g["skipped"] for g in ordered),
              "new": sum(g["new"] for g in ordered)}
+    # ห้ามส่ง blocked ไปกับคำตอบที่สำเร็จ — หน้าเว็บเช็ค d.blocked ก่อนเช็ค d.ok
+    # ถ้าติดไปด้วยจะเด้งเข้าหน้าแดง "ดึงเว็บไม่ได้" ทั้งที่รายการโหลดสำเร็จแล้ว
+    # ใช้ spp_ok บอกสถานะแทน (หน้าเว็บเอาไปขึ้นแถบว่าเห็นเฉพาะของจากมือถือ)
     return {"ok": True, "days": ordered, "total": total, "count": len(docs),
-            "spp_ok": not spp_error, "spp_error": spp_error, "blocked": blocked,
+            "spp_ok": not spp_error, "spp_error": spp_error,
             "phone_count": len(jobs)}
 
 

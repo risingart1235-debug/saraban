@@ -107,7 +107,9 @@ async function load(pages = 3) {
     const r = await fetch('/api/spp/list?pages=' + pages);
     if (r.status === 401) { location.href = '/login'; return; }
     const d = await readJSON(r);
-    if (d.blocked) { blockedNotice(d.error); return; }
+    // หน้าแดงเฉพาะตอน "ล้มเหลวจริง" เท่านั้น — ถูกปิดกั้นแต่ยังโหลดรายการได้
+    // (เช่นมีของจากมือถือ หรือคิวว่าง) ถือว่าสำเร็จ ต้องไปแสดงรายการ/สถานะว่าง
+    if (!d.ok && d.blocked) { blockedNotice(d.error); return; }
     if (!d.ok) throw new Error(d.error || 'โหลดไม่สำเร็จ');
     DATA = d;
     // วันที่จำไว้อาจหลุดออกจากรายการไปแล้ว (เรื่องเก่าเลื่อนพ้นหน้าที่ดึงมา)
