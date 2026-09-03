@@ -820,9 +820,11 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
             "docs": [], "registered": 0, "skipped": 0, "new": 0})
         g["docs"].append(d)
         g[{"registered": "registered", "skipped": "skipped"}.get(d["status"], "new")] += 1
-    ordered = sorted(groups.values(), key=lambda g: g["key"], reverse=True)
+    # เรียงจากเก่าไปใหม่ เรื่องที่เข้าระบบก่อนอยู่บน — ลงรับไล่จากบนลงล่างได้เลย
+    # เลขรับจะได้เรียงตามลำดับที่หนังสือมาถึงจริง ตรงตามธรรมเนียมงานสารบรรณ
+    ordered = sorted(groups.values(), key=lambda g: g["key"])
     for g in ordered:
-        g["docs"].sort(key=lambda d: d["sent_time"], reverse=True)
+        g["docs"].sort(key=lambda d: d["sent_time"])
 
     total = {"registered": sum(g["registered"] for g in ordered),
              "skipped": sum(g["skipped"] for g in ordered),
