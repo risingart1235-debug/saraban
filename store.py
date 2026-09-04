@@ -126,13 +126,13 @@ def _next_no_this_year(rows, date_cols, data_cols) -> int:
 
 
 def _row(receipt_no, doc_no, doc_date, sender, doc_title, receive_date, thai_date_fn):
-    """สร้างแถวทะเบียนตามลำดับคอลัมน์มาตรฐาน"""
-    return [receipt_no,
+    """สร้างแถวทะเบียนตามลำดับคอลัมน์มาตรฐาน — เลขไทยทุกช่อง"""
+    return [core.to_thai_digits(receipt_no),
             core.to_thai_digits((doc_no or "").strip()),
             core.normalize_typed_date(doc_date or ""),
-            (sender or "").strip(),
+            core.to_thai_digits((sender or "").strip()),
             SCHOOL,
-            (doc_title or "").strip(),
+            core.to_thai_digits((doc_title or "").strip()),
             "", "",
             core.normalize_typed_date(receive_date or "") or thai_date_fn()]
 
@@ -154,11 +154,11 @@ SEND_PREFIX = os.environ.get("SARABAN_SEND_PREFIX") or "ศธ ๐๔๑๔๒.�
 
 
 def _send_next_no(last_value) -> str:
-    """เลขส่งถัดไป — คงเป็นเลขอารบิกตามที่ทะเบียนเล่มนี้ใช้มาตลอด (ต่างจากทะเบียนรับ)"""
+    """เลขส่งถัดไป — เลขไทย เหมือนทะเบียนรับ (ทะเบียนที่พิมพ์ออกมาต้องเป็นเลขไทยทั้งแผ่น)"""
     try:
-        return str(int(core.to_arabic_digits(str(last_value).strip())) + 1)
+        return core.to_thai_digits(int(core.to_arabic_digits(str(last_value).strip())) + 1)
     except (ValueError, TypeError):
-        return "1"
+        return core.to_thai_digits(1)
 
 
 # ในทะเบียนจริงคอลัมน์ "จาก" เป็น "ผอ." ทุกแถว เพราะหนังสือส่งออกนอกโรงเรียน
@@ -174,13 +174,14 @@ def _send_row(no, doc_date, to, title, requester="", note=""):
     """
     tail = " · ".join(x for x in [f"ผู้ขอ: {requester.strip()}" if requester and requester.strip() else "",
                                   (note or "").strip()] if x)
-    return [str(no),
-            SEND_PREFIX + str(no),
+    # เลขไทยทั้งแถว — ทะเบียนที่พิมพ์ออกมาต้องไม่มีเลขอารบิกปน
+    return [core.to_thai_digits(no),
+            core.to_thai_digits(SEND_PREFIX + str(no)),
             core.normalize_typed_date(doc_date or "") or core.get_thai_date(),
             SEND_FROM,
-            (to or "").strip(),
-            (title or "").strip(),
-            tail]
+            core.to_thai_digits((to or "").strip()),
+            core.to_thai_digits((title or "").strip()),
+            core.to_thai_digits(tail)]
 
 
 # คอลัมน์ของแท็บผู้ใช้ (เก็บเป็นคอลัมน์ ไม่ใช่ JSON ก้อนเดียว จะได้เปิดดูในชีตรู้เรื่อง)
@@ -382,6 +383,14 @@ class LocalStore(StatusMixin, UsersMixin):
         วิธีนี้ไฟล์จริงจะสมบูรณ์เสมอ ไม่ว่าจะดับตอนไหน
         """
         path = path or core.REGISTRY_XLSX
+        # จัดหน้าให้พร้อมพิมพ์ทุกครั้งที่เซฟ — A4 แนวนอน, TH Sarabun New ๑๖,
+        # หัวตารางซ้ำทุกหน้า แถวที่เพิ่งเพิ่มก็ได้รูปแบบเดียวกันโดยไม่ต้องสั่งเอง
+        # (จัดหน้าไม่สำเร็จก็ต้องเซฟให้ได้ ทะเบียนสำคัญกว่าความสวย)
+        try:
+            import printfmt
+            printfmt.style_workbook(wb, printfmt.kind_of(os.path.basename(path)))
+        except Exception:
+            pass
         tmp = path + ".tmp"
         wb.save(tmp)
         # สำรองตัวก่อนหน้าไว้หนึ่งรุ่น เผื่อต้องย้อน
@@ -459,7 +468,7 @@ class LocalStore(StatusMixin, UsersMixin):
                     break
             rows = [[ws.cell(row=r, column=c).value for c in range(1, len(SEND_HEADERS) + 1)]
                     for r in range(2, last_row + 1)]
-            no = str(_next_no_this_year(rows, SEND_DATE_COLS, SEND_DATA_COLS))
+            no = core.to_thai_digits(_next_no_this_year(rows, SEND_DATE_COLS, SEND_DATA_COLS))
 
             # ต่อท้ายเสมอ — ไม่ไปเขียนทับแถวที่มีคนจองเลขไว้ (แถวที่มีแต่เลข)
             # เพราะคนจองตั้งใจจะใช้เลขนั้น
@@ -790,6 +799,13 @@ class SheetsStore(StatusMixin, UsersMixin):
                 self._run(self._api.batchUpdate(spreadsheetId=self.sheet_id, body={
                     "requests": [{"addSheet": {"properties": {"title": tab}}}]}))
                 self._append(tab, [headers])
+                # แท็บปีใหม่ต้องพร้อมพิมพ์ตั้งแต่แถวแรก ไม่ต้องมานั่งจัดหน้าใหม่ทุกปี
+                # (จัดหน้าไม่สำเร็จก็ต้องใช้แท็บต่อได้ สั่ง python printfmt.py ทีหลังได้)
+                try:
+                    import printfmt
+                    printfmt.format_new_tab(self, tab, base)
+                except Exception:
+                    pass
                 self._titles_cache = None
                 self._drop_cache()
         return tab
@@ -876,7 +892,7 @@ class SheetsStore(StatusMixin, UsersMixin):
         with _mem_lock:
             tab = self._send_tab_now()
             vals = self._get(tab, fresh=True)
-            no = str(_next_no_this_year(vals[1:], SEND_DATE_COLS, SEND_DATA_COLS))
+            no = core.to_thai_digits(_next_no_this_year(vals[1:], SEND_DATE_COLS, SEND_DATA_COLS))
             res = self._append(tab, [_send_row(no, doc_date, to, title, requester, note)])
 
             m = re.search(r"!\D+(\d+)", res.get("updates", {}).get("updatedRange", ""))
