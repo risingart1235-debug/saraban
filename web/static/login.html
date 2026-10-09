@@ -15,6 +15,11 @@
                    color: var(--text); cursor: pointer; min-height: 42px; }
 .memo-pick { flex: 1; text-align: left; padding: 6px 12px; }
 .memo-del { width: 46px; color: var(--muted) !important; font-size: 18px !important; }
+.cal-btn { position: relative; flex: none; width: 52px; min-height: 46px; display: flex;
+           align-items: center; justify-content: center; font-size: 22px;
+           border: 1px solid #c9ced6; border-radius: 8px; background: #fff; cursor: pointer; }
+.cal-btn input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
+                 cursor: pointer; border: 0; padding: 0; }
 .memo-del:hover { color: var(--red) !important; }
 </style>
 </head>
@@ -51,8 +56,14 @@
         <div id="sToList" class="memo hidden"></div>
         <label for="sTitle">เรื่อง</label>
         <input id="sTitle" type="text" placeholder="เช่น ขอความอนุเคราะห์วิทยากร">
-        <label for="sDate">ลงวันที่</label>
-        <input id="sDate" type="date">
+        <label for="sDateText">ลงวันที่ <span class="tiny">(วัน/เดือน/ปี พ.ศ.)</span></label>
+        <div style="display:flex; gap:8px">
+          <input id="sDateText" type="text" inputmode="numeric" autocomplete="off"
+                 placeholder="เช่น 9/10/2569">
+          <!-- ปฏิทินของเบราว์เซอร์ซ้อนโปร่งใสไว้บนปุ่ม แตะปุ่มก็เปิดปฏิทินได้ทุกเครื่อง -->
+          <span class="cal-btn" title="เลือกจากปฏิทิน">📅
+            <input id="sDate" type="date" tabindex="-1" aria-label="เลือกจากปฏิทิน"></span>
+        </div>
         <p class="tiny" id="sDateThai" style="margin:4px 0 0"></p>
         <button class="btn" id="sSubmit" style="margin-top:16px">ขอเลข</button>
         <p class="tiny" style="margin-top:10px">
@@ -119,9 +130,10 @@ function esc(v) {
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-// ---- ช่องปฏิทิน ----
-// เบราว์เซอร์แสดงปฏิทินเป็น ค.ศ. เสมอ (เปลี่ยนไม่ได้) จึงโชว์วันที่ไทยกำกับไว้ใต้ช่อง
-// ผู้ใช้จะได้เห็นชัดว่าที่จะบันทึกลงทะเบียนคือวันไหน
+// ---- ช่องวันที่ ----
+// ช่อง type=date ของเบราว์เซอร์แสดงรูปแบบตามภาษาเครื่อง (บางเครื่องเป็น ด/ว/ปี ค.ศ.) เปลี่ยนไม่ได้
+// จึงให้กรอก/แสดงเป็น ว/ด/ปี พ.ศ. ในช่องข้อความเอง ส่วนปฏิทินซ่อนไว้ใต้ปุ่ม 📅
+// ค่าที่ส่งเซิร์ฟเวอร์ยังเป็น ค.ศ. YYYY-MM-DD ใน #sDate เหมือนเดิม
 const THAI_MON = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.',
                   'ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 const thaiNum = (s) => String(s).replace(/[0-9]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'[c]);
@@ -134,7 +146,29 @@ function thaiDate(iso) {
 
 function showThaiDate() {
   const t = thaiDate($('sDate').value);
-  $('sDateThai').textContent = t ? 'จะบันทึกเป็น: ' + t : '';
+  $('sDateThai').textContent = t ? 'จะบันทึกเป็น: ' + t
+    : ($('sDateText').value.trim() ? '⚠️ วันที่ไม่ถูกต้อง — พิมพ์เป็น วัน/เดือน/ปี พ.ศ. เช่น 9/10/2569' : '');
+}
+
+// ISO (ค.ศ.) → "9/10/2569"
+function isoToDmy(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? (+m[3]) + '/' + (+m[2]) + '/' + (+m[1] + 543) : '';
+}
+
+// "9/10/2569", "09-10-69", "๙/๑๐/๒๕๖๙" → ISO ค.ศ. หรือ '' ถ้าไม่ใช่วันที่จริง
+// ปี 2 หลักถือเป็น พ.ศ. 25xx, ปีตั้งแต่ 2400 เป็น พ.ศ., ต่ำกว่านั้นถือว่าพิมพ์ ค.ศ. มา
+function dmyToIso(text) {
+  const t = String(text).replace(/[๐-๙]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'.indexOf(c));
+  const m = /^\s*(\d{1,2})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{2}|\d{4})\s*$/.exec(t);
+  if (!m) return '';
+  let y = +m[3];
+  if (m[3].length === 2) y += 2500;
+  if (y >= 2400) y -= 543;
+  const d = new Date(y, +m[2] - 1, +m[1]);
+  if (d.getFullYear() !== y || d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[1]) return '';
+  const pad = (x) => String(x).padStart(2, '0');
+  return y + '-' + pad(+m[2]) + '-' + pad(+m[1]);
 }
 
 // ตั้งค่าเริ่มต้นเป็นวันนี้ (ตามเวลาเครื่องผู้ใช้ ซึ่งอยู่ไทยอยู่แล้ว)
@@ -142,9 +176,27 @@ function showThaiDate() {
   const n = new Date();
   const pad = (x) => String(x).padStart(2, '0');
   $('sDate').value = n.getFullYear() + '-' + pad(n.getMonth() + 1) + '-' + pad(n.getDate());
+  $('sDateText').value = isoToDmy($('sDate').value);
   showThaiDate();
 })();
-$('sDate').addEventListener('change', showThaiDate);
+// เลือกจากปฏิทิน → เขียนลงช่องข้อความ
+$('sDate').addEventListener('change', () => {
+  $('sDateText').value = isoToDmy($('sDate').value);
+  showThaiDate();
+});
+// คอมพิวเตอร์บางเครื่องคลิกช่องวันที่แล้วไม่เปิดปฏิทินเอง ต้องสั่งเปิด
+$('sDate').addEventListener('click', () => {
+  try { $('sDate').showPicker(); } catch (e) {}
+});
+// พิมพ์เอง → แปลงเป็น ค.ศ. เก็บไว้ใน #sDate
+$('sDateText').addEventListener('input', () => {
+  $('sDate').value = dmyToIso($('sDateText').value);
+  showThaiDate();
+});
+// ออกจากช่องแล้วจัดรูปให้เรียบร้อย เช่น "09-10-69" → "9/10/2569"
+$('sDateText').addEventListener('blur', () => {
+  if ($('sDate').value) $('sDateText').value = isoToDmy($('sDate').value);
+});
 
 // ---- จำคำที่เคยกรอก (ชื่อผู้ขอ / เรียน-ถึง) ----
 // เก็บไว้ในเครื่องของครูเอง (localStorage) ไม่ส่งขึ้นเซิร์ฟเวอร์ — หน้านี้ไม่ต้องล็อกอิน
@@ -245,6 +297,7 @@ $('sSubmit').onclick = async () => {
   if (!body.requester) need.push('ผู้ขอ / เจ้าของเรื่อง');
   if (!body.to) need.push('เรียน / ถึง');
   if (!body.title) need.push('เรื่อง');
+  if (!body.doc_date) need.push('ลงวันที่ (วัน/เดือน/ปี พ.ศ.)');
   if (need.length) {
     m.className = 'err'; m.classList.remove('hidden');
     m.textContent = 'กรอกให้ครบก่อนจึงจะออกเลขให้: ' + need.join(' · ');
