@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>เข้าสู่ระบบ — ลงรับหนังสือราชการ</title>
 <link rel="stylesheet" href="/static/style.css">
+<style>
+/* รายการคำที่เคยกรอก — แตะเพื่อเลือก, แตะ ✕ เพื่อลบออกจากเครื่องนี้ */
+.memo { margin-top: 4px; border: 1px solid var(--line); border-radius: 8px;
+        background: #fff; max-height: 240px; overflow-y: auto; }
+.memo-row { display: flex; align-items: stretch; border-top: 1px solid var(--line); }
+.memo-row:first-child { border-top: 0; }
+.memo-row button { background: none; border: 0; font-family: inherit; font-size: 15px;
+                   color: var(--text); cursor: pointer; min-height: 42px; }
+.memo-pick { flex: 1; text-align: left; padding: 6px 12px; }
+.memo-del { width: 46px; color: var(--muted) !important; font-size: 18px !important; }
+.memo-del:hover { color: var(--red) !important; }
+</style>
 </head>
 <body>
 <div class="wrap" style="max-width:420px; padding-top:44px">
@@ -30,13 +42,13 @@
       <div id="sendForm">
         <label for="sSender">ผู้ขอ / เจ้าของเรื่อง
           <span class="tiny">(ไว้ติดตาม — ในทะเบียนช่อง "จาก" เป็น ผอ. เสมอ)</span></label>
-        <input id="sSender" type="text" list="sSenderList" autocomplete="off"
+        <input id="sSender" type="text" autocomplete="off"
                placeholder="เช่น ครูสมชาย (ฝ่ายวิชาการ)">
-        <datalist id="sSenderList"></datalist>
+        <div id="sSenderList" class="memo hidden"></div>
         <label for="sTo">เรียน / ถึง <span class="tiny">(หน่วยงานปลายทาง)</span></label>
-        <input id="sTo" type="text" list="sToList" autocomplete="off"
+        <input id="sTo" type="text" autocomplete="off"
                placeholder="เช่น ผอ.สพป.สกลนคร เขต ๑">
-        <datalist id="sToList"></datalist>
+        <div id="sToList" class="memo hidden"></div>
         <label for="sTitle">เรื่อง</label>
         <input id="sTitle" type="text" placeholder="เช่น ขอความอนุเคราะห์วิทยากร">
         <label for="sDate">ลงวันที่</label>
@@ -148,25 +160,55 @@ function memoLoad(id) {
   } catch (e) { return []; }
 }
 
-function memoFill(id) {
-  const dl = $(id + 'List');
-  dl.innerHTML = '';
-  for (const v of memoLoad(id)) {
-    const o = document.createElement('option');
-    o.value = v;
-    dl.appendChild(o);
+// แสดงรายการใต้ช่อง กรองตามที่พิมพ์อยู่ (ถ้าพิมพ์ตรงกับคำในรายการทุกตัวแล้วก็ไม่ต้องโชว์)
+function memoShow(id) {
+  const box = $(id + 'List');
+  const q = $(id).value.trim().toLowerCase();
+  const items = memoLoad(id).filter((v) => !q || (v.toLowerCase().includes(q) && v.toLowerCase() !== q));
+  box.innerHTML = '';
+  for (const v of items) {
+    const row = document.createElement('div');
+    row.className = 'memo-row';
+    const pick = document.createElement('button');
+    pick.type = 'button'; pick.className = 'memo-pick'; pick.textContent = v;
+    pick.onclick = () => { $(id).value = v; box.classList.add('hidden'); };
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'memo-del'; del.textContent = '✕';
+    del.title = 'ลบออกจากรายการ'; del.setAttribute('aria-label', 'ลบ ' + v);
+    del.onclick = () => { memoRemove(id, v); memoShow(id); $(id).focus(); };
+    row.append(pick, del);
+    box.appendChild(row);
   }
+  box.classList.toggle('hidden', !items.length);
+}
+
+function memoStore(id, list) {
+  try { localStorage.setItem(MEMO[id], JSON.stringify(list)); } catch (e) {}
+}
+
+function memoRemove(id, value) {
+  memoStore(id, memoLoad(id).filter((x) => x !== value));
 }
 
 function memoSave(id, value) {
   if (!value) return;
-  const list = [value, ...memoLoad(id).filter((x) => x !== value)].slice(0, MEMO_MAX);
-  try { localStorage.setItem(MEMO[id], JSON.stringify(list)); } catch (e) {}
-  memoFill(id);
+  memoStore(id, [value, ...memoLoad(id).filter((x) => x !== value)].slice(0, MEMO_MAX));
 }
 
-memoFill('sSender');
-memoFill('sTo');
+for (const id of Object.keys(MEMO)) {
+  $(id).addEventListener('focus', () => memoShow(id));
+  $(id).addEventListener('input', () => memoShow(id));
+}
+// ปิดรายการเมื่อแตะที่อื่น (ไม่ใช้ blur เพราะแตะปุ่ม ✕ ก็ทำให้ช่อง blur ก่อน)
+document.addEventListener('pointerdown', (e) => {
+  for (const id of Object.keys(MEMO)) {
+    if (e.target !== $(id) && !$(id + 'List').contains(e.target)) $(id + 'List').classList.add('hidden');
+  }
+});
+// กด Esc ปิดรายการ
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') for (const id of Object.keys(MEMO)) $(id + 'List').classList.add('hidden');
+});
 // เครื่องนี้ส่วนใหญ่เป็นของครูคนเดียว เติมชื่อล่าสุดไว้ให้เลย แก้ได้ถ้าไม่ใช่
 if (!$('sSender').value) $('sSender').value = memoLoad('sSender')[0] || '';
 
