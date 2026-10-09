@@ -30,9 +30,13 @@
       <div id="sendForm">
         <label for="sSender">ผู้ขอ / เจ้าของเรื่อง
           <span class="tiny">(ไว้ติดตาม — ในทะเบียนช่อง "จาก" เป็น ผอ. เสมอ)</span></label>
-        <input id="sSender" type="text" placeholder="เช่น ครูสมชาย (ฝ่ายวิชาการ)">
+        <input id="sSender" type="text" list="sSenderList" autocomplete="off"
+               placeholder="เช่น ครูสมชาย (ฝ่ายวิชาการ)">
+        <datalist id="sSenderList"></datalist>
         <label for="sTo">เรียน / ถึง <span class="tiny">(หน่วยงานปลายทาง)</span></label>
-        <input id="sTo" type="text" placeholder="เช่น ผอ.สพป.สกลนคร เขต ๑">
+        <input id="sTo" type="text" list="sToList" autocomplete="off"
+               placeholder="เช่น ผอ.สพป.สกลนคร เขต ๑">
+        <datalist id="sToList"></datalist>
         <label for="sTitle">เรื่อง</label>
         <input id="sTitle" type="text" placeholder="เช่น ขอความอนุเคราะห์วิทยากร">
         <label for="sDate">ลงวันที่</label>
@@ -130,6 +134,42 @@ function showThaiDate() {
 })();
 $('sDate').addEventListener('change', showThaiDate);
 
+// ---- จำคำที่เคยกรอก (ชื่อผู้ขอ / เรียน-ถึง) ----
+// เก็บไว้ในเครื่องของครูเอง (localStorage) ไม่ส่งขึ้นเซิร์ฟเวอร์ — หน้านี้ไม่ต้องล็อกอิน
+// จึงไม่ควรให้ใครเห็นรายชื่อของคนอื่น ใช้ล่าสุดอยู่บนสุด เก็บไม่เกิน 20 คำ
+// เก็บเฉพาะตอนขอเลขสำเร็จ คำที่พิมพ์ผิดแล้วไม่ได้ส่งจะได้ไม่ค้างในรายการ
+const MEMO = { sSender: 'saraban.send.requester', sTo: 'saraban.send.to' };
+const MEMO_MAX = 20;
+
+function memoLoad(id) {
+  try {
+    const v = JSON.parse(localStorage.getItem(MEMO[id]) || '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : [];
+  } catch (e) { return []; }
+}
+
+function memoFill(id) {
+  const dl = $(id + 'List');
+  dl.innerHTML = '';
+  for (const v of memoLoad(id)) {
+    const o = document.createElement('option');
+    o.value = v;
+    dl.appendChild(o);
+  }
+}
+
+function memoSave(id, value) {
+  if (!value) return;
+  const list = [value, ...memoLoad(id).filter((x) => x !== value)].slice(0, MEMO_MAX);
+  try { localStorage.setItem(MEMO[id], JSON.stringify(list)); } catch (e) {}
+  memoFill(id);
+}
+
+memoFill('sSender');
+memoFill('sTo');
+// เครื่องนี้ส่วนใหญ่เป็นของครูคนเดียว เติมชื่อล่าสุดไว้ให้เลย แก้ได้ถ้าไม่ใช่
+if (!$('sSender').value) $('sSender').value = memoLoad('sSender')[0] || '';
+
 $('sendToggle').onclick = () => {
   const open = $('sendPanel').classList.toggle('hidden');
   $('sendCaret').textContent = open ? '▾' : '▴';
@@ -180,6 +220,9 @@ $('sSubmit').onclick = async () => {
     let d = {};
     try { d = JSON.parse(text); } catch (e) { throw new Error('เซิร์ฟเวอร์ผิดพลาด (' + r.status + ')'); }
     if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'ขอเลขไม่สำเร็จ');
+
+    memoSave('sSender', body.requester);
+    memoSave('sTo', body.to);
 
     // สำเร็จแล้วซ่อนฟอร์ม กันกดซ้ำจนได้เลขเกินมาโดยไม่ตั้งใจ
     $('sendForm').classList.add('hidden');
