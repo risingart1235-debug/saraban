@@ -947,14 +947,23 @@ def _new_incoming_path() -> str:
 
 @app.get("/api/phone/history")
 def api_phone_history(request: Request):
-    """คืน book_id ที่จัดการไปแล้ว (รับแล้ว+ข้าม) ให้มือถือกรองก่อนโหลด"""
+    """คืน book_id ที่มือถือไม่ต้องดึงซ้ำ ให้กรองก่อนโหลดจาก สพป.
+
+    done   = ลงรับแล้ว/ข้ามแล้ว (บันทึกถาวรในชีต)
+    queued = ดึงลงคิวรอลงรับแล้ว แต่ยังไม่มีใครกดลงรับ
+    """
     _check_phone_token(request)
+    # มือถือมักเป็นคนปลุกเซิร์ฟเวอร์ที่หลับอยู่ ตอนนั้นคิวยังกู้จากไดร์ฟไม่เสร็จ
+    # ถ้าไม่รอจะได้คิวว่าง แล้วมือถือดึงทุกเรื่องที่อยู่ในคิวมาส่งซ้ำหมด
+    # (รอในเธรดได้ เพราะ endpoint นี้เป็น def ธรรมดา FastAPI แยกเธรดให้)
+    ready = docmode.wait_queue_restored()
     import store as _s
     try:
         done = sorted(_s.get_store().history_ids())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
-    return {"ok": True, "done": done}
+    return {"ok": True, "done": done, "queued": sorted(docmode.phone_held_ids()),
+            "queue_ready": ready}
 
 
 @app.post("/api/phone/submit")

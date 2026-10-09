@@ -67,6 +67,11 @@ _work_queue = queue.Queue(maxsize=JOB_QUEUE_LIMIT)
 # ระหว่างนั้นเว็บตอบ 503 ทั้งเว็บ — มือถือที่กำลังส่งอยู่ก็พังรวดทุกเรื่องที่เหลือ
 _drive_tasks = queue.Queue()
 
+# กู้คิวจากไดร์ฟเสร็จหรือยัง — เซิร์ฟเวอร์เพิ่งตื่น/บูตใหม่ คิวในหน่วยความจำยังว่างอยู่
+# จนกว่า restore_queue จะทำเสร็จ ใครจะถามว่า "อะไรอยู่ในคิวแล้ว" ต้องรอตัวนี้ก่อน
+_queue_restored = threading.Event()
+RESTORE_WAIT_SEC = 45
+
 
 class QueueFullError(RuntimeError):
     pass
@@ -297,6 +302,19 @@ def _drop_backup(job: dict):
 
 
 def restore_queue() -> int:
+    """กู้คิวจากไดร์ฟ แล้วบอกทุกคนที่รออยู่ว่ากู้เสร็จแล้ว (ถึงจะกู้ไม่สำเร็จก็ต้องบอก)"""
+    try:
+        return _restore_from_drive()
+    finally:
+        _queue_restored.set()
+
+
+def wait_queue_restored(timeout: float = RESTORE_WAIT_SEC) -> bool:
+    """รอให้กู้คิวจากไดร์ฟเสร็จ (หลังเซิร์ฟเวอร์เกิดใหม่) คืน False ถ้ารอจนหมดเวลา"""
+    return _queue_restored.wait(timeout)
+
+
+def _restore_from_drive() -> int:
     """ดึงคิวที่ฝากไว้กลับมาตอนเปิดเซิร์ฟเวอร์ คืนจำนวนเรื่องที่กู้ได้
 
     กู้กลับมาเป็นสถานะ "รอเปิดอ่าน" เหมือนตอนมือถือเพิ่งส่งเข้ามา ไม่ได้เก็บผล
@@ -510,6 +528,25 @@ def _sent_thai(dt):
     if not dt:
         return ""
     return to_thai_digits(f"{dt.day} {core.THAI_MONTHS_ABBR[dt.month - 1]} {dt.year + 543}")
+
+
+# เรื่องจากมือถือที่เซิร์ฟเวอร์รับไฟล์ไว้แล้ว — มือถือไม่ต้องดึงจาก สพป. มาส่งซ้ำ
+# ไม่นับ error (ให้มือถือส่งไฟล์ใหม่ทับได้ ดู retry_failed) และ uploading (ยังรับไฟล์ไม่จบ)
+_HELD = ("stored", "queued", "analyzing", "ready", "saving", "save_error",
+         "skipping", "skipped", "done")
+
+
+def phone_held_ids() -> set:
+    """book_id ที่ดึงลงคิวรอลงรับแล้ว (รวมที่เพิ่งลงรับ/ข้ามจากคิวไป)
+
+    นับจากของที่เซิร์ฟเวอร์ถืออยู่จริง ไม่ได้จดแยกไว้ที่ไหน จึงไม่มีวันคลาดกับคิว
+    ถ้าเซิร์ฟเวอร์ทำเรื่องไหนหาย (ล้มก่อนฝากไดร์ฟเสร็จ) เรื่องนั้นหลุดจากรายการ
+    แล้วมือถือดึงมาส่งใหม่เองรอบหน้า — ถ้าจดไว้ในมือถือ เรื่องแบบนี้จะหายเงียบ
+    """
+    with _lock:
+        return {str(j["book_id"]) for j in _jobs.values()
+                if j.get("source") == "phone" and j.get("book_id")
+                and j.get("status") in _HELD}
 
 
 def phone_queue() -> list:

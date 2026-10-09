@@ -9,7 +9,7 @@
 ชื่อ "python-requests" ซึ่งเว็บขึ้นบัญชีดำไว้ — sppweb ตั้ง UA ให้เรียบร้อยแล้ว)
 
 สคริปต์นี้ทำ ๔ อย่าง:
-  ๑. ถามระบบ (บน Render) ว่าหนังสือไหนลงรับ/ข้ามไปแล้ว
+  ๑. ถามระบบ (บน Render) ว่าหนังสือไหนลงรับ/ข้ามไปแล้ว หรือดึงลงคิวไว้แล้ว (ไม่ดึงซ้ำ)
   ๒. ล็อกอินเว็บ สพป. แล้วดูรายการหนังสือใหม่
   ๓. โหลด PDF ของเรื่องที่ยังไม่ได้ลงรับ
   ๔. ส่งเข้า Render ให้ทำ AI เกษียณ + ตรายาง + LINE + ทะเบียน ต่อ
@@ -174,10 +174,15 @@ def _call(send):
 
 
 def fetch_history():
-    """ถาม Render ว่า book_id ไหนจัดการไปแล้ว จะได้ไม่โหลด/ส่งซ้ำ"""
+    """ถาม Render ว่าเรื่องไหนไม่ต้องดึงแล้ว คืน (ลงรับ/ข้ามแล้ว, อยู่ในคิวรอลงรับแล้ว)
+
+    "อยู่ในคิวแล้ว" นับจากของที่เซิร์ฟเวอร์ถืออยู่จริง ไม่ได้จดไว้ในมือถือ
+    ถ้าเซิร์ฟเวอร์ทำเรื่องไหนหาย เรื่องนั้นจะไม่อยู่ในรายการ แล้วรอบนี้ก็ดึงไปส่งใหม่เอง
+    """
     try:
+        # ๑๒๐ วิ: ปลุกเครื่องที่หลับ ~๖๐-๙๐ วิ + เซิร์ฟเวอร์รอกู้คิวจากไดร์ฟอีกไม่เกิน ๔๕ วิ
         r = _call(lambda: requests.get(RENDER + "/api/phone/history",
-                                       headers=_headers(), timeout=60))
+                                       headers=_headers(), timeout=120))
     except ServerDown as e:
         die("ต่อ Render ไม่ได้นานเกิน %d นาที (%s)\n"
             "    ลองรันใหม่อีกสักครู่ ถ้ายังไม่ได้ ดูสถานะที่ Render → Events"
@@ -191,7 +196,12 @@ def fetch_history():
         die("Render ยังไม่ได้ตั้ง SARABAN_PHONE_TOKEN — ไปตั้งที่ Render → Environment ก่อน")
     if not r.ok:
         die("ถามประวัติจากระบบไม่ได้ (%d): %s" % (r.status_code, _detail(r) or r.reason))
-    return set(r.json().get("done", []))
+    d = r.json()
+    if d.get("queue_ready") is False:
+        print("   (เซิร์ฟเวอร์เพิ่งตื่น ยังกู้คิวไม่ครบ — บางเรื่องอาจถูกส่งซ้ำ แต่ระบบกันซ้ำให้แล้ว)")
+    # เซิร์ฟเวอร์รุ่นเก่าไม่มี "queued" ก็ได้ชุดว่าง = ดึงแบบเดิม (เซิร์ฟเวอร์กันซ้ำอยู่ดี)
+    return ({str(x) for x in d.get("done", [])},
+            {str(x) for x in d.get("queued", [])})
 
 
 def submit(pdf_path, meta):
@@ -240,19 +250,24 @@ def main():
 
     user, pwd = ask_credentials()
 
-    print("\n•  กำลังถามระบบว่าลงรับอะไรไปแล้ว... (ถ้าช้า Render กำลังตื่นจากพักเครื่อง)")
-    done = fetch_history()
-    print("   ลงรับ/ข้ามไปแล้ว %d เรื่อง" % len(done))
+    print("\n•  กำลังถามระบบว่าเรื่องไหนลงรับ/อยู่ในคิวแล้ว... (ถ้าช้า Render กำลังตื่นจากพักเครื่อง)")
+    done, queued = fetch_history()
+    queued -= done
+    print("   ลงรับ/ข้ามไปแล้ว %d เรื่อง | อยู่ในคิวรอลงรับ %d เรื่อง" % (len(done), len(queued)))
 
     print("•  กำลังล็อกอินเว็บ สพป. ...")
     sess = sppweb.login(user, pwd)
 
     print("•  กำลังดูรายการหนังสือ...")
     docs = sppweb.list_documents(sess, pages=3)
-    new = [d for d in docs if d["book_id"] not in done]
-    print("   ทั้งหมด %d เรื่อง | ยังไม่ลงรับ %d เรื่อง" % (len(docs), len(new)))
+    new = [d for d in docs if d["book_id"] not in done and d["book_id"] not in queued]
+    waiting = sum(1 for d in docs if d["book_id"] in queued)
+    print("   ทั้งหมด %d เรื่อง | อยู่ในคิวแล้ว %d เรื่อง (ไม่ดึงซ้ำ) | เรื่องใหม่ %d เรื่อง"
+          % (len(docs), waiting, len(new)))
     if not new:
         print("\n✅ ไม่มีเรื่องใหม่ — เรียบร้อย")
+        if queued:
+            print("   มี %d เรื่องรอกดลงรับอยู่ในคิว:  %s/queue" % (len(queued), RENDER))
         return
 
     if len(new) > MAX_FETCH:

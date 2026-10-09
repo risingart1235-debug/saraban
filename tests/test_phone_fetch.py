@@ -130,9 +130,15 @@ class HistoryTests(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def test_waits_for_render_to_wake_up(self):
-        answers = [response(503, RENDER_PAGE), response(200, {"ok": True, "done": ["1", "2"]})]
+        answers = [response(503, RENDER_PAGE),
+                   response(200, {"ok": True, "done": ["1", "2"], "queued": ["3"]})]
         with patch.object(phone_fetch.requests, "get", lambda *a, **k: answers.pop(0)):
-            self.assertEqual(phone_fetch.fetch_history(), {"1", "2"})
+            self.assertEqual(phone_fetch.fetch_history(), ({"1", "2"}, {"3"}))
+
+    def test_older_server_without_a_queue_list_still_works(self):
+        old = response(200, {"ok": True, "done": ["1"]})
+        with patch.object(phone_fetch.requests, "get", lambda *a, **k: old):
+            self.assertEqual(phone_fetch.fetch_history(), ({"1"}, set()))
 
     def test_missing_token_message_only_for_our_own_503(self):
         own = response(503, {"detail": "เซิร์ฟเวอร์ยังไม่ได้ตั้ง SARABAN_PHONE_TOKEN"})
@@ -145,15 +151,14 @@ class HistoryTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
-    """The run must stop once the server is gone, not burn through every document."""
+    """What a whole run pulls from SPP and sends, given what the server already has."""
 
-    def test_stops_downloading_after_the_server_stays_down(self):
-        docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]
-        calls = []
+    def run_main(self, docs, done=(), queued=(), fail_from=None):
+        sent = []
 
         def submit(path, meta):
-            calls.append(meta["book_id"])
-            if len(calls) >= 3:
+            sent.append(meta["book_id"])
+            if fail_from and len(sent) >= fail_from:
                 raise phone_fetch.ServerDown("เซิร์ฟเวอร์ไม่พร้อม (503)")
             return {"ok": True, "created": True, "job_id": "j" + meta["book_id"]}
 
@@ -164,18 +169,34 @@ class RunTests(unittest.TestCase):
         sppweb = phone_fetch.sppweb
         with patch.object(phone_fetch, "TOKEN", "t"), \
                 patch.object(phone_fetch, "ask_credentials", return_value=("u", "p")), \
-                patch.object(phone_fetch, "fetch_history", return_value=set()), \
+                patch.object(phone_fetch, "fetch_history",
+                             return_value=(set(done), set(queued))), \
                 patch.object(phone_fetch, "submit", submit), \
                 patch.object(sppweb, "login", return_value=object()), \
                 patch.object(sppweb, "list_documents", return_value=docs), \
                 patch.object(sppweb, "fetch_detail",
-                             return_value={"main_pdf": "x.pdf", "attachments": []}), \
+                             return_value={"main_pdf": "x.pdf", "attachments": []}) as detail, \
                 patch.object(sppweb, "download", side_effect=download) as dl, \
                 patch.object(sppweb, "attach_text", return_value=""), \
                 patch("builtins.print"):
             phone_fetch.main()
-        self.assertEqual(calls, ["1", "2", "3"])
-        self.assertEqual(dl.call_count, 3)
+        return sent, detail.call_count, dl.call_count
+
+    def test_documents_already_in_the_queue_are_not_pulled_again(self):
+        docs = [{"book_id": b, "doc_title": "เรื่อง"} for b in ("186796", "186782", "186769")]
+        sent, details, downloads = self.run_main(docs, done={"186782"}, queued={"186796"})
+        self.assertEqual(sent, ["186769"])
+        self.assertEqual((details, downloads), (1, 1))
+
+    def test_nothing_is_pulled_when_everything_is_queued_or_handled(self):
+        docs = [{"book_id": b, "doc_title": "เรื่อง"} for b in ("1", "2")]
+        self.assertEqual(self.run_main(docs, done={"1"}, queued={"2"}), ([], 0, 0))
+
+    def test_stops_downloading_after_the_server_stays_down(self):
+        docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]
+        sent, _, downloads = self.run_main(docs, fail_from=3)
+        self.assertEqual(sent, ["1", "2", "3"])
+        self.assertEqual(downloads, 3)
 
 
 if __name__ == "__main__":
