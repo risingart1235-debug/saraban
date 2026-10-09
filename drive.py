@@ -26,6 +26,12 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _lock = threading.Lock()
 _svc = None
 
+# ตัวเชื่อม _svc ใช้ร่วมกันทั้งโปรเซส แต่ httplib2 ที่อยู่ข้างใต้ใช้พร้อมกันหลายเธรดไม่ได้
+# (เอกสารของ google-api-python-client เขียนไว้เอง) สองเธรดยิงพร้อมกันบนการเชื่อมต่อเดียว
+# คำตอบจะสลับกัน/SSL พัง หรือถึงขั้นโปรเซสล้ม ซึ่งบน Render แปลว่าเว็บดับทั้งเว็บ
+# เธรดที่ใช้ไดร์ฟมีหลายตัว (ฝากคิว ลงรับ กู้คิว ดึงไฟล์กลับ) จึงให้ยิงทีละคำสั่ง
+_io_lock = threading.RLock()
+
 
 def folder_id_from(text: str) -> str:
     """แกะรหัสโฟลเดอร์จากลิงก์ Drive"""
@@ -117,7 +123,8 @@ def _run(req, tries=3):
     import time
     for i in range(tries):
         try:
-            return req.execute()
+            with _io_lock:
+                return req.execute()
         except Exception as e:
             msg = f"{type(e).__name__}: {e}".lower()
             temporary = any(k in msg for k in ("transport", "servernotfound", "timeout",
@@ -359,7 +366,7 @@ def queue_fetch(file_id: str, dest: str) -> str:
     """ดึงไฟล์ที่ฝากไว้กลับลงเครื่อง — เรียกตอนผู้ใช้กดเปิดเรื่องนั้น"""
     from googleapiclient.http import MediaIoBaseDownload
     req = _service().files().get_media(fileId=file_id)
-    with open(dest, "wb") as fh:
+    with open(dest, "wb") as fh, _io_lock:
         dl = MediaIoBaseDownload(fh, req)
         done = False
         while not done:

@@ -60,6 +60,13 @@ JOB_WORKERS = _env_int("SARABAN_JOB_WORKERS", 2, 1, 8)
 JOB_QUEUE_LIMIT = _env_int("SARABAN_JOB_QUEUE_LIMIT", 20, 1, 100)
 _work_queue = queue.Queue(maxsize=JOB_QUEUE_LIMIT)
 
+# งานฝาก/ลบไฟล์คิวบนไดร์ฟ ทำเบื้องหลังทีละงานด้วยเธรดเดียว
+# ของเดิมเปิดเธรดใหม่ทุกเรื่อง มือถือส่งรวด ๘ เรื่องก็อัปพร้อมกันหลายทาง แต่ละทาง
+# อ่านไฟล์ทั้งก้อนเข้า RAM (อัปแบบไม่แบ่งก้อนใช้ราว ๓ เท่าของขนาดไฟล์) แถมยิงซ้อนกัน
+# บนการเชื่อมต่อเดียว เครื่องฟรีของ Render มี RAM 512 MB เกินเมื่อไหร่ถูกฆ่าแล้วบูตใหม่
+# ระหว่างนั้นเว็บตอบ 503 ทั้งเว็บ — มือถือที่กำลังส่งอยู่ก็พังรวดทุกเรื่องที่เหลือ
+_drive_tasks = queue.Queue()
+
 
 class QueueFullError(RuntimeError):
     pass
@@ -85,9 +92,9 @@ class JobStateError(RuntimeError):
         self.result = result
 
 
-def _worker_loop():
+def _worker_loop(tasks):
     while True:
-        work = _work_queue.get()
+        work = tasks.get()
         try:
             work()
         except Exception:
@@ -95,12 +102,14 @@ def _worker_loop():
             # guard นี้กัน worker ตายถ้ามี bug ในตัวจัดการ error เอง
             traceback.print_exc()
         finally:
-            _work_queue.task_done()
+            tasks.task_done()
 
 
 for _worker_no in range(JOB_WORKERS):
-    threading.Thread(target=_worker_loop, name=f"saraban-worker-{_worker_no + 1}",
-                     daemon=True).start()
+    threading.Thread(target=_worker_loop, args=(_work_queue,),
+                     name=f"saraban-worker-{_worker_no + 1}", daemon=True).start()
+threading.Thread(target=_worker_loop, args=(_drive_tasks,),
+                 name="saraban-drive", daemon=True).start()
 
 
 # ==========================================================
@@ -250,10 +259,14 @@ def line_image_path(token: str) -> str:
 def _backup_to_drive(job: dict, pdf: str):
     """ฝากไฟล์ไว้บนไดร์ฟเบื้องหลัง ไม่ให้มือถือต้องรอ
 
-    ทำในเธรดแยกเพราะมือถือส่งรวดเดียวหลายเรื่อง ถ้ารออัปทีละไฟล์จะช้ามาก
-    แลกกับช่องว่างสั้นๆ ถ้าเครื่องดับพอดีในช่วงไม่กี่วินาทีนั้น เรื่องนั้นจะไม่ถูกสำรอง
+    ทำเบื้องหลังเพราะมือถือส่งรวดเดียวหลายเรื่อง ถ้ารออัปทีละไฟล์จะช้ามาก
+    แลกกับช่องว่างสั้นๆ ถ้าเครื่องดับพอดีก่อนถึงคิวอัป เรื่องนั้นจะไม่ถูกสำรอง
+    (ดู _drive_tasks ว่าทำไมต้องเข้าแถวทีละเรื่อง ไม่แยกเธรดใครเธรดมัน)
     """
     def work():
+        # ลงรับ/ข้ามไปแล้วระหว่างรอคิวอัป ไม่ต้องฝากแล้ว
+        if job.get("status") in ("done", "skipped"):
+            return
         try:
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
@@ -265,20 +278,22 @@ def _backup_to_drive(job: dict, pdf: str):
         except Exception as e:
             print(f"ฝากไฟล์คิวไว้บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
 
-    threading.Thread(target=work, name="saraban-queue-backup", daemon=True).start()
+    _drive_tasks.put(work)
 
 
 def _drop_backup(job: dict):
     """เรื่องนี้จบแล้ว (ลงรับหรือข้าม) เอาของที่ฝากไว้ออก"""
-    fid = job.get("drive_file_id")
-    if not fid:
-        return
     def work():
+        # อ่าน id ตอนถึงคิว ไม่ใช่ตอนสั่ง — ถ้าลงรับไวกว่าที่ฝากเสร็จ
+        # งานฝากที่อยู่ก่อนหน้าในแถวเดียวกันจะเติม id ไว้ให้แล้ว ไม่เหลือไฟล์ค้างบนไดร์ฟ
+        fid = job.get("drive_file_id")
+        if not fid:
+            return
         import drive as _dr
         if _dr.queue_drop(fid):
             _set(job, drive_file_id="")
 
-    threading.Thread(target=work, name="saraban-queue-drop", daemon=True).start()
+    _drive_tasks.put(work)
 
 
 def restore_queue() -> int:
