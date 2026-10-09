@@ -24,6 +24,7 @@
 import os
 import sys
 import tempfile
+import time
 
 # หาไฟล์ข้างๆ ให้เจอเสมอ ไม่ว่าจะถูกเรียกจากโฟลเดอร์ไหน
 # (แอป Shortcuts รันคำสั่งจากโฟลเดอร์ปัจจุบันซึ่งอาจไม่ใช่ที่ไฟล์อยู่
@@ -46,6 +47,7 @@ RENDER_URL  = "https://saraban.onrender.com"    # ค่าเริ่มต้
 PHONE_TOKEN = ""                                 # รองรับของเดิม; แนะนำ env/config แทนการแก้ไฟล์นี้
 MAX_FETCH   = 20                                 # เท่าคิวรอเริ่มต้นฝั่งเซิร์ฟเวอร์
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024              # ต้องตรงกับเพดานฝั่งเซิร์ฟเวอร์
+WAIT_SERVER_SEC  = 180                           # เซิร์ฟเวอร์รีสตาร์ท/ตื่น รอได้นานสุดกี่วินาที
 # ==================================
 
 # บังคับจอมือถือให้แสดงภาษาไทยไม่เพี้ยน
@@ -112,18 +114,83 @@ def _headers():
     return {"X-Phone-Token": TOKEN}
 
 
+class ServerDown(RuntimeError):
+    """เซิร์ฟเวอร์ไม่พร้อมนานเกินที่รอไหว — ส่งเรื่องถัดไปก็พังเหมือนกันทุกเรื่อง"""
+
+
+def _detail(r):
+    """ข้อความ error ที่ระบบเราตอบมา
+
+    คืน "" ถ้าคำตอบไม่ได้มาจากแอปเรา แต่มาจากด่านหน้าของ Render
+    (ตอนแอปล้ม/กำลังบูต Render ตอบแทนเป็นหน้า HTML ไม่ใช่ JSON ที่มี detail)
+    """
+    try:
+        d = r.json().get("detail", "")
+    except Exception:
+        return ""
+    if isinstance(d, dict):
+        d = d.get("message", "")
+    return str(d or "")
+
+
+def _call(send):
+    """ยิงคำขอไป Render — ถ้าเซิร์ฟเวอร์ไม่พร้อมชั่วคราว ให้รอแล้วยิงซ้ำ
+
+    Render ฟรีรีสตาร์ทได้กลางคัน (หน่วยความจำเต็ม / deploy ใหม่ / ตื่นจากหลับ)
+    ระหว่างบูต ~๑-๒ นาที ด่านหน้าของ Render ตอบ 502/503/504 หรือ 429 แทนแอปเรา
+    ของเดิมถือว่าพังแล้วข้ามไปเรื่องถัดไปทันที เลยพังรวดทุกเรื่องที่เหลือ
+    แถม 429 ยังถูกแปลว่า "คิวเซิร์ฟเวอร์เต็ม" ทั้งที่ไม่ได้มาจากคิวของเรา
+
+    ยิงซ้ำได้ปลอดภัย: เซิร์ฟเวอร์กันงานซ้ำด้วย book_id อยู่แล้ว
+    ถ้ารอบก่อนส่งถึงแต่คำตอบหาย รอบใหม่จะได้คำตอบว่า "อยู่ในคิวเดิม"
+    """
+    deadline = time.time() + WAIT_SERVER_SEC
+    pause = 10
+    while True:
+        try:
+            r = send()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            r, why = None, "ต่อเซิร์ฟเวอร์ไม่ได้ (%s)" % type(e).__name__
+        else:
+            if r.status_code in (502, 503, 504) and not _detail(r):
+                why = "เซิร์ฟเวอร์ไม่พร้อม (%d) — Render กำลังรีสตาร์ทหรือกำลังตื่น" % r.status_code
+            elif r.status_code == 429:
+                why = _detail(r) or "Render ขอให้ชะลอ (429)"
+            else:
+                return r
+        left = deadline - time.time()
+        if left < 5:
+            raise ServerDown(why)
+        wait = pause
+        if r is not None:
+            try:
+                wait = max(wait, int(r.headers.get("Retry-After", "")))
+            except ValueError:
+                pass
+        wait = int(min(wait, 60, left))
+        print("\n   ⏳ %s — รอ %d วินาทีแล้วลองใหม่..." % (why, wait), end=" ", flush=True)
+        time.sleep(wait)
+        pause = min(pause * 2, 60)
+
+
 def fetch_history():
     """ถาม Render ว่า book_id ไหนจัดการไปแล้ว จะได้ไม่โหลด/ส่งซ้ำ"""
     try:
-        r = requests.get(RENDER + "/api/phone/history",
-                         headers=_headers(), timeout=60)
+        r = _call(lambda: requests.get(RENDER + "/api/phone/history",
+                                       headers=_headers(), timeout=60))
+    except ServerDown as e:
+        die("ต่อ Render ไม่ได้นานเกิน %d นาที (%s)\n"
+            "    ลองรันใหม่อีกสักครู่ ถ้ายังไม่ได้ ดูสถานะที่ Render → Events"
+            % (WAIT_SERVER_SEC // 60, e))
     except requests.RequestException as e:
         die("ต่อ Render ไม่ได้: " + str(e))
     if r.status_code == 401:
         die("โทเคนไม่ถูกต้อง — ตรวจ PHONE_TOKEN ให้ตรงกับ SARABAN_PHONE_TOKEN บน Render")
     if r.status_code == 503:
+        # ถึงตรงนี้ได้แปลว่าแอปเราตอบเอง (มี detail) — 503 ของ Render ถูก _call รอไปแล้ว
         die("Render ยังไม่ได้ตั้ง SARABAN_PHONE_TOKEN — ไปตั้งที่ Render → Environment ก่อน")
-    r.raise_for_status()
+    if not r.ok:
+        die("ถามประวัติจากระบบไม่ได้ (%d): %s" % (r.status_code, _detail(r) or r.reason))
     return set(r.json().get("done", []))
 
 
@@ -133,16 +200,20 @@ def submit(pdf_path, meta):
     # เป็นคำสั่ง retry ที่ชัดเจน: ถ้า job เดิมล้มให้ใช้ job เดิมส่งใหม่;
     # แต่ถ้ายังทำอยู่ เซิร์ฟเวอร์จะคืน job เดิมและไม่เริ่มซ้ำ
     fields["retry_failed"] = "true"
-    with open(pdf_path, "rb") as f:
-        files = {"file": ("doc.pdf", f, "application/pdf")}
-        r = requests.post(RENDER + "/api/phone/submit",
-                          headers=_headers(), files=files, data=fields, timeout=180)
+
+    def send():
+        # เปิดไฟล์ใหม่ทุกครั้งที่ยิง — ยิงซ้ำด้วยไฟล์ที่อ่านจบไปแล้วจะส่งไปแต่ไฟล์ว่าง
+        with open(pdf_path, "rb") as f:
+            files = {"file": ("doc.pdf", f, "application/pdf")}
+            return requests.post(RENDER + "/api/phone/submit",
+                                 headers=_headers(), files=files, data=fields, timeout=180)
+
+    r = _call(send)
     if r.status_code == 409:
         # เกิดได้เมื่ออีกเครื่องลงรับ/ข้ามช่วงหลัง fetch_history — ไม่ใช่งานเสีย
         return {"ok": True, "already_handled": True, "created": False, "job_id": ""}
-    if r.status_code == 429:
-        raise RuntimeError("คิวเซิร์ฟเวอร์เต็ม กรุณารอสักครู่แล้วรันใหม่")
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError("เซิร์ฟเวอร์ตอบ %d: %s" % (r.status_code, _detail(r) or r.reason))
     return r.json()
 
 
@@ -188,7 +259,7 @@ def main():
         print("   (ใหม่เยอะ ดึงแค่ %d เรื่องล่าสุดก่อน — รันซ้ำเพื่อดึงที่เหลือ)" % MAX_FETCH)
         new = new[:MAX_FETCH]
 
-    ok, links = 0, []
+    ok, links, stopped = 0, [], False
     for i, d in enumerate(new, 1):
         bid = d["book_id"]
         title = (d.get("doc_title") or "")[:40]
@@ -220,11 +291,14 @@ def main():
                 if res.get("job_id"):
                     links.append(res["job_id"])
                 print("อยู่ในคิวเดิม" if not res.get("created", True) else "ส่งแล้ว")
+        except ServerDown as e:
+            print("ผิดพลาด: %s" % e)
+            print("   รอแล้ว %d นาทีเซิร์ฟเวอร์ยังไม่กลับมา — หยุดรอบนี้ไว้ก่อน" % (WAIT_SERVER_SEC // 60))
+            print("   เรื่องที่ยังไม่ได้ส่ง รันใหม่รอบหน้าจะดึงให้เอง (ไม่ซ้ำ)")
+            stopped = True
+            break
         except Exception as e:
             print("ผิดพลาด: %s" % e)
-            if "คิวเซิร์ฟเวอร์เต็ม" in str(e):
-                print("   หยุดส่งรอบนี้เพื่อไม่เพิ่มภาระเซิร์ฟเวอร์")
-                break
         finally:
             if tmp and os.path.exists(tmp):
                 try:
@@ -232,7 +306,10 @@ def main():
                 except OSError:
                     pass
 
-    print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
+    if stopped:
+        print("\n⚠️ หยุดก่อนครบ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
+    else:
+        print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
     if links:
         print("\nไปตรวจ/กดลงรับต่อที่  โหมดที่ ๒ — ลงรับจากมือถือ")
         print("   %s/queue" % RENDER)
