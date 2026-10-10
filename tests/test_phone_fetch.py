@@ -153,14 +153,14 @@ class HistoryTests(unittest.TestCase):
 class RunTests(unittest.TestCase):
     """What a whole run pulls from SPP and sends, given what the server already has."""
 
-    def run_main(self, docs, done=(), queued=(), fail_from=None):
+    def run_main(self, docs, done=(), queued=(), fail_from=None, created=True):
         sent = []
 
         def submit(path, meta):
             sent.append(meta["book_id"])
             if fail_from and len(sent) >= fail_from:
                 raise phone_fetch.ServerDown("เซิร์ฟเวอร์ไม่พร้อม (503)")
-            return {"ok": True, "created": True, "job_id": "j" + meta["book_id"]}
+            return {"ok": True, "created": created, "job_id": "j" + meta["book_id"]}
 
         def download(sess, url, dest):
             with open(dest, "wb") as f:
@@ -178,8 +178,9 @@ class RunTests(unittest.TestCase):
                              return_value={"main_pdf": "x.pdf", "attachments": []}) as detail, \
                 patch.object(sppweb, "download", side_effect=download) as dl, \
                 patch.object(sppweb, "attach_text", return_value=""), \
-                patch("builtins.print"):
+                patch("builtins.print") as out:
             phone_fetch.main()
+        self.printed = [" ".join(str(a) for a in c.args) for c in out.call_args_list]
         return sent, detail.call_count, dl.call_count
 
     def test_documents_already_in_the_queue_are_not_pulled_again(self):
@@ -191,6 +192,15 @@ class RunTests(unittest.TestCase):
     def test_nothing_is_pulled_when_everything_is_queued_or_handled(self):
         docs = [{"book_id": b, "doc_title": "เรื่อง"} for b in ("1", "2")]
         self.assertEqual(self.run_main(docs, done={"1"}, queued={"2"}), ([], 0, 0))
+
+    def test_documents_found_already_queued_are_not_counted_as_sent(self):
+        # เซิร์ฟเวอร์รุ่นเก่า (ไม่บอกคิว) ทุกเรื่องจึงถูกส่งแล้วได้คำตอบ "อยู่ในคิวเดิม"
+        docs = [{"book_id": str(i), "doc_title": "เรื่อง"} for i in range(1, 9)]
+        self.run_main(docs, created=False)
+        summary = [line for line in self.printed if "เสร็จ" in line]
+        self.assertEqual(len(summary), 1)
+        self.assertIn("ส่งเข้าระบบ 0/8 เรื่อง", summary[0])
+        self.assertIn("อีก 8 เรื่องอยู่ในคิวอยู่แล้ว", summary[0])
 
     def test_stops_downloading_after_the_server_stays_down(self):
         docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]

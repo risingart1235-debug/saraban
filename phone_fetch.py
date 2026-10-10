@@ -274,7 +274,7 @@ def main():
         print("   (ใหม่เยอะ ดึงแค่ %d เรื่องล่าสุดก่อน — รันซ้ำเพื่อดึงที่เหลือ)" % MAX_FETCH)
         new = new[:MAX_FETCH]
 
-    ok, links, stopped = 0, [], False
+    ok, again, links, stopped = 0, 0, [], False
     for i, d in enumerate(new, 1):
         bid = d["book_id"]
         title = (d.get("doc_title") or "")[:40]
@@ -301,11 +301,14 @@ def main():
             res = submit(tmp, meta)
             if res.get("already_handled"):
                 print("จัดการไปแล้วโดยอีกเครื่อง")
+            elif not res.get("created", True):
+                again += 1
+                print("อยู่ในคิวเดิม")
             else:
                 ok += 1
-                if res.get("job_id"):
-                    links.append(res["job_id"])
-                print("อยู่ในคิวเดิม" if not res.get("created", True) else "ส่งแล้ว")
+                print("ส่งแล้ว")
+            if res.get("job_id"):
+                links.append(res["job_id"])
         except ServerDown as e:
             print("ผิดพลาด: %s" % e)
             print("   รอแล้ว %d นาทีเซิร์ฟเวอร์ยังไม่กลับมา — หยุดรอบนี้ไว้ก่อน" % (WAIT_SERVER_SEC // 60))
@@ -321,10 +324,12 @@ def main():
                 except OSError:
                     pass
 
+    # "อยู่ในคิวเดิม" ไม่นับว่าส่ง — ของเดิมนับรวม เลยขึ้น ๘/๘ ทั้งที่ไม่ได้ส่งอะไรใหม่เลย
+    extra = " (อีก %d เรื่องอยู่ในคิวอยู่แล้ว ไม่ได้ส่งซ้ำ)" % again if again else ""
     if stopped:
-        print("\n⚠️ หยุดก่อนครบ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
+        print("\n⚠️ หยุดก่อนครบ — ส่งเข้าระบบ %d/%d เรื่อง%s" % (ok, len(new), extra))
     else:
-        print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง" % (ok, len(new)))
+        print("\n✅ เสร็จ — ส่งเข้าระบบ %d/%d เรื่อง%s" % (ok, len(new), extra))
     if links:
         print("\nไปตรวจ/กดลงรับต่อที่  โหมดที่ ๒ — ลงรับจากมือถือ")
         print("   %s/queue" % RENDER)
