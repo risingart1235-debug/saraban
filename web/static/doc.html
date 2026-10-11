@@ -115,6 +115,13 @@
         <label>ความกว้างก่อนตัดบรรทัด</label>
         <div class="stepper"><button id="bwm">−</button><span id="bwv">100%</span><button id="bwp">+</button></div>
       </div>
+      <div class="row">
+        <label>ขึ้นบรรทัดใหม่</label>
+        <div class="chips" style="margin-top:0">
+          <button id="bind">ย่อหน้า</button>
+          <button id="bflush">ชิดขอบ</button>
+        </div>
+      </div>
       <div class="chips">
         <button id="bbg">พื้นหลังทึบ</button>
         <button id="bbd">ตีกรอบ</button>
@@ -239,6 +246,10 @@ function build() {
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
+  const pref = indentPref();
+  if (pref !== null) {
+    for (const b of D.boxes) if (b.indent_pct !== pref) { b.indent_pct = pref; renderBox(b); }
+  }
   select(D.boxes[0] ? D.boxes[0].id : 'stamp');
 }
 
@@ -347,6 +358,7 @@ function select(id) {
   $('bwv').textContent = b.wrap_pct + '%';
   $('bbg').classList.toggle('on', !!b.bg);
   $('bbd').classList.toggle('on', !!b.border);
+  showIndent(b);
   $('boxPrev').src = b.png;
 }
 
@@ -355,20 +367,44 @@ let tm = null;
 function reBox(delay = 400) {
   const b = objOf(sel); if (!b || sel === 'stamp') return;
   clearTimeout(tm);
-  tm = setTimeout(async () => {
-    const r = await fetch(`/api/doc/${JOB}/box`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: b.text, size_pct: b.size_pct, wrap_pct: b.wrap_pct,
-                             indent_pct: b.indent_pct, bg: b.bg, border: b.border, page: b.page }),
-    });
-    if (!r.ok) return;
-    const d = await readJSON(r);
-    Object.assign(b, d);
-    b._el.querySelector('img').src = d.png;
-    $('boxPrev').src = d.png;          // ตัวอย่างในแผงต้องเปลี่ยนพร้อมของจริง
-    clamp(b); posOverlay(b);
-  }, delay);
+  tm = setTimeout(() => renderBox(b), delay);
 }
+
+async function renderBox(b) {
+  const r = await fetch(`/api/doc/${JOB}/box`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: b.text, size_pct: b.size_pct, wrap_pct: b.wrap_pct,
+                           indent_pct: b.indent_pct, bg: b.bg, border: b.border, page: b.page }),
+  });
+  if (!r.ok) return;
+  const d = await readJSON(r);
+  Object.assign(b, d);
+  b._el.querySelector('img').src = d.png;
+  if (sel === b.id) $('boxPrev').src = d.png;   // ตัวอย่างในแผงต้องเปลี่ยนพร้อมของจริง
+  clamp(b); posOverlay(b);
+}
+
+// ---------- ย่อหน้า / ชิดขอบ ----------
+// ทุกบรรทัดที่กด Enter ถือเป็นย่อหน้าใหม่ (ยกเว้นบรรทัด "เรียน ผอ.") เว้นต้นบรรทัดตาม indent_pct
+// จำแบบที่เลือกล่าสุดไว้ในเครื่อง เรื่องถัดไปจะได้ไม่ต้องกดใหม่ทุกครั้ง (AI ร่างมาแบบย่อหน้าเสมอ)
+const INDENT_KEY = 'saraban.kasien.indent';
+function indentPref() {
+  try {
+    const v = localStorage.getItem(INDENT_KEY);
+    return v === '0' ? 0 : v === '100' ? 100 : null;
+  } catch (e) { return null; }
+}
+function showIndent(b) {
+  $('bind').classList.toggle('on', b.indent_pct > 0);
+  $('bflush').classList.toggle('on', !(b.indent_pct > 0));
+}
+function setIndent(pct) {
+  const b = objOf(sel); if (!b || sel === 'stamp') return;
+  b.indent_pct = pct; showIndent(b); reBox(0);
+  try { localStorage.setItem(INDENT_KEY, String(pct)); } catch (e) {}
+}
+$('bind').onclick = () => setIndent(100);
+$('bflush').onclick = () => setIndent(0);
 
 $('btext').addEventListener('input', () => { objOf(sel).text = $('btext').value; reBox(); });
 function bstep(field, lbl, delta, lo, hi) {
@@ -393,7 +429,8 @@ $('bdel').onclick = () => {
 $('badd').onclick = async () => {
   const src = objOf(sel) || D.boxes[0];
   const id = 'b' + (Date.now() % 100000);
-  const nb = { id, text: 'พิมพ์ข้อความที่นี่', size_pct: 100, wrap_pct: 100, indent_pct: 100,
+  const nb = { id, text: 'พิมพ์ข้อความที่นี่', size_pct: 100, wrap_pct: 100,
+               indent_pct: src.indent_pct === 0 ? 0 : 100,
                bg: false, border: false, page: src.page,
                left_cm: src.left_cm, top_cm: src.top_cm + 2 };
   const r = await fetch(`/api/doc/${JOB}/box`, {
