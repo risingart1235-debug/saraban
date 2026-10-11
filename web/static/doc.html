@@ -122,6 +122,8 @@
           <button id="bflush">ชิดขอบ</button>
         </div>
       </div>
+      <p class="tiny hidden" id="bindHint" style="text-align:right">
+        บรรทัดไหนอยากย่อหน้า ให้เคาะเว้นวรรคหน้าบรรทัดนั้น</p>
       <div class="chips">
         <button id="bbg">พื้นหลังทึบ</button>
         <button id="bbd">ตีกรอบ</button>
@@ -385,7 +387,7 @@ async function renderBox(b) {
 }
 
 // ---------- ย่อหน้า / ชิดขอบ ----------
-// ทุกบรรทัดที่กด Enter ถือเป็นย่อหน้าใหม่ (ยกเว้นบรรทัด "เรียน ผอ.") เว้นต้นบรรทัดตาม indent_pct
+// ย่อหน้า: ทุกบรรทัดที่กด Enter เว้นต้นบรรทัด (ยกเว้น "เรียน ผอ.") / ชิดขอบ: ย่อเฉพาะบรรทัดที่เคาะเว้นวรรคนำหน้า
 // จำแบบที่เลือกล่าสุดไว้ในเครื่อง เรื่องถัดไปจะได้ไม่ต้องกดใหม่ทุกครั้ง (AI ร่างมาแบบย่อหน้าเสมอ)
 const INDENT_KEY = 'saraban.kasien.indent';
 function indentPref() {
@@ -397,6 +399,8 @@ function indentPref() {
 function showIndent(b) {
   $('bind').classList.toggle('on', b.indent_pct > 0);
   $('bflush').classList.toggle('on', !(b.indent_pct > 0));
+  // แบบชิดขอบ บรรทัดที่เคาะเว้นวรรคนำหน้าจะย่อหน้า (ผสมย่อหน้า/ชิดขอบในกล่องเดียวได้)
+  $('bindHint').classList.toggle('hidden', b.indent_pct > 0);
 }
 function setIndent(pct) {
   const b = objOf(sel); if (!b || sel === 'stamp') return;

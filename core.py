@@ -754,7 +754,6 @@ def render_transparent_kasien(text, max_w_orig, percent_size, indent_pct=100, dr
     font_size = max(10, int(base_font_size * (percent_size / 100.0)))
     font = get_font(font_size)
     
-    raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
     step = int(font_size * 1.2)
     max_w_orig = max(10, max_w_orig)
     
@@ -764,15 +763,25 @@ def render_transparent_kasien(text, max_w_orig, percent_size, indent_pct=100, dr
     arranged_lines = []
     actual_w = 0 
     
-    for line in raw_lines:
+    for raw in text.split('\n'):
+        line = raw.strip()
+        if not line:
+            continue
+        # ย่อหน้า (indent_pct > 0): ทุกย่อหน้าเว้นต้นบรรทัด ยกเว้นบรรทัด "เรียน ผอ."
+        # ชิดขอบ (indent_pct = 0): ชิดทุกบรรทัด เว้นแต่บรรทัดที่พิมพ์เว้นวรรคนำหน้าไว้เอง
+        # จะย่อหน้าบางบรรทัด ชิดขอบบางบรรทัดในกล่องเดียวกัน ก็ใช้แบบชิดขอบแล้วเคาะเว้นวรรค
+        if indent_px:
+            first = 0 if line.startswith("เรียน ผอ.") else indent_px
+        else:
+            first = int(base_indent) if raw[:1].isspace() else 0   # เท่าย่อหน้าปกติ 100% พอดี
         if line.startswith("เรียน ผอ."):
-            arranged_lines.append((line, 0))
-            tw = get_text_w(line, font)
+            arranged_lines.append((line, first))
+            tw = get_text_w(line, font) + first
             if tw > actual_w: actual_w = tw
         else:
             words = cached_tokenize(line)
             current_text = ""
-            cur_indent = indent_px 
+            cur_indent = first
             for w in words:
                 avail = max_w_orig - cur_indent
                 if get_text_w(current_text + w, font) > avail and current_text.strip():
