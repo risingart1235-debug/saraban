@@ -425,6 +425,14 @@ def line_pages(last_page):
     return [1] + list(range(last_page - LINE_MAX_IMAGES + 2, last_page + 1))
 
 
+def chosen_line_pages(chosen, total, has_blank):
+    """หน้าที่ผู้ใช้เลือกส่งเข้า LINE บนหน้าจอ — เอาเฉพาะหน้าที่มีจริงในไฟล์ ไม่ซ้ำ เรียงตามหน้า
+    ไม่เกินเพดานของ LINE (หน้ากระดาษเปล่าท้ายเล่ม = total+1 มีเมื่อวางของไว้เท่านั้น)
+    ใช้ทั้งหน้าเว็บและโปรแกรมบนคอม"""
+    valid = set(range(1, total + 1)) | ({total + 1} if has_blank else set())
+    return sorted({int(n) for n in chosen if str(n).isdigit() and int(n) in valid})[:LINE_MAX_IMAGES]
+
+
 def pages_with_items(item_spans, page_spans):
     """เลขหน้าจริงที่มีของวางทับอยู่ — สำหรับผืนตัวอย่างที่เรียงหน้าต่อกันลงมา (โปรแกรมบนคอม)
 
@@ -593,6 +601,20 @@ def classify_recipient(recipient_line):
     return 'check'
 
 
+# PyMuPDF ใช้พร้อมกันหลายเธรดไม่ได้ (เอกสารของ PyMuPDF บอกไว้) ทุกจุดที่เรนเดอร์ต้องผ่านล็อกนี้
+PDF_LOCK = threading.Lock()
+
+
+def release_pdf_cache():
+    """คืนแรมที่ PyMuPDF เก็บภาพที่ถอดรหัสแล้วไว้ในแคช — เรียกในล็อก PDF_LOCK หลังปิดเอกสาร
+
+    ปิดเอกสารแล้วของในแคชก็ยังค้างอยู่ และเอาไปใช้กับเอกสารที่เปิดใหม่ไม่ได้ด้วย
+    เรนเดอร์เอกสาร ๒๐ หน้าแล้วค้างไว้ราว ๒๐๐ MB (เครื่องฟรีบน Render มีแค่ 512 MB)
+    """
+    import pymupdf
+    pymupdf.TOOLS.store_shrink(100)
+
+
 def render_pdf_page(pdf_path, page_number=1, dpi=PDF_RENDER_DPI):
     """เรนเดอร์หน้า PDF เป็น PIL Image ด้วย PyMuPDF โดยไม่ต้องติดตั้ง Poppler.
 
@@ -606,16 +628,18 @@ def render_pdf_page(pdf_path, page_number=1, dpi=PDF_RENDER_DPI):
 
     import pymupdf
 
-    document = pymupdf.open(pdf_path)
-    try:
-        if page_number > document.page_count:
-            raise IndexError(
-                f"PDF has {document.page_count} page(s); page {page_number} was requested")
-        page = document.load_page(page_number - 1)
-        pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
-        return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-    finally:
-        document.close()
+    with PDF_LOCK:
+        document = pymupdf.open(pdf_path)
+        try:
+            if page_number > document.page_count:
+                raise IndexError(
+                    f"PDF has {document.page_count} page(s); page {page_number} was requested")
+            page = document.load_page(page_number - 1)
+            pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
+            return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        finally:
+            document.close()
+            release_pdf_cache()
 
 
 def save_image_as_pdf(pil_image, output_path, dpi=PDF_RENDER_DPI):

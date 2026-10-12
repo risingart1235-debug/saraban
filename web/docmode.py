@@ -30,7 +30,7 @@ from core import (
     find_stamp_pos, find_kasien_pos,
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
-    format_scraped_date, get_next_receipt_no, line_pages, LINE_MAX_IMAGES,
+    format_scraped_date, get_next_receipt_no, line_pages, chosen_line_pages,
     upload_to_imgbb, send_line_with_image, PdfMerger,
 )
 
@@ -143,10 +143,14 @@ def _jpg_uri(img) -> str:
 def _render_pdf_page(pdf_path: str, page_no: int, dpi: int = DPI):
     """แปลงหน้า PDF เป็นรูป — ใช้ PyMuPDF จึงไม่ต้องลง Poppler บนเซิร์ฟเวอร์"""
     import fitz
-    with fitz.open(pdf_path) as doc:
-        page_no = max(1, min(page_no, len(doc)))
-        px = doc[page_no - 1].get_pixmap(dpi=dpi)
-        return Image.frombytes("RGB", (px.width, px.height), px.samples), len(doc)
+    with core.PDF_LOCK:
+        try:
+            with fitz.open(pdf_path) as doc:
+                page_no = max(1, min(page_no, len(doc)))
+                px = doc[page_no - 1].get_pixmap(dpi=dpi)
+                return Image.frombytes("RGB", (px.width, px.height), px.samples), len(doc)
+        finally:
+            core.release_pdf_cache()      # ไม่งั้นเรื่องหลายหน้าค้างแรมไว้หลายร้อย MB
 
 
 def _clean_text(value, default: str = "", limit: int = 500) -> str:
@@ -243,13 +247,6 @@ def publish_line_image(src_path: str) -> str:
             except OSError:
                 pass
     return f"{base}/api/line-image/{token}.jpg"
-
-
-def chosen_line_pages(chosen, total: int, has_blank: bool) -> list:
-    """หน้าที่ผู้ใช้เลือกส่งเข้า LINE บนหน้าจอ — เอาเฉพาะหน้าที่มีจริงในไฟล์ ไม่ซ้ำ เรียงตามหน้า
-    ไม่เกินเพดานของ LINE (หน้ากระดาษเปล่าท้ายเล่ม = total+1 มีเมื่อวางของไว้เท่านั้น)"""
-    valid = set(range(1, total + 1)) | ({total + 1} if has_blank else set())
-    return sorted({int(n) for n in chosen if str(n).isdigit() and int(n) in valid})[:LINE_MAX_IMAGES]
 
 
 def line_image_path(token: str) -> str:

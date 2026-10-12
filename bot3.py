@@ -589,6 +589,8 @@ class SarabanApp(tk.Tk):
     # (สำคัญมาก — ปริ้นที่ ๑๐๐% แล้วตรายางจะลงตรงตำแหน่งเดียวกับที่เห็นในหน้าจอ)
     A4_DPI = PDF_RENDER_DPI
     A4_W, A4_H = 1654, 2339
+    # หน้าต่างจัดเอกสารแสดงได้ถึงหน้านี้ (เท่าหน้าเว็บ) กันเอกสารหนามากจนเปิดช้า
+    PREVIEW_MAX_PAGES = 20
 
     def start_stamp_only_mode(self):
         """เปิดกระดาษ A4 เปล่า → รันเลขรับต่อจาก Excel → ลากวางตรายาง → เซฟ PDF ไว้ปริ้นทับ"""
@@ -1125,29 +1127,32 @@ class SarabanApp(tk.Tk):
         try:
             reader = PdfReader(temp_pdf)
             total_pages = len(reader.pages)
-            if sig_page > total_pages: sig_page = total_pages
         except: total_pages = 1
+        sig_page = max(1, min(sig_page, total_pages))
 
         receipt_no_thai = get_next_receipt_no()
-        
-        page1_path = self._job_path(job, "page1.jpg")
-        page_sig_path = self._job_path(job, "page_sig.jpg")
+
+        # ทุกหน้าในเอกสาร (ไม่เกิน PREVIEW_MAX_PAGES และหน้าที่มีลายเซ็นผู้ส่งเสมอ) เหมือนหน้าเว็บ
+        # เห็นครบก่อนลงรับ วางตรายาง/คำเกษียณได้ทุกหน้า และเลือกได้ว่าจะส่งหน้าไหนเข้า LINE
+        # (เดิมเห็นแค่หน้าแรกกับหน้าที่มีลายเซ็น)
+        shown = sorted({1, sig_page} | set(range(1, min(total_pages, self.PREVIEW_MAX_PAGES) + 1)))
+        page_paths = {}
+        for n in shown:
+            self.after(0, lambda n=n: self.set_status(
+                f"กำลังเตรียมภาพหน้า {to_thai_digits(n)} จาก {to_thai_digits(total_pages)}..."))
+            page_paths[n] = self._job_path(job, f"page{n}.jpg")
+            render_pdf_page(temp_pdf, page_number=n, dpi=self.A4_DPI).save(page_paths[n], "JPEG")
+
         self.doc_info = {
             'pdf_path': temp_pdf, 'ai_text': ai_text, 'sig_page': sig_page, 'total_pages': total_pages,
             'doc_no': doc_no, 'doc_title': doc_title, 'doc_date': doc_date, 'sender': sender,
             'emoji': emoji, 'attach': attach, 'receipt_no': receipt_no_thai,
             'book_id': str(book_id) if book_id else None, 'job': job,
-            'page1_path': page1_path, 'page_sig_path': page_sig_path,
+            'page_paths': page_paths,
         }
-        
-        render_pdf_page(temp_pdf, page_number=1, dpi=self.A4_DPI).save(page1_path, "JPEG")
-        if sig_page > 1:
-            render_pdf_page(temp_pdf, page_number=sig_page, dpi=self.A4_DPI).save(
-                page_sig_path, "JPEG")
 
         # ล้าง cache รูปต้นฉบับของเอกสารเดิม (เริ่มเอกสารใหม่)
-        self._p1_orig_cache = None
-        self._psig_orig_cache = None
+        self._orig_cache = {}
 
         self.after(0, self.show_preview_window)
         return True
@@ -1188,16 +1193,27 @@ class SarabanApp(tk.Tk):
         right_frame = tk.Frame(self.preview_win, padx=15, pady=10, bg="#f9f9f9")
         right_frame.pack(side="right", fill="y")
         
+        # ภาพหน้าเอกสารแยกทีละหน้า (ไม่ใช่ผืนเดียวยาวทั้งเล่ม) ย่อเฉพาะหน้าที่อยู่ใกล้ๆ จอ
+        self.page_layout = []        # หน้าที่แสดง เรียงลงมา (build_pages เติมให้)
+        self._page_items = {}        # เลขหน้า -> ไอเท็มบนผืน (กระดาษ/ภาพ/ชื่อหน้า/ปุ่ม LINE)
+        self._page_tk = {}           # เลขหน้า -> (ซูม, ภาพที่ย่อแล้ว) ของหน้าที่วาดอยู่
+        self._page_images_pending = False
+        self.line_pick = None        # None = ยังไม่ได้เลือกหน้าที่ส่ง LINE เอง ใช้ค่าอัตโนมัติ
+        self._stamp_key = None       # หน้าต่างใหม่ ต้องวาดตรายางใหม่เสมอ (เลขรับอาจซ้ำเรื่องก่อนที่ไม่ได้รับ)
         vbar = tk.Scrollbar(left_frame, orient="vertical")
         hbar = tk.Scrollbar(left_frame, orient="horizontal")
-        self.canvas = tk.Canvas(left_frame, xscrollcommand=hbar.set, yscrollcommand=vbar.set, bg="#555555")
+
+        def on_view(first, last):
+            vbar.set(first, last)
+            self._schedule_page_images()     # เลื่อนไปเจอหน้าใหม่ ค่อยวาดภาพหน้านั้น
+        self.canvas = tk.Canvas(left_frame, xscrollcommand=hbar.set, yscrollcommand=on_view, bg="#555555")
         vbar.config(command=self.canvas.yview)
         hbar.config(command=self.canvas.xview)
         vbar.pack(side="right", fill="y")
         hbar.pack(side="bottom", fill="x")
         self.canvas.pack(side="left", fill="both", expand=True)
-        
-        self.bg_item = self.canvas.create_image(0, 0, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self._schedule_page_images())
+
         self.stamp_item = self.canvas.create_image(0, 0, anchor="nw", tags="draggable")
         
         tk.Label(right_frame, text="✏️ คำเกษียณ (เพิ่มได้หลายช่อง)", font=("Helvetica", 11, "bold"), bg="#f9f9f9").pack(anchor="w")
@@ -1244,14 +1260,24 @@ class SarabanApp(tk.Tk):
         create_adjuster(right_frame, "ซูมเข้า/ออก (Zoom) %:", self.zoom_pct, step=10, command=self.update_render)
         create_adjuster(right_frame, "Aa ขนาดฟอนต์ช่องพิมพ์:", self.editor_font_size, step=2, command=self.update_editor_font)
 
-        tk.Label(right_frame, text="\n✨ ลากตรายาง/คำเกษียณบนภาพได้อิสระ\nและลากข้ามหน้ากระดาษได้เลย!", fg="#e91e63", bg="#f9f9f9", font=("Helvetica", 9)).pack(pady=3)
+        tk.Label(right_frame, text="✨ ลากตรายาง/คำเกษียณบนภาพได้อิสระ\nและลากข้ามหน้ากระดาษได้เลย!", fg="#e91e63", bg="#f9f9f9", font=("Helvetica", 9)).pack(pady=3)
+        # สรุปหน้าที่จะส่งเข้า LINE — เลือกเองได้ที่ปุ่มข้างชื่อแต่ละหน้าบนภาพ
+        # (บรรทัดเดียวแทนบรรทัดว่างเดิม แผงด้านขวาสูงเท่าเดิม ปุ่มยืนยันไม่ตกขอบจอโน้ตบุ๊ก)
+        self.line_summary = tk.Label(right_frame, text="", fg="#06A64C", bg="#f9f9f9",
+                                     font=("Helvetica", 9, "bold"))
+        self.line_summary.pack()
         tk.Button(right_frame, text="✅ ยืนยันและสร้างไฟล์", font=("Helvetica", 12, "bold"), bg="#4CAF50", fg="white", height=2, command=self.finalize_document).pack(pady=(8, 4), fill="x")
         tk.Button(right_frame, text="🚫 ไม่รับเอกสารนี้", font=("Helvetica", 11, "bold"), bg="#e53935", fg="white", command=self.reject_document).pack(pady=(0, 8), fill="x")
 
         self.drag_data = {"x": 0, "y": 0, "item": None}
         self.canvas.tag_bind("draggable", "<ButtonPress-1>", self.on_drag_start)
         self.canvas.tag_bind("draggable", "<B1-Motion>", self.on_drag_motion)
-        
+        # ปล่อยเมาส์ = ของอาจย้ายไปอยู่หน้าอื่น หน้าที่ส่ง LINE (แบบอัตโนมัติ) เปลี่ยนตาม
+        self.canvas.tag_bind("draggable", "<ButtonRelease-1>", lambda e: self._refresh_line_buttons())
+        self.canvas.tag_bind("linebtn", "<ButtonPress-1>", self.on_line_toggle)
+        self.canvas.tag_bind("linebtn", "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
+        self.canvas.tag_bind("linebtn", "<Leave>", lambda e: self.canvas.config(cursor=""))
+
         self.add_kasien_box(text=self.doc_info['ai_text'], render=False)
         self.is_first_load = True
         self.update_render(rebuild_bg=True)
@@ -1342,114 +1368,239 @@ class SarabanApp(tk.Tk):
             if 'editor' in b:
                 b['editor'].configure(font=("TH Sarabun New", self.editor_font_size.get()))
 
-    def build_stitched_bg(self):
+    def build_pages(self):
+        """จัดหน้าเอกสารเรียงลงมา: ทุกหน้าของ PDF (ไม่เกิน PREVIEW_MAX_PAGES) แล้วต่อท้ายด้วยหน้ากระดาษเปล่า
+
+        หน้าแรกกับหน้าที่มีลายเซ็นผู้ส่ง ย่อ/เลื่อนเนื้อหาได้ (ปุ่มปรับขนาดเนื้อหาข่าว) จึงเก็บภาพเต็มไว้
+        หน้าอื่นอ่านจากไฟล์ตอนจะวาดบนจอหรือตอนบันทึก ไม่ต้องกอดภาพเต็มของทุกหน้าไว้ในหน่วยความจำ
+        """
         scale_w = self.doc_w_pct.get() / 100.0
         scale_h = self.doc_h_pct.get() / 100.0
         off_x_pct = self.doc_x_off.get() / 100.0
         off_y_pct = self.doc_y_off.get() / 100.0
-        
-        if getattr(self, '_p1_orig_cache', None) is None:
-            self._p1_orig_cache = Image.open(self.doc_info['page1_path']).convert('RGBA')
-        p1_orig = self._p1_orig_cache
-        paper1_w, paper1_h = p1_orig.width, p1_orig.height
-        cw = max(1, int(paper1_w * scale_w))
-        ch = max(1, int(paper1_h * scale_h))
-        content1 = p1_orig.resize((cw, ch), Image.Resampling.LANCZOS) 
-        p1 = Image.new('RGBA', (paper1_w, paper1_h), 'white')         
-        ox1 = int(paper1_w * off_x_pct)
-        oy1 = int(paper1_h * off_y_pct)
-        p1.paste(content1, (ox1, oy1), content1)                      
-        self.p1_h = paper1_h
-        self.W = paper1_w
-        
-        psig = None
-        self.psig_h = 0
-        if self.doc_info['sig_page'] > 1:
-            if getattr(self, '_psig_orig_cache', None) is None:
-                self._psig_orig_cache = Image.open(self.doc_info['page_sig_path']).convert('RGBA')
-            ps_orig = self._psig_orig_cache
-            papers_w, papers_h = ps_orig.width, ps_orig.height
-            cw2 = max(1, int(papers_w * scale_w))
-            ch2 = max(1, int(papers_h * scale_h))
-            content2 = ps_orig.resize((cw2, ch2), Image.Resampling.LANCZOS)
-            psig = Image.new('RGBA', (papers_w, papers_h), 'white')
-            ox2 = int(papers_w * off_x_pct)
-            oy2 = int(papers_h * off_y_pct)
-            psig.paste(content2, (ox2, oy2), content2)
-            self.psig_h = papers_h
-            self.W = max(self.W, papers_w)
-            
-        self.page_top = 70   
-        self.gap = 70        
-        self.blank_h = int(self.W * 1.414) 
-        total_H = self.page_top + self.p1_h + self.gap + (self.psig_h + self.gap if self.psig_h else 0) + self.blank_h + 20
-        
-        stitched = Image.new('RGBA', (self.W + 40, total_H), '#b0b0b0')
-        draw = ImageDraw.Draw(stitched)
-        
-        def draw_page_layer(y_offset, h):
-            draw.rectangle([25, y_offset+5, 20+self.W+5, y_offset+h+5], fill='#888888') 
-            draw.rectangle([20, y_offset, 20+self.W, y_offset+h], fill='white') 
+        doc = self.doc_info
+        sig_page = doc['sig_page']
 
-        draw_page_layer(self.page_top, self.p1_h)
-        stitched.paste(p1, (20, self.page_top), p1)
-        
-        curr_y = self.page_top + self.p1_h + self.gap
-        if psig:
-            draw_page_layer(curr_y, self.psig_h)
-            stitched.paste(psig, (20, curr_y), psig)
-            curr_y += self.psig_h + self.gap
-            
-        self.blank_start_y = curr_y
-        draw_page_layer(self.blank_start_y, self.blank_h)
-        
-        self.original_bg = stitched
-        
+        self.page_full = {}
+        for n in sorted({1, sig_page}):
+            orig = self._orig_cache.get(n)
+            if orig is None:
+                orig = self._orig_cache[n] = Image.open(doc['page_paths'][n]).convert('RGB')
+            cw = max(1, int(orig.width * scale_w))
+            ch = max(1, int(orig.height * scale_h))
+            page = Image.new('RGB', orig.size, 'white')       # กระดาษคงขนาดเดิม ย่อเฉพาะเนื้อหา
+            page.paste(orig.resize((cw, ch), Image.Resampling.LANCZOS),
+                       (int(orig.width * off_x_pct), int(orig.height * off_y_pct)))
+            self.page_full[n] = page
+            self._page_tk.pop(n, None)                         # เนื้อหาเปลี่ยน ต้องวาดบนจอใหม่
+
+        self.W = max(img.width for img in self.page_full.values())
+        self.page_top = 70
+        self.gap = 70
+        layout, y = [], self.page_top
+        for n in sorted(doc['page_paths']):
+            if n in self.page_full:
+                w, h = self.page_full[n].size
+            else:
+                with Image.open(doc['page_paths'][n]) as im:   # อ่านแค่หัวไฟล์ ไม่ถอดรหัสภาพ
+                    w, h = im.size
+            name = ("หน้าแรก" if n == 1 else
+                    f"หน้า {to_thai_digits(n)} (มีลายเซ็นผู้ส่ง)" if n == sig_page else
+                    f"หน้า {to_thai_digits(n)}")
+            layout.append({'n': n, 'y': y, 'w': w, 'h': h, 'name': name})
+            y += h + self.gap
+        layout.append({'n': doc['total_pages'] + 1, 'y': y, 'w': self.W, 'h': int(self.W * 1.414),
+                       'name': "หน้ากระดาษเปล่า (ต่อท้าย)", 'blank': True})
+        self.page_layout = layout
+        self.page_y = {p['n']: p['y'] for p in layout}
+
         if self.is_first_load:
             self.is_first_load = False
-            
-            tmp_stamp = render_transparent_stamp(self.doc_info['receipt_no'], 100)
-            p1_region = self.original_bg.crop((20, self.page_top, 20 + self.W, self.page_top + self.p1_h))
-            sx, sy = find_stamp_pos(p1_region, tmp_stamp.width, tmp_stamp.height)
-            self.stamp_orig_x, self.stamp_orig_y = sx + 20, sy + self.page_top
-            
+
+            tmp_stamp = render_transparent_stamp(doc['receipt_no'], 100)
+            sx, sy = find_stamp_pos(self.page_full[1], tmp_stamp.width, tmp_stamp.height)
+            self.stamp_orig_x, self.stamp_orig_y = sx + 20, sy + self.page_y[1]
+
+            # คำเกษียณวางบนหน้าที่มีลายเซ็นผู้ส่ง (ไม่มีก็หน้าแรก) ตรงที่ว่างใต้เนื้อความ
+            target = self.page_full[sig_page]
             tmp_kasien = render_transparent_kasien(self.kasien_boxes[0]['text'], int(self.W * 0.42), 100)
-            if self.doc_info['sig_page'] == 1:
-                s_y, e_y = self.page_top + int(self.p1_h * 0.40), self.page_top + int(self.p1_h * 0.95)
-            else:
-                s_y = self.page_top + self.p1_h + self.gap + int(self.psig_h * 0.15)
-                e_y = self.page_top + self.p1_h + self.gap + int(self.psig_h * 0.95)
-            left_x = 20 + int(self.W * 0.08)
-            kx, ky = find_kasien_pos(self.original_bg, tmp_kasien.width, tmp_kasien.height, s_y, e_y, left_x)
-            self.kasien_boxes[0]['x'], self.kasien_boxes[0]['y'] = kx, ky
+            s_y = int(target.height * (0.40 if sig_page == 1 else 0.15))
+            e_y = int(target.height * 0.95)
+            kx, ky = find_kasien_pos(target, tmp_kasien.width, tmp_kasien.height, s_y, e_y,
+                                     int(self.W * 0.08))
+            self.kasien_boxes[0]['x'], self.kasien_boxes[0]['y'] = kx + 20, ky + self.page_y[sig_page]
 
     def update_render(self, rebuild_bg=False):
         if rebuild_bg:
-            self.build_stitched_bg()
-            
+            self.build_pages()
+
         scale = self.zoom_pct.get() / 100.0
-        
-        disp_w, disp_h = int(self.original_bg.width * scale), int(self.original_bg.height * scale)
-        bg_resized = self.original_bg.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
-        self.bg_tk = ImageTk.PhotoImage(bg_resized)
-        self.canvas.itemconfig(self.bg_item, image=self.bg_tk)
-        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
-        
-        stamp_rgba = render_transparent_stamp(self.doc_info['receipt_no'], self.stamp_pct.get())
-        sw, sh = int(stamp_rgba.width * scale), int(stamp_rgba.height * scale)
-        self.stamp_tk = ImageTk.PhotoImage(stamp_rgba.resize((max(1, sw), max(1, sh)), Image.Resampling.LANCZOS))
-        self.canvas.itemconfig(self.stamp_item, image=self.stamp_tk)
+        self._layout_pages(scale)
+
+        # วาดตรายาง/กล่องคำเกษียณใหม่เฉพาะชิ้นที่เปลี่ยน — พิมพ์ในกล่องหนึ่ง ไม่ต้องวาดตรายาง
+        # และกล่องอื่นซ้ำทุกตัวอักษร (ภาพพื้นใสขนาดใหญ่ตอนซูมมากๆ ส่งเข้า Tk ช้า)
+        key = (self.doc_info['receipt_no'], self.stamp_pct.get(), scale)
+        if getattr(self, '_stamp_key', None) != key:
+            stamp_rgba = render_transparent_stamp(self.doc_info['receipt_no'], self.stamp_pct.get())
+            self.stamp_h = stamp_rgba.height
+            sw, sh = int(stamp_rgba.width * scale), int(stamp_rgba.height * scale)
+            self.stamp_tk = ImageTk.PhotoImage(stamp_rgba.resize((max(1, sw), max(1, sh)), Image.Resampling.LANCZOS))
+            self.canvas.itemconfig(self.stamp_item, image=self.stamp_tk)
+            self._stamp_key = key
         self.canvas.coords(self.stamp_item, self.stamp_orig_x * scale, self.stamp_orig_y * scale)
         
         for box in self.kasien_boxes:
             wrap = box['wrap_pct'].get() / 100.0
             max_w_orig = max(10, int(self.W * 0.42 * wrap))
-            kasien_rgba = render_transparent_kasien(box['text'], max_w_orig, box['pct'].get(), box['indent_pct'].get(), box['draw_bg'].get(), box['draw_border'].get())
-            box['render_h'] = kasien_rgba.height  
-            kw, kh = int(kasien_rgba.width * scale), int(kasien_rgba.height * scale)
-            box['tk'] = ImageTk.PhotoImage(kasien_rgba.resize((max(1, kw), max(1, kh)), Image.Resampling.LANCZOS))
-            self.canvas.itemconfig(box['item'], image=box['tk'])
+            key = (box['text'], max_w_orig, box['pct'].get(), box['indent_pct'].get(),
+                   box['draw_bg'].get(), box['draw_border'].get(), scale)
+            if box.get('key') != key:
+                kasien_rgba = render_transparent_kasien(box['text'], max_w_orig, box['pct'].get(), box['indent_pct'].get(), box['draw_bg'].get(), box['draw_border'].get())
+                box['render_h'] = kasien_rgba.height  
+                kw, kh = int(kasien_rgba.width * scale), int(kasien_rgba.height * scale)
+                box['tk'] = ImageTk.PhotoImage(kasien_rgba.resize((max(1, kw), max(1, kh)), Image.Resampling.LANCZOS))
+                self.canvas.itemconfig(box['item'], image=box['tk'])
+                box['key'] = key
             self.canvas.coords(box['item'], box['x'] * scale, box['y'] * scale)
+        self._refresh_line_buttons()
+
+    # ---------- หน้าเอกสารบนจอ ----------
+    def _layout_pages(self, scale):
+        """วางกระดาษทุกหน้า ชื่อหน้า และปุ่มส่ง LINE ตามซูม แล้วนัดวาดภาพหน้าที่อยู่ใกล้จอ
+
+        เดิมย่อภาพทั้งผืนใหม่ทุกครั้งที่พิมพ์คำเกษียณแม้แต่ตัวอักษรเดียว พอแสดงทุกหน้า
+        เอกสาร ๒๐ หน้าจะหน่วงหลายวินาที — ตอนนี้ย่อทีละหน้า เฉพาะหน้าที่ซูมหรือเนื้อหาเปลี่ยน
+        """
+        c = self.canvas
+        layout = self.page_layout
+        total_w = max(p['w'] for p in layout) + 40
+        total_h = layout[-1]['y'] + layout[-1]['h'] + 20
+        if 'bg' not in self._page_items:
+            self._page_items['bg'] = c.create_rectangle(0, 0, 1, 1, fill='#b0b0b0', width=0, tags=('page',))
+        c.coords(self._page_items['bg'], 0, 0, total_w * scale, total_h * scale)
+        for p in layout:
+            it = self._page_items.get(p['n'])
+            if it is None:
+                tag = f"line{p['n']}"
+                it = self._page_items[p['n']] = {
+                    'shadow': c.create_rectangle(0, 0, 1, 1, fill='#888888', width=0, tags=('page',)),
+                    'paper': c.create_rectangle(0, 0, 1, 1, fill='white', width=0, tags=('page',)),
+                    'img': c.create_image(0, 0, anchor='nw', tags=('page',)),
+                    'name': c.create_text(0, 0, anchor='sw', text=p['name'], fill='#222222',
+                                          font=("Helvetica", 10, "bold"), tags=('page',)),
+                    'btn': c.create_rectangle(0, 0, 1, 1, tags=('page', 'linebtn', tag)),
+                    'btn_text': c.create_text(0, 0, anchor='w', font=("Helvetica", 9, "bold"),
+                                              tags=('page', 'linebtn', tag)),
+                }
+            x0, y0 = 20 * scale, p['y'] * scale
+            x1, y1 = (20 + p['w']) * scale, (p['y'] + p['h']) * scale
+            c.coords(it['shadow'], x0 + 5 * scale, y0 + 5 * scale, x1 + 5 * scale, y1 + 5 * scale)
+            c.coords(it['paper'], x0, y0, x1, y1)
+            c.coords(it['img'], x0, y0)
+            c.coords(it['name'], x0, y0 - 8)
+            name_right = c.bbox(it['name'])[2]
+            c.coords(it['btn_text'], name_right + 18, y0 - 8 - 9)
+        c.tag_lower('page')                 # กระดาษอยู่ใต้ตรายาง/คำเกษียณเสมอ
+        c.config(scrollregion=(0, 0, total_w * scale, total_h * scale))
+        self._page_scale = scale
+        self._schedule_page_images()
+
+    def _schedule_page_images(self):
+        if self._page_images_pending or not self.page_layout:
+            return
+        self._page_images_pending = True
+        self.after_idle(self._draw_page_images)
+
+    def _draw_page_images(self):
+        """วาดภาพเฉพาะหน้าที่อยู่บนจอและหน้าติดกัน หน้าที่ไกลออกไปปล่อยเป็นกระดาษขาวไว้ก่อน
+
+        ซูมใหญ่ๆ ภาพหนึ่งหน้ากินแรมเป็นร้อย MB ถ้าวาดครบทุกหน้าของเอกสารหนาๆ เครื่องจะค้าง
+        """
+        self._page_images_pending = False
+        try:
+            c = self.canvas
+            scale = self._page_scale
+            top = c.canvasy(0) / scale
+            bottom = c.canvasy(max(c.winfo_height(), 600)) / scale
+        except (tk.TclError, AttributeError):
+            return                          # ปิดหน้าต่างไปแล้ว
+        for p in self.page_layout:
+            n, it = p['n'], self._page_items.get(p['n'])
+            if it is None or p.get('blank'):
+                continue
+            near = p['y'] < bottom + p['h'] and p['y'] + p['h'] > top - p['h']
+            have = self._page_tk.get(n)
+            if not near:
+                if have:                    # เลื่อนพ้นไปไกลแล้ว คืนหน่วยความจำ
+                    c.itemconfig(it['img'], image='')
+                    del self._page_tk[n]
+                continue
+            if have and have[0] == scale:
+                continue
+            size = (max(1, int(p['w'] * scale)), max(1, int(p['h'] * scale)))
+            src = self.page_full.get(n)
+            if src is None:
+                src = Image.open(self.doc_info['page_paths'][n])
+                src.draft('RGB', size)      # JPEG ถอดรหัสแบบย่อมาเลย เร็วกว่าถอดเต็มแล้วค่อยย่อ
+            # ย่อใช้ LANCZOS ตัวหนังสือคม / ขยายเกิน ๑๐๐% ใช้ BILINEAR เร็วกว่าหลายเท่า ตาแทบไม่ต่าง
+            how = Image.Resampling.LANCZOS if scale <= 1 else Image.Resampling.BILINEAR
+            photo = ImageTk.PhotoImage(src.convert('RGB').resize(size, how))
+            self._page_tk[n] = (scale, photo)
+            c.itemconfig(it['img'], image=photo)
+
+    # ---------- เลือกหน้าที่ส่งเข้า LINE ----------
+    # เริ่มต้น: หน้าแรกถึงหน้าที่ลงเกษียณไว้ (กติกาเดียวกับหน้าเว็บ — core.line_pages) และเปลี่ยนตาม
+    # เวลาลากของไปหน้าอื่น จนกว่าจะกดเลือกเอง — กดแล้วยึดตามที่เลือก
+    def _auto_line_pages(self):
+        items = [(self.stamp_orig_y, getattr(self, 'stamp_h', 0))]
+        items += [(b['y'], b.get('render_h', 0)) for b in self.kasien_boxes if b['text'].strip()]
+        used = pages_with_items(items, [(p['y'], p['h'], p['n']) for p in self.page_layout])
+        return line_pages(max(used | {1}))
+
+    def _line_pages(self):
+        return self.line_pick if self.line_pick is not None else self._auto_line_pages()
+
+    def _refresh_line_buttons(self):
+        if not self.page_layout:
+            return
+        c = self.canvas
+        chosen = set(self._line_pages())
+        for p in self.page_layout:
+            it = self._page_items.get(p['n'])
+            if it is None:
+                continue
+            on = p['n'] in chosen
+            c.itemconfig(it['btn_text'], text="✓ ส่ง LINE" if on else "ไม่ส่ง LINE",
+                         fill="white" if on else "#555555")
+            x0, y0, x1, y1 = c.bbox(it['btn_text'])
+            c.coords(it['btn'], x0 - 8, y0 - 3, x1 + 8, y1 + 3)
+            c.itemconfig(it['btn'], fill="#06C755" if on else "white",
+                         outline="#06C755" if on else "#999999")
+        total = self.doc_info['total_pages']
+        names = ["กระดาษเปล่า" if n > total else to_thai_digits(n) for n in sorted(chosen)]
+        self.line_summary.config(text=(
+            "📤 ส่งเข้า LINE: หน้า " + ", ".join(names) if names else
+            "📤 ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป"))
+
+    def on_line_toggle(self, event):
+        current = self.canvas.find_withtag("current")
+        tags = self.canvas.gettags(current[0]) if current else ()
+        n = next((int(t[4:]) for t in tags if t.startswith("line") and t[4:].isdigit()), None)
+        if n is None:
+            return
+        chosen = set(self._line_pages())
+        if n in chosen:
+            chosen.discard(n)
+        elif len(chosen) >= LINE_MAX_IMAGES:
+            messagebox.showinfo(
+                "ส่ง LINE ได้ไม่เกิน ๔ หน้า",
+                f"ส่งรูปเข้า LINE ได้ครั้งละไม่เกิน {to_thai_digits(LINE_MAX_IMAGES)} หน้า — "
+                "กดเอาหน้าอื่นออกก่อน", parent=self.preview_win)
+            return
+        else:
+            chosen.add(n)
+        self.line_pick = sorted(chosen)
+        self._refresh_line_buttons()
 
     def on_drag_start(self, event):
         items = self.canvas.find_withtag("current")
@@ -1489,6 +1640,7 @@ class SarabanApp(tk.Tk):
             self.preview_win.destroy()
         except Exception:
             pass
+        self._release_preview()
         saved = self._mark_history_skip(book_id)
         if book_id and saved:
             self.set_status("🚫 ไม่รับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)")
@@ -1498,6 +1650,13 @@ class SarabanApp(tk.Tk):
             self.set_status("🚫 ยกเลิกเอกสารนำเข้าแล้ว")
         self._finish_job(job)
 
+    def _release_preview(self):
+        """ปิดหน้าต่างจัดเอกสารแล้ว ปล่อยภาพของเรื่องนี้ออกจากหน่วยความจำ (งานบันทึกถือสำเนาของตัวเองไว้)"""
+        self._page_tk = {}
+        self._orig_cache = {}
+        self.page_full = {}
+        self.page_layout = []
+
     # ==========================================
     # ๘. ตัดแบ่งหน้าและสร้าง PDF (Exporting)
     # ==========================================
@@ -1505,7 +1664,9 @@ class SarabanApp(tk.Tk):
         # อ่าน Tk variables บน UI thread ให้หมดก่อนส่งงานหนักไป background thread
         snapshot = {
             'doc': dict(self.doc_info),
-            'background': self.original_bg.copy(),
+            'pages': [dict(p) for p in self.page_layout],
+            'page_full': dict(self.page_full),     # หน้าแรก/หน้าลายเซ็นตามที่ย่อ/เลื่อนเนื้อหาไว้
+            'line_pages': list(self._line_pages()),
             'stamp_pct': self.stamp_pct.get(),
             'stamp_x': self.stamp_orig_x,
             'stamp_y': self.stamp_orig_y,
@@ -1516,11 +1677,10 @@ class SarabanApp(tk.Tk):
                 'draw_bg': box['draw_bg'].get(),
                 'draw_border': box['draw_border'].get(),
             } for box in self.kasien_boxes],
-            'W': self.W, 'page_top': self.page_top, 'p1_h': self.p1_h,
-            'psig_h': self.psig_h, 'gap': self.gap,
-            'blank_start_y': self.blank_start_y, 'blank_h': self.blank_h,
+            'W': self.W,
         }
         self.preview_win.destroy()
+        self._release_preview()
         self.set_status("กำลังประมวลผลและสร้างไฟล์...")
         threading.Thread(target=self.finalize_thread, args=(snapshot,), daemon=True).start()
 
@@ -1542,58 +1702,64 @@ class SarabanApp(tk.Tk):
                 store.get_store().mark_registered(doc['book_id'], doc['receipt_no'])
                 history_marked = True
 
-            final_bg = snapshot['background'].copy()
+            # ตรายาง + กล่องคำเกษียณ พร้อมตำแหน่งบนผืนที่เรียงหน้าต่อกันลงมา
             stamp_rgba = render_transparent_stamp(doc['receipt_no'], snapshot['stamp_pct'])
-            final_bg.paste(
-                stamp_rgba, (int(snapshot['stamp_x']), int(snapshot['stamp_y'])), stamp_rgba)
-            # จดตำแหน่งแนวตั้งของทุกชิ้น ไว้หาว่าลงเกษียณถึงหน้าไหน (ส่งรูปเข้า LINE ถึงหน้านั้น)
-            item_spans = [(snapshot['stamp_y'], stamp_rgba.height)]
-
-            has_blank_page = False
+            items = [(stamp_rgba, snapshot['stamp_x'], snapshot['stamp_y'])]
             for box in snapshot['boxes']:
                 max_w_orig = max(10, int(snapshot['W'] * 0.42 * box['wrap_pct'] / 100.0))
                 kasien_rgba = render_transparent_kasien(
                     box['text'], max_w_orig, box['pct'], box['indent_pct'],
                     box['draw_bg'], box['draw_border'])
-                final_bg.paste(kasien_rgba, (int(box['x']), int(box['y'])), kasien_rgba)
-                item_spans.append((box['y'], kasien_rgba.height))
-                if box['y'] + kasien_rgba.height > snapshot['blank_start_y']:
-                    has_blank_page = True
+                items.append((kasien_rgba, box['x'], box['y']))
 
-            p1_path = self._job_path(job, "p1.pdf")
-            psig_path = self._job_path(job, "psig.pdf")
-            blank_path = self._job_path(job, "blank.pdf")
-            p1_crop = final_bg.crop((
-                20, snapshot['page_top'], 20 + snapshot['W'],
-                snapshot['page_top'] + snapshot['p1_h']))
-            save_image_as_pdf(p1_crop, p1_path, dpi=self.A4_DPI)
+            # หน้าไหนมีของวางทับ (ชิ้นที่คร่อมสองหน้านับทั้งสองหน้า) ต้องใช้หน้าตามที่เห็นบนจอ
+            # หน้าแรกกับหน้าที่มีลายเซ็นผู้ส่งใช้ฉบับบนจอเสมอ เพราะอาจย่อ/เลื่อนเนื้อหาไว้
+            sig_page, total = doc['sig_page'], doc['total_pages']
+            pages = snapshot['pages']
+            blank_no = total + 1
+            used = pages_with_items([(y, img.height) for img, x, y in items],
+                                    [(p['y'], p['h'], p['n']) for p in pages])
+            redo = {1, sig_page} | used
+            has_blank_page = blank_no in used
 
-            if snapshot['psig_h'] > 0:
-                psig_top = snapshot['page_top'] + snapshot['p1_h'] + snapshot['gap']
-                psig_crop = final_bg.crop((
-                    20, psig_top, 20 + snapshot['W'], psig_top + snapshot['psig_h']))
-                save_image_as_pdf(psig_crop, psig_path, dpi=self.A4_DPI)
-            if has_blank_page:
-                blank_crop = final_bg.crop((
-                    20, snapshot['blank_start_y'], 20 + snapshot['W'],
-                    snapshot['blank_start_y'] + snapshot['blank_h']))
-                save_image_as_pdf(blank_crop, blank_path, dpi=self.A4_DPI)
+            def compose(p):
+                """หน้านี้ตามที่เห็นบนจอ: ภาพหน้า + ตรายาง/คำเกษียณส่วนที่ทับหน้านี้"""
+                if p['n'] == blank_no:
+                    page = Image.new('RGB', (p['w'], p['h']), 'white')
+                elif p['n'] in snapshot['page_full']:
+                    page = snapshot['page_full'][p['n']].copy()
+                else:
+                    page = Image.open(doc['page_paths'][p['n']]).convert('RGB')
+                for img, x, y in items:
+                    page.paste(img, (int(x) - 20, int(y) - p['y']), img)
+                return page
+
+            page_pdfs, page_imgs = {}, {}
+            for p in pages:
+                if p['n'] not in redo:
+                    continue
+                img = compose(p)
+                page_pdfs[p['n']] = self._job_path(job, f"p{p['n']}.pdf")
+                save_image_as_pdf(img, page_pdfs[p['n']], dpi=self.A4_DPI)
+                if p['n'] in snapshot['line_pages']:
+                    page_imgs[p['n']] = img          # เก็บไว้ส่ง LINE (ไม่เกิน ๔ หน้า)
 
             merger = PdfMerger()
             try:
-                sig_page, total = doc['sig_page'], doc['total_pages']
-                merger.append(p1_path)
-                if sig_page == 1:
-                    if total > 1:
-                        merger.append(doc['pdf_path'], pages=(1, total))
-                else:
-                    if sig_page > 2:
-                        merger.append(doc['pdf_path'], pages=(1, sig_page - 1))
-                    merger.append(psig_path)
-                    if total > sig_page:
-                        merger.append(doc['pdf_path'], pages=(sig_page, total))
+                # หน้าที่วางของ = ฉบับใหม่ / หน้าอื่น = หน้าเดิมจาก PDF (ต่อกันเป็นช่วงทีเดียว)
+                run = None
+                for n in range(1, total + 1):
+                    if n in page_pdfs:
+                        if run:
+                            merger.append(doc['pdf_path'], pages=run)
+                            run = None
+                        merger.append(page_pdfs[n])
+                    else:
+                        run = (run[0], n) if run else (n - 1, n)
+                if run:
+                    merger.append(doc['pdf_path'], pages=run)
                 if has_blank_page:
-                    merger.append(blank_path)
+                    merger.append(page_pdfs[blank_no])
 
                 today_str = now_th().strftime("%Y-%m-%d")
                 save_folder = os.path.join(OUTPUT_ROOT, today_str)
@@ -1609,23 +1775,15 @@ class SarabanApp(tk.Tk):
 
             # LINE เป็นงานเสริม ความล้มเหลวตรงนี้ต้องไม่ย้อนสถานะทะเบียน/ไฟล์
             try:
-                # ส่งรูปหน้าแรกถึงหน้าที่ลงเกษียณไว้ (กติกาเดียวกับหน้าเว็บ — core.line_pages)
-                # ผืนตัวอย่างเรียงลงมา: หน้า ๑ / หน้าที่มีลายเซ็นผู้ส่ง / หน้ากระดาษเปล่า
-                sig_page, total = doc['sig_page'], doc['total_pages']
-                page_spans = [(snapshot['page_top'], snapshot['p1_h'], 1)]
-                page_imgs = {1: p1_crop}
-                if snapshot['psig_h'] > 0:
-                    page_spans.append((snapshot['page_top'] + snapshot['p1_h'] + snapshot['gap'],
-                                       snapshot['psig_h'], sig_page))
-                    page_imgs[sig_page] = psig_crop
-                if has_blank_page:
-                    page_spans.append((snapshot['blank_start_y'], snapshot['blank_h'], total + 1))
-                    page_imgs[total + 1] = blank_crop
-                pages = line_pages(max(pages_with_items(item_spans, page_spans) | {1}))
+                # หน้าที่เลือกไว้บนจอ (เริ่มต้น = หน้าแรกถึงหน้าที่ลงเกษียณ กติกาเดียวกับหน้าเว็บ)
+                # หน้ากระดาษเปล่าส่งได้เฉพาะตอนมีของวางไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
+                pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page)
                 img_urls = []
-                for n in pages:
+                for n in pages_to_send:
                     img = page_imgs.get(n)
-                    if img is None:          # หน้าระหว่างกลางที่ไม่มีอะไรวาง ใช้หน้าเดิมจาก PDF
+                    if img is None and n in doc['page_paths']:
+                        img = Image.open(doc['page_paths'][n])
+                    elif img is None:          # หน้าเกินที่แสดงบนจอ (เอกสารหนามาก) ดึงจาก PDF
                         img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
                     jpg = self._job_path(job, f"line{n}.jpg")
                     img.convert('RGB').save(jpg, "JPEG")
@@ -1649,8 +1807,9 @@ class SarabanApp(tk.Tk):
                     f"⚠️คำเกษียนหนังสือ:{ai_text_line}\n"
                     f"{doc['attach']}")
                 if send_line_with_image(msg, img_urls):
-                    sent, want = len(img_urls), len(pages)
+                    sent, want = len(img_urls), len(pages_to_send)
                     self.after(0, lambda s=sent, w=want: self.log(
+                        "ส่งเข้ากลุ่ม LINE แล้ว (ข้อความอย่างเดียว ไม่แนบรูป)" if w == 0 else
                         f"ส่งเข้ากลุ่ม LINE แล้ว ({s} รูป)" if s == w else
                         f"⚠️ ส่งเข้ากลุ่ม LINE แล้ว แต่อัปรูปได้ {s} จาก {w} หน้า"))
                 else:
