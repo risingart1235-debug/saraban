@@ -30,7 +30,7 @@ from core import (
     find_stamp_pos, find_kasien_pos,
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
-    format_scraped_date, get_next_receipt_no,
+    format_scraped_date, get_next_receipt_no, line_pages,
     upload_to_imgbb, send_line_with_image, PdfMerger,
 )
 
@@ -208,7 +208,6 @@ def contained_path(root: str, *parts: str):
 # LINE เข้าไม่ถึง — public_base_url() จะว่าง แล้วโค้ดถอยไปใช้ imgbb เอง
 _LINE_IMG_DIR = core._w("_lineimg")
 _LINE_IMG_KEEP = 120           # เก็บรูปล่าสุดเท่านี้ เกินแล้วลบตัวเก่าทิ้ง (เรื่องละไม่เกิน ๔ รูป)
-LINE_MAX_IMAGES = 4            # ข้อความ ๑ + รูป ๔ = ๕ ชิ้น เต็มเพดานต่อการส่งหนึ่งครั้งของ LINE
 _line_images = {}              # โทเคน -> ที่อยู่ไฟล์
 
 
@@ -244,18 +243,6 @@ def publish_line_image(src_path: str) -> str:
             except OSError:
                 pass
     return f"{base}/api/line-image/{token}.jpg"
-
-
-def line_pages(last_page: int) -> list:
-    """เลขหน้าที่จะส่งรูปเข้า LINE: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้
-
-    เกษียณหน้า ๒ ส่ง ๒ หน้า หน้า ๓ ส่ง ๓ หน้า คนในกลุ่มจะได้เห็นคำเกษียณด้วย
-    ไม่ใช่เห็นแค่หน้าแรกที่มีตรายาง — ไกลกว่าเพดาน ๔ รูป ส่งหน้าแรก (ตรายาง)
-    กับหน้าท้ายๆ จนถึงหน้าที่ลงเกษียณ
-    """
-    if last_page <= LINE_MAX_IMAGES:
-        return list(range(1, last_page + 1))
-    return [1] + list(range(last_page - LINE_MAX_IMAGES + 2, last_page + 1))
 
 
 def line_image_path(token: str) -> str:

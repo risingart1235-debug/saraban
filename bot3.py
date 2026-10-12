@@ -1546,6 +1546,8 @@ class SarabanApp(tk.Tk):
             stamp_rgba = render_transparent_stamp(doc['receipt_no'], snapshot['stamp_pct'])
             final_bg.paste(
                 stamp_rgba, (int(snapshot['stamp_x']), int(snapshot['stamp_y'])), stamp_rgba)
+            # จดตำแหน่งแนวตั้งของทุกชิ้น ไว้หาว่าลงเกษียณถึงหน้าไหน (ส่งรูปเข้า LINE ถึงหน้านั้น)
+            item_spans = [(snapshot['stamp_y'], stamp_rgba.height)]
 
             has_blank_page = False
             for box in snapshot['boxes']:
@@ -1554,13 +1556,13 @@ class SarabanApp(tk.Tk):
                     box['text'], max_w_orig, box['pct'], box['indent_pct'],
                     box['draw_bg'], box['draw_border'])
                 final_bg.paste(kasien_rgba, (int(box['x']), int(box['y'])), kasien_rgba)
+                item_spans.append((box['y'], kasien_rgba.height))
                 if box['y'] + kasien_rgba.height > snapshot['blank_start_y']:
                     has_blank_page = True
 
             p1_path = self._job_path(job, "p1.pdf")
             psig_path = self._job_path(job, "psig.pdf")
             blank_path = self._job_path(job, "blank.pdf")
-            final_jpg = self._job_path(job, "page1_final.jpg")
             p1_crop = final_bg.crop((
                 20, snapshot['page_top'], 20 + snapshot['W'],
                 snapshot['page_top'] + snapshot['p1_h']))
@@ -1607,8 +1609,29 @@ class SarabanApp(tk.Tk):
 
             # LINE เป็นงานเสริม ความล้มเหลวตรงนี้ต้องไม่ย้อนสถานะทะเบียน/ไฟล์
             try:
-                p1_crop.convert('RGB').save(final_jpg, "JPEG")
-                img_url = upload_to_imgbb(final_jpg)
+                # ส่งรูปหน้าแรกถึงหน้าที่ลงเกษียณไว้ (กติกาเดียวกับหน้าเว็บ — core.line_pages)
+                # ผืนตัวอย่างเรียงลงมา: หน้า ๑ / หน้าที่มีลายเซ็นผู้ส่ง / หน้ากระดาษเปล่า
+                sig_page, total = doc['sig_page'], doc['total_pages']
+                page_spans = [(snapshot['page_top'], snapshot['p1_h'], 1)]
+                page_imgs = {1: p1_crop}
+                if snapshot['psig_h'] > 0:
+                    page_spans.append((snapshot['page_top'] + snapshot['p1_h'] + snapshot['gap'],
+                                       snapshot['psig_h'], sig_page))
+                    page_imgs[sig_page] = psig_crop
+                if has_blank_page:
+                    page_spans.append((snapshot['blank_start_y'], snapshot['blank_h'], total + 1))
+                    page_imgs[total + 1] = blank_crop
+                pages = line_pages(max(pages_with_items(item_spans, page_spans) | {1}))
+                img_urls = []
+                for n in pages:
+                    img = page_imgs.get(n)
+                    if img is None:          # หน้าระหว่างกลางที่ไม่มีอะไรวาง ใช้หน้าเดิมจาก PDF
+                        img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
+                    jpg = self._job_path(job, f"line{n}.jpg")
+                    img.convert('RGB').save(jpg, "JPEG")
+                    url = upload_to_imgbb(jpg)
+                    if url:
+                        img_urls.append(url)
                 kasien_parts = [
                     " ".join(box['text'].split()) for box in snapshot['boxes'][:2]
                     if box['text'].strip()]
@@ -1625,8 +1648,11 @@ class SarabanApp(tk.Tk):
                     f"🌟หนังสือลงวันที่ : {formatted_line_date}\n"
                     f"⚠️คำเกษียนหนังสือ:{ai_text_line}\n"
                     f"{doc['attach']}")
-                if send_line_with_image(msg, img_url):
-                    self.after(0, lambda: self.log("ส่งเข้ากลุ่ม LINE แล้ว"))
+                if send_line_with_image(msg, img_urls):
+                    sent, want = len(img_urls), len(pages)
+                    self.after(0, lambda s=sent, w=want: self.log(
+                        f"ส่งเข้ากลุ่ม LINE แล้ว ({s} รูป)" if s == w else
+                        f"⚠️ ส่งเข้ากลุ่ม LINE แล้ว แต่อัปรูปได้ {s} จาก {w} หน้า"))
                 else:
                     self.after(0, lambda: self.log(
                         "⚠️ ส่ง LINE ไม่สำเร็จ (PDF และทะเบียนบันทึกแล้ว)"))

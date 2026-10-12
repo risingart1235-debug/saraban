@@ -10,19 +10,43 @@ import unittest
 from unittest.mock import patch
 
 import core
-from web import docmode
 
 
 class LinePagesTests(unittest.TestCase):
+    """one rule for the web app and the desktop program (both use core.line_pages)"""
+
     def test_send_every_page_up_to_the_endorsement(self):
-        self.assertEqual(docmode.line_pages(1), [1])
-        self.assertEqual(docmode.line_pages(2), [1, 2])
-        self.assertEqual(docmode.line_pages(3), [1, 2, 3])
-        self.assertEqual(docmode.line_pages(4), [1, 2, 3, 4])
+        self.assertEqual(core.line_pages(1), [1])
+        self.assertEqual(core.line_pages(2), [1, 2])
+        self.assertEqual(core.line_pages(3), [1, 2, 3])
+        self.assertEqual(core.line_pages(4), [1, 2, 3, 4])
 
     def test_further_than_four_pages_keeps_the_stamp_page_and_the_endorsement_page(self):
-        self.assertEqual(docmode.line_pages(5), [1, 3, 4, 5])
-        self.assertEqual(docmode.line_pages(7), [1, 5, 6, 7])
+        self.assertEqual(core.line_pages(5), [1, 3, 4, 5])
+        self.assertEqual(core.line_pages(7), [1, 5, 6, 7])
+
+
+class DesktopPagesWithItemsTests(unittest.TestCase):
+    """the desktop program stacks page 1, the sender's signature page and a blank page
+    on one canvas; where the stamp/endorsement boxes sit says how far to send"""
+
+    # page 1 at y=70 (h 2339), gap 70, signature page 3 at y=2479, blank page 6 at y=4888
+    PAGES = [(70, 2339, 1), (2479, 2339, 3), (4888, 3307, 6)]
+
+    def test_endorsement_on_the_signature_page(self):
+        items = [(120, 300), (2900, 250)]                     # stamp on 1, kasien on page 3
+        self.assertEqual(core.pages_with_items(items, self.PAGES), {1, 3})
+        self.assertEqual(core.line_pages(max(core.pages_with_items(items, self.PAGES))), [1, 2, 3])
+
+    def test_box_straddling_two_pages_counts_both(self):
+        self.assertEqual(core.pages_with_items([(2300, 300)], self.PAGES), {1, 3})
+
+    def test_box_left_in_the_gap_between_pages_counts_nowhere(self):
+        self.assertEqual(core.pages_with_items([(2415, 50)], self.PAGES), set())
+
+    def test_blank_page_only_counts_when_it_is_part_of_the_layout(self):
+        self.assertEqual(core.pages_with_items([(5000, 200)], self.PAGES), {6})
+        self.assertEqual(core.pages_with_items([(5000, 200)], self.PAGES[:2]), set())
 
 
 class SendLineTests(unittest.TestCase):

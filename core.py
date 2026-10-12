@@ -410,6 +410,32 @@ def upload_to_imgbb(image_path):
         print(f"อัปรูปขึ้น imgbb ไม่สำเร็จ: {type(ex).__name__}: {ex}")
         return None
 
+LINE_MAX_IMAGES = 4    # ข้อความ ๑ + รูป ๔ = ๕ ชิ้น เต็มเพดานต่อการส่งหนึ่งครั้งของ LINE
+
+
+def line_pages(last_page):
+    """เลขหน้าที่จะส่งรูปเข้า LINE: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้
+
+    เกษียณหน้า ๒ ส่ง ๒ หน้า หน้า ๓ ส่ง ๓ หน้า คนในกลุ่มจะได้เห็นคำเกษียณด้วย
+    ไม่ใช่เห็นแค่หน้าแรกที่มีตรายาง — ไกลกว่าเพดาน ๔ รูป ส่งหน้าแรก (ตรายาง)
+    กับหน้าท้ายๆ จนถึงหน้าที่ลงเกษียณ (ใช้ทั้งหน้าเว็บและโปรแกรมบนคอม)
+    """
+    if last_page <= LINE_MAX_IMAGES:
+        return list(range(1, last_page + 1))
+    return [1] + list(range(last_page - LINE_MAX_IMAGES + 2, last_page + 1))
+
+
+def pages_with_items(item_spans, page_spans):
+    """เลขหน้าจริงที่มีของวางทับอยู่ — สำหรับผืนตัวอย่างที่เรียงหน้าต่อกันลงมา (โปรแกรมบนคอม)
+
+    item_spans: [(บนสุด, ความสูง)] ของตรายาง/กล่องคำเกษียณ
+    page_spans: [(บนสุด, ความสูง, เลขหน้าจริง)] ของแต่ละหน้าบนผืน
+    ชิ้นไหนคร่อมสองหน้า นับทั้งสองหน้า ชิ้นที่อยู่ในช่องว่างระหว่างหน้าไม่นับ
+    """
+    return {n for top, h in item_spans for y0, ph, n in page_spans
+            if top < y0 + ph and top + h > y0}
+
+
 def send_line_with_image(text, image_url=None):
     """ส่งข้อความ + รูป เข้ากลุ่ม LINE — image_url เป็น URL เดียว หรือรายการ URL ก็ได้
 
