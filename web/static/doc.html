@@ -300,6 +300,12 @@ function build() {
     for (const b of D.boxes) if (b.indent_pct !== pref) { b.indent_pct = pref; renderBox(b); }
   }
   select(D.boxes[0] ? D.boxes[0].id : 'stamp');
+  // บันทึกไม่ผ่านเพราะเซิร์ฟเวอร์เพิ่งเริ่มใหม่ — ใส่สิ่งที่จัดไว้ก่อนหน้านั้นคืนให้
+  const v = takeDraft();
+  if (v) restoreDraft(v).then((ok) => {
+    if (ok) show('ok', '♻️ ใส่คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ก่อนเซิร์ฟเวอร์เริ่มใหม่คืนให้แล้ว ' +
+                       '— ตรวจดูแล้วกดบันทึกได้เลย');
+  }).catch(() => {});
 }
 
 function mkPage(i, name, png, w, h, pdfNo) {
@@ -580,11 +586,14 @@ $('sigAdd').onclick = async () => {
     o.left_cm = src.left_cm + (src.w - o.w) / 2 / D.cm;
     o.top_cm = src.top_cm + src.h / D.cm + 0.2;
   }
-  D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
-  $('sigDateVal').textContent = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
-  sigMsg(); showSigCard(); select('sig'); showLine();
+  placeSig(o); select('sig');
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
+function placeSig(o) {
+  D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
+  $('sigDateVal').textContent = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
+  sigMsg(); showSigCard(); showLine();
+}
 
 let sgt = null;
 function reSig(delay = 400) {
@@ -688,14 +697,115 @@ function payload() {
                             size_pct: g.size_pct } : null };
 }
 
+// ---------- สิ่งที่จัดไว้บนจอ เผื่อเซิร์ฟเวอร์เริ่มใหม่ระหว่างทาง ----------
+// Render ฟรีเริ่มเครื่องใหม่เองได้ (deploy ใหม่ / หลับแล้วตื่น / หน่วยความจำเต็ม) เรื่องที่เปิดค้างไว้
+// ในเซิร์ฟเวอร์หาย ต้องให้ AI อ่านใหม่ — เก็บคำเกษียณ ตำแหน่ง และลายเซ็นไว้ในเครื่องก่อน
+// เปิดเรื่องเดิมอีกครั้งแล้วใส่คืนให้ ไม่ต้องพิมพ์ ลาก หรือแทรกลายเซ็นใหม่ทั้งหมด
+const DRAFT_HOURS = 12;
+function draftKey() { return 'saraban.draft.' + (D && D.book_id ? 'b' + D.book_id : 'j' + JOB); }
+function keepDraft() {
+  try { localStorage.setItem(draftKey(), JSON.stringify({ at: Date.now(), pick: linePick, ...payload() })); }
+  catch (e) {}
+}
+function dropDraft() { try { localStorage.removeItem(draftKey()); } catch (e) {} }
+function takeDraft() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(draftKey()) || 'null'); } catch (e) {}
+  dropDraft();
+  return v && Date.now() - v.at < DRAFT_HOURS * 3600e3 ? v : null;
+}
+
+async function restoreDraft(v) {
+  const pg = (n) => Math.max(0, Math.min(Math.floor(+n) || 0, D.pages.length));  // ท้ายสุด = หน้ากระดาษเปล่า
+  // วันที่/เวลาลงรับ ใส่คืนเฉพาะที่จัดไว้วันนี้ ข้ามวันแล้วใช้ของวันนี้ตามปกติ
+  if (new Date(v.at).toDateString() === new Date().toDateString()) {
+    if (v.date) $('d').value = v.date;
+    if (v.time) $('t').value = v.time;
+  }
+  const s = v.stamp || {};
+  Object.assign(D.stamp, { page: pg(s.page), left_cm: +s.left_cm || 0, top_cm: +s.top_cm || 0,
+                           size_pct: Math.max(20, Math.min(300, +s.size_pct || D.stamp.size_pct)) });
+  pageEl(D.stamp.page).appendChild(D.stamp._el);
+  $('ssv').textContent = D.stamp.size_pct + '%';
+  await reStamp();
+
+  const boxes = [];
+  for (const [k, x] of (v.boxes || []).entries()) {
+    const b = { id: 'b' + (k + 1), text: String(x.text || ''), page: pg(x.page),
+                left_cm: +x.left_cm || 0, top_cm: +x.top_cm || 0,
+                size_pct: +x.size_pct || 100, wrap_pct: +x.wrap_pct || 100,
+                indent_pct: x.indent_pct === 0 ? 0 : 100, bg: !!x.bg, border: !!x.border };
+    const r = await fetch(`/api/doc/${JOB}/box`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+    if (!r.ok) return false;        // วาดไม่ได้ ใช้ที่ AI ร่างมาใหม่ไปก่อน
+    boxes.push(Object.assign(b, await readJSON(r)));
+  }
+  if (boxes.length) {
+    for (const b of D.boxes) b._el.remove();
+    D.boxes = boxes;
+    for (const b of boxes) { addOverlay(b.id, b); clamp(b); posOverlay(b); }
+  }
+  if (v.signature && !D.sig) {
+    const o = { page: pg(v.signature.page), left_cm: +v.signature.left_cm || 0,
+                top_cm: +v.signature.top_cm || 0, size_pct: +v.signature.size_pct || sigSize };
+    try { await renderSig(o); placeSig(o); } catch (e) { /* ลบรูปลายเซ็นไปแล้ว ก็ข้าม */ }
+  }
+  linePick = Array.isArray(v.pick) ? v.pick : null;
+  showLine();
+  select(D.boxes[0] ? D.boxes[0].id : 'stamp');
+  return true;
+}
+
+// บันทึกไม่ผ่านเพราะเซิร์ฟเวอร์เพิ่งเริ่มใหม่หรือเปล่า — ดูว่างานนี้ยังอยู่ไหม
+// เรื่องจากมือถือถูกกู้กลับมาเป็น "รอเปิดอ่าน" (ต้องให้ AI อ่านใหม่) ส่วนเรื่องอื่นหายไปเลย
+async function jobLost() {
+  try {
+    const r = await fetch('/api/doc/' + JOB);
+    if (r.status === 404) return 'gone';
+    return r.ok && (await readJSON(r)).status === 'stored' ? 'reset' : '';
+  } catch (e) { return ''; }
+}
+
+async function saveFailed(status, message) {
+  const btn = (href, label, extra = '') =>
+    `<a class="btn" href="${href}" ${extra} style="margin-top:10px;text-decoration:none;text-align:center;line-height:28px">${label}</a>`;
+  if (status === 401) {
+    // คุกกี้หมดอายุ (๑๒ ชม.) หรือเปลี่ยนรหัสผ่านจากที่อื่น — งานบนเซิร์ฟเวอร์ยังอยู่ ล็อกอินแล้วกดซ้ำได้
+    show('err', 'หลุดจากระบบ — เข้าสู่ระบบใหม่ในแท็บใหม่ แล้วกลับมากดบันทึกที่หน้านี้อีกครั้ง ' +
+      '(สิ่งที่จัดไว้บนจอนี้ยังอยู่ครบ)' + btn('/login', '🔑 เข้าสู่ระบบ (แท็บใหม่)', 'target="_blank"'));
+    return;
+  }
+  // งานหาย = 404 / ถูกกู้กลับมาเป็น "รอเปิดอ่าน" = 409 ยังไม่พร้อมบันทึก (กรณีอื่นไม่ต้องถามซ้ำ)
+  const lost = status === 404 || status === 409 ? await jobLost() : '';
+  if (lost === 'reset') {
+    keepDraft();
+    show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ เรื่องนี้ต้องให้ AI อ่านใหม่ก่อนจึงจะบันทึกได้<br>' +
+      'คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ เก็บไว้ให้แล้ว — โหลดเสร็จจะใส่คืนให้เอง' +
+      btn(esc(location.pathname + location.search), '🔄 โหลดเรื่องนี้ใหม่'));
+  } else if (lost === 'gone' && D.book_id) {
+    keepDraft();
+    show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ เรื่องที่เปิดค้างไว้จึงหายไป<br>' +
+      'เปิดเรื่องนี้จากรายการอีกครั้ง — คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้จะใส่คืนให้เอง' +
+      btn(backUrl(), '⬅️ กลับไปที่รายการ'));
+  } else if (lost === 'gone') {
+    show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ ไฟล์ที่อัปโหลดไว้จึงหายไป — กรุณาอัปโหลดไฟล์นี้อีกครั้ง' +
+      btn('/', 'กลับหน้าแรก'));
+  } else {
+    show('err', 'บันทึกไม่สำเร็จ: ' + esc(message));
+  }
+}
+
 $('save').onclick = async () => {
   const b = $('save'); b.disabled = true; b.textContent = 'กำลังสร้างไฟล์...';
+  let status = 0;
   try {
     const r = await fetch(`/api/doc/${JOB}/save`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload()) });
+    status = r.status;
     const d = await readJSON(r);
     if (!d.ok) throw new Error(d.detail || 'บันทึกไม่สำเร็จ');
+    dropDraft();
     $('app').classList.add('hidden'); $('savebar').classList.add('hidden');
     show('ok', `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>` +
       (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +
@@ -710,16 +820,25 @@ $('save').onclick = async () => {
       `<a class="btn" href="${backUrl()}" style="margin-top:8px;text-decoration:none;text-align:center;line-height:28px">${backLabel()}</a>` +
       (D.book_id ? `<a class="btn grey" href="/" style="margin-top:8px;text-decoration:none;text-align:center;line-height:24px">กลับหน้าแรก</a>` : ''));
   } catch (e) {
-    show('err', 'บันทึกไม่สำเร็จ: ' + e.message);
     b.disabled = false; b.textContent = '✅ ยืนยัน & สร้างไฟล์';
+    await saveFailed(status, e.message);
   }
 };
 
 $('skip').onclick = async () => {
   if (!confirm('ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนและไม่ส่ง LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก')) return;
   await fetch(`/api/doc/${JOB}/skip`, { method: 'POST' });
+  dropDraft();
   location.href = backUrl();
 };
+
+// ---------- กันเซิร์ฟเวอร์หลับระหว่างจัดเอกสาร ----------
+// Render ฟรีหลับเองเมื่อไม่มีใครเรียกครบ ๑๕ นาที ตื่นมาเรื่องที่เปิดค้างไว้หายหมด
+// ระหว่างที่หน้านี้อยู่บนจอ ทักเซิร์ฟเวอร์ทุก ๔ นาที (/healthz เบามาก ไม่แตะชีต)
+setInterval(() => {
+  if (D && !$('app').classList.contains('hidden') && document.visibilityState === 'visible')
+    fetch('/healthz', { cache: 'no-store' }).catch(() => {});
+}, 4 * 60 * 1000);
 
 if (!JOB) show('err', 'ไม่ได้ระบุงาน — <a href="/">กลับหน้าแรก</a>');
 else poll();

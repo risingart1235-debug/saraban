@@ -281,14 +281,13 @@ class FakeUserStore:
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         self.st = FakeUserStore()
-        users = {"ครูเอ": {"status": "approved"}, "bee": {"status": "approved"}}
+        users = {"ครูเอ": {"status": "approved", "salt": "a"}, "bee": {"status": "approved", "salt": "b"}}
         for p in (patch("store.get_store", return_value=self.st),
-                  patch.object(webmain, "load_users", return_value=users),
-                  patch.dict(webmain._sessions, {"tokA": "ครูเอ", "tokB": "bee"})):
+                  patch.object(webmain, "load_users", return_value=users)):
             p.start()
             self.addCleanup(p.stop)
-        self.a = TestClient(webmain.app, cookies={"session": "tokA"})
-        self.b = TestClient(webmain.app, cookies={"session": "tokB"})
+        self.a = TestClient(webmain.app, cookies={"session": webmain.make_session("ครูเอ", users["ครูเอ"])})
+        self.b = TestClient(webmain.app, cookies={"session": webmain.make_session("bee", users["bee"])})
 
     def upload(self, client, data):
         return client.post("/api/me/signature", files={"file": ("sig.jpg", data, "image/jpeg")})

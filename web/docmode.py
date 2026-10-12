@@ -285,6 +285,7 @@ def _backup_to_drive(job: dict, pdf: str):
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
                                             "sender", "emoji", "attach", "redo_no", "user")}
             meta["created"] = job["created"].isoformat()
+            meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             fid = _dr.queue_put(pdf, meta)
             if fid:
                 _set(job, drive_file_id=fid)
@@ -359,7 +360,11 @@ def _restore_from_drive() -> int:
             fields = {k: meta.get(k) or d for k, d in (
                 ("doc_no", "-"), ("doc_title", "-"), ("doc_date", "-"),
                 ("sender", "-"), ("emoji", "🔵"), ("attach", ""))}
-            job = _new_job_locked(meta.get("user") or "phone", source="phone",
+            # เลขงานเดิม — ลิงก์ /doc?job=... ที่เปิดค้างไว้ก่อนเซิร์ฟเวอร์เริ่มใหม่ยังใช้ได้
+            # (กดโหลดใหม่แล้ว AI อ่านเรื่องเดิมให้ ไม่ใช่ "ไม่พบงานนี้")
+            old_id = str(meta.get("job_id") or "")
+            jid = old_id if re.fullmatch(r"[0-9a-f]{32}", old_id) and old_id not in _jobs else None
+            job = _new_job_locked(meta.get("user") or "phone", jid=jid, source="phone",
                                   status="stored", step="รอเปิดอ่าน",
                                   book_id=bid, redo_no=meta.get("redo_no") or None,
                                   drive_file_id=item["id"], **fields)
@@ -390,8 +395,8 @@ def _cleanup():
             shutil.rmtree(v.get("dir", ""), ignore_errors=True)
 
 
-def _new_job_locked(user: str, **initial) -> dict:
-    jid = uuid.uuid4().hex
+def _new_job_locked(user: str, jid: str = None, **initial) -> dict:
+    jid = jid or uuid.uuid4().hex
     d = os.path.join(core._w("_jobs"), jid)
     os.makedirs(d, exist_ok=True)
     job = {"id": jid, "user": user, "created": now_th(),

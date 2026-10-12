@@ -12,8 +12,10 @@ import asyncio
 import copy
 import secrets
 import hashlib
+import hmac
 import tempfile
 import threading
+import time
 from datetime import datetime
 
 # ให้ import core.py ที่อยู่โฟลเดอร์แม่ได้
@@ -94,8 +96,101 @@ async def _json_errors(request: Request, exc: Exception):
 # ==========================================================
 # ๑. ผู้ใช้และการล็อกอิน
 # ==========================================================
-_sessions = {}                      # token -> ชื่อผู้ใช้
-_session_lock = threading.Lock()
+# คุกกี้ล็อกอิน = ชื่อผู้ใช้ + เวลาที่ล็อกอิน + ลายเซ็นกำกับด้วยกุญแจลับของเซิร์ฟเวอร์ (ปลอมไม่ได้)
+# เดิมจำไว้ในหน่วยความจำ (token -> ชื่อ) พอเซิร์ฟเวอร์เริ่มใหม่ ทั้งตอน deploy และตอน
+# Render ฟรีหลับแล้วตื่น ทุกคนหลุดหมดโดยไม่รู้ตัว คนที่เปิดหน้าจัดเอกสารค้างไว้
+# กดบันทึกแล้วขึ้น "กรุณาเข้าสู่ระบบก่อน" ทั้งที่เพิ่งใช้งานอยู่
+# ตอนนี้เซิร์ฟเวอร์ไม่ต้องจำอะไร เริ่มใหม่กี่รอบ คุกกี้เดิมก็ใช้ได้จนครบอายุ
+SESSION_SECONDS = 60 * 60 * 12
+
+
+def _session_key() -> bytes:
+    """กุญแจเซ็นคุกกี้ — ต้องได้ค่าเดิมทุกครั้งที่บูต ไม่งั้นเริ่มใหม่แล้วก็หลุดเหมือนเดิม
+
+    ๑. SARABAN_SESSION_SECRET ถ้าตั้งไว้
+    ๒. ความลับที่ตั้งไว้บน hosting อยู่แล้ว (กุญแจ service account ฯลฯ) แปลงเป็นกุญแจใหม่
+       ไม่ต้องไปตั้งตัวแปรเพิ่มบน Render และไม่ได้ใช้ความลับตัวจริงเซ็นตรงๆ
+       (ไม่ใช้โทเคนมือถือ เพราะโทเคนนั้นถูกคัดลอกไปไว้ในมือถือ ไม่ควรเป็นกุญแจเข้าเว็บได้)
+    ๓. เครื่องในโรงเรียน: สุ่มครั้งแรกแล้วเก็บเป็นไฟล์ไว้ใช้ต่อ
+    """
+    for name in ("SARABAN_SESSION_SECRET", "SARABAN_SA_JSON", "SARABAN_DRIVE_OAUTH",
+                 "SARABAN_GEMINI_API_KEY", "SARABAN_LINE_ACCESS_TOKEN"):
+        v = os.environ.get(name, "").strip()
+        if v:
+            return hmac.new(v.encode(), b"saraban login cookie", hashlib.sha256).digest()
+    path = core._w("session.key")
+    try:
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) >= 32:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+    except OSError:
+        pass          # เขียนไฟล์ไม่ได้ ใช้กุญแจสุ่มไปก่อน (เริ่มใหม่แล้วต้องล็อกอินใหม่ แบบเดิม)
+    return key
+
+
+_SESSION_KEY = _session_key()
+_logged_out = {}                    # คุกกี้ที่กดออกจากระบบแล้ว -> หมดอายุเมื่อไร
+_logout_lock = threading.Lock()
+
+
+def _session_sig(name: str, issued: int, nonce: str, salt: str) -> str:
+    # ใส่เกลือของรหัสผ่านด้วย — เปลี่ยนรหัสแล้วเกลือเปลี่ยน คุกกี้เก่าทุกใบของบัญชีนั้นใช้ไม่ได้ทันที
+    msg = "\n".join(("saraban-session", name, str(issued), nonce, salt)).encode()
+    mac = hmac.new(_SESSION_KEY, msg, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")
+
+
+def make_session(name: str, user: dict) -> str:
+    """ออกคุกกี้ล็อกอินใบใหม่ให้ผู้ใช้คนนี้
+
+    มีเลขสุ่มกำกับทุกใบ ล็อกอินพร้อมกันสองเครื่องในวินาทีเดียวกันจะได้คนละใบ
+    (ไม่งั้นกดออกจากระบบที่เครื่องหนึ่ง อีกเครื่องหลุดตามไปด้วย)
+    """
+    issued = int(time.time())
+    who = base64.urlsafe_b64encode(name.encode()).decode().rstrip("=")
+    nonce = secrets.token_urlsafe(8)
+    return f"{who}.{issued}.{nonce}.{_session_sig(name, issued, nonce, user.get('salt', ''))}"
+
+
+def session_user(token, users: dict):
+    """ชื่อเจ้าของคุกกี้ — None ถ้าปลอม หมดอายุ ออกจากระบบแล้ว เปลี่ยนรหัสแล้ว หรือบัญชีถูกลบ"""
+    try:
+        who, issued, nonce, sig = str(token or "").split(".")
+        name = base64.urlsafe_b64decode(who + "=" * (-len(who) % 4)).decode()
+        issued = int(issued)
+    except ValueError:
+        return None
+    if not -300 < time.time() - issued < SESSION_SECONDS:
+        return None
+    with _logout_lock:
+        if token in _logged_out:
+            return None
+    u = users.get(name)
+    # คำนวณลายเซ็นเสมอแม้ไม่มีชื่อนี้ เวลาตอบจะได้ไม่บอกว่าชื่อไหนมีอยู่จริง
+    expect = _session_sig(name, issued, nonce, u.get("salt", "") if u else "-")
+    return name if hmac.compare_digest(sig.encode(), expect.encode()) and u else None
+
+
+def _forget_session(token: str):
+    """ออกจากระบบ — คุกกี้ใบนี้ใช้ไม่ได้อีก แม้จะมีใครแอบเก็บไว้ (จำไว้จนกว่าจะหมดอายุเอง)"""
+    now = time.time()
+    with _logout_lock:
+        for t in [t for t, until in _logged_out.items() if until < now]:
+            del _logged_out[t]
+        _logged_out[token] = now + SESSION_SECONDS
+
+
+def _set_session_cookie(resp, token: str):
+    # httponly กัน JavaScript อ่านคุกกี้ / samesite=lax กัน CSRF ข้ามเว็บ
+    resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=SESSION_SECONDS)
 
 
 def _hash(password: str, salt: str) -> str:
@@ -230,14 +325,29 @@ def _login_ok(ip: str):
 
 def current_user(session: str = Cookie(default=None)) -> str:
     """ตัวกันหน้าที่ต้องล็อกอินก่อน"""
-    with _session_lock:
-        name = _sessions.get(session)
+    if not session:
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบก่อน")
+    try:
+        users = load_users(raise_on_error=True)
+    except StoreDown:
+        # ต่อ Google Sheets ไม่ได้ชั่วครู่ ไม่ได้หลุดจากระบบ — อย่าไล่ไปล็อกอินใหม่ให้งง
+        raise HTTPException(status_code=503,
+                            detail="เชื่อมต่อฐานข้อมูลผู้ใช้ไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง")
+    name = session_user(session, users)
     if not name:
         raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบก่อน")
-    u = load_users().get(name)
-    if not u or u.get("status", "approved") != "approved":
+    if users[name].get("status", "approved") != "approved":
         raise HTTPException(status_code=403, detail="บัญชีนี้ถูกระงับหรือยังไม่ได้รับอนุมัติ")
     return name
+
+
+def signed_in(session) -> str:
+    """ไว้กันหน้าเว็บ — ชื่อผู้ใช้ถ้าล็อกอินอยู่และบัญชียังใช้ได้ ไม่งั้น "" (พาไปหน้าล็อกอิน)"""
+    if not session:
+        return ""
+    users = load_users()
+    name = session_user(session, users)
+    return name if name and users[name].get("status", "approved") == "approved" else ""
 
 
 def current_admin(user: str = Depends(current_user)) -> str:
@@ -446,19 +556,16 @@ def do_login(request: Request, username: str = Form(...), password: str = Form(.
         _login_failed(ip)
         return JSONResponse({"ok": False, "error": reason}, status_code=401)
     _login_ok(ip)
-    token = secrets.token_urlsafe(32)
-    with _session_lock:
-        _sessions[token] = username
     resp = JSONResponse({"ok": True})
-    # httponly กัน JavaScript อ่านคุกกี้ / samesite=lax กัน CSRF ข้ามเว็บ
-    resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=60 * 60 * 12)
+    _set_session_cookie(resp, make_session(username, load_users().get(username, {})))
     return resp
 
 
 @app.post("/logout")
 def do_logout(session: str = Cookie(default=None)):
-    with _session_lock:
-        _sessions.pop(session, None)
+    # จำเฉพาะคุกกี้ที่ใช้ได้จริง กันใครยิงคุกกี้มั่วมาให้รายการนี้บวม
+    if session and session_user(session, load_users()):
+        _forget_session(session)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("session")
     return resp
@@ -466,17 +573,15 @@ def do_logout(session: str = Cookie(default=None)):
 
 @app.get("/", response_class=HTMLResponse)
 def home(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("index.html")
 
 
 @app.get("/stamp", response_class=HTMLResponse)
 def stamp_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("stamp.html")
 
 
@@ -485,8 +590,7 @@ def stamp_page(session: str = Cookie(default=None)):
 # ==========================================================
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        name = _sessions.get(session)
+    name = signed_in(session)
     if not name:
         return RedirectResponse("/login", status_code=302)
     if not is_admin(name):
@@ -521,14 +625,9 @@ async def api_change_password(request: Request, user: str = Depends(current_user
     u.pop("must_change", None)
     save_users(users)
 
-    # ตัด session เดิมทั้งหมดของบัญชีนี้ แล้วออกอันใหม่ให้คนที่เพิ่งเปลี่ยน
-    token = secrets.token_urlsafe(32)
-    with _session_lock:
-        for t in [t for t, n in _sessions.items() if n == user]:
-            _sessions.pop(t, None)
-        _sessions[token] = user
+    # คุกกี้เดิมทุกใบของบัญชีนี้ใช้ไม่ได้แล้วเพราะเกลือเปลี่ยน ออกใบใหม่ให้คนที่เพิ่งเปลี่ยน
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=60 * 60 * 12)
+    _set_session_cookie(resp, make_session(user, u))
     return resp
 
 
@@ -636,13 +735,8 @@ async def api_admin_set(request: Request, admin: str = Depends(current_admin)):
         users.pop(name)
     else:
         raise HTTPException(status_code=400, detail="คำสั่งไม่ถูกต้อง")
+    # ถูกระงับ/ลบแล้วหลุดทันทีเอง — ทุกคำขอตรวจสถานะบัญชีจากรายชื่อผู้ใช้ทุกครั้ง
     save_users(users)
-
-    # ถูกระงับ/ลบแล้ว ต้องเตะออกจากระบบทันที ไม่ให้ใช้ session เดิมต่อ
-    if action in ("reject", "delete"):
-        with _session_lock:
-            for tok in [t for t, n in _sessions.items() if n == name]:
-                _sessions.pop(tok, None)
     return {"ok": True}
 
 
@@ -785,9 +879,8 @@ def _spp_session_snapshot():
 
 @app.get("/doc", response_class=HTMLResponse)
 def doc_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("doc.html")
 
 
@@ -806,9 +899,8 @@ def api_spp_check(user: str = Depends(current_user)):
 
 @app.get("/news", response_class=HTMLResponse)
 def news_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("news.html")
 
 
@@ -1061,9 +1153,8 @@ def queue_page_moved():
 
 @app.get("/queue-old", response_class=HTMLResponse)
 def queue_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("queue.html")
 
 
@@ -1089,9 +1180,7 @@ def api_phone_queue(request: Request, session: str = Cookie(default=None)):
     รับได้ทั้งคุกกี้ล็อกอิน (หน้าเว็บเรียก) และโทเคนมือถือ (สคริปต์เรียกเช็กเอง
     ว่างานที่ส่งไปสถานะอะไร — จำเป็นตอนหาสาเหตุเวลางานไม่โผล่)
     """
-    with _session_lock:
-        ok = session in _sessions
-    if not ok:
+    if not signed_in(session):
         _check_phone_token(request)      # ไม่ใช่คนล็อกอิน ก็ต้องมีโทเคนที่ถูกต้อง
     return {"ok": True, "jobs": docmode.phone_queue()}
 
@@ -1258,9 +1347,8 @@ import store as _store_mod
 
 @app.get("/fix", response_class=HTMLResponse)
 def fix_page(session: str = Cookie(default=None)):
-    with _session_lock:
-        if session not in _sessions:
-            return RedirectResponse("/login", status_code=302)
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
     return _page("fix.html")
 
 

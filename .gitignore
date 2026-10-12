@@ -13,6 +13,7 @@ token.txt
 phone_config.json
 spp.txt
 signatures/
+session.key
 
 # ===== ข้อมูลราชการ / ไฟล์งาน =====
 history_ids.txt
