@@ -15,7 +15,6 @@ import queue
 import secrets
 import shutil
 import threading
-import time
 import traceback
 import unicodedata
 import uuid
@@ -217,15 +216,13 @@ def contained_path(root: str, *parts: str):
 # รูปหมดอายุเร็ว (ไม่ถึงชั่วโมง): เดิมเก็บรูปไว้แค่บนดิสก์ชั่วคราวกับรายชื่อในหน่วยความจำ
 # Render ฟรีหลับเองเมื่อไม่มีใครเข้า ๑๕ นาที และเริ่มใหม่ทุกครั้งที่ deploy ตื่นมาทั้งสองอย่าง
 # ว่างเปล่า LINE มาดึงรูปตอนมีคนกดเปิดดูทีหลังเจอ "ไม่พบ" จึงขึ้นว่ารูปหมดอายุ
-# ตอนนี้ฝากสำเนาไว้บนไดร์ฟด้วย ลิงก์เซ็นกำกับไว้ (ไม่ต้องจำในหน่วยความจำ) เริ่มใหม่แล้ว
-# มีคนเปิดเมื่อไร ดึงกลับจากไดร์ฟมาให้ — รูปไม่ได้เปิดสาธารณะ ดูได้ผ่านลิงก์นี้ทางเดียวเหมือนเดิม
+# ตอนนี้รูปทุกหน้าที่ส่ง LINE เก็บไว้คู่กับไฟล์ PDF (โฟลเดอร์เดียวกันบนไดร์ฟ ชื่อตามไฟล์ PDF)
+# ลิงก์เซ็นกำกับไว้ (ไม่ต้องจำในหน่วยความจำ) เริ่มใหม่แล้วมีคนเปิดเมื่อไร หารูปบนไดร์ฟ
+# จากโทเคนที่ติดไว้กับไฟล์ ดึงกลับมาให้ — ไฟล์ไม่ได้เปิดสาธารณะ ดูได้ผ่านลิงก์นี้ทางเดียว
 _LINE_IMG_DIR = core._w("_lineimg")
 _LINE_IMG_KEEP = 120           # สำเนาบนเครื่องเก็บล่าสุดเท่านี้ ที่เก่ากว่านั้นดึงจากไดร์ฟเอา
-# เก็บบนไดร์ฟกี่วัน (๐ = เก็บตลอด) — ไฟล์ PDF ฉบับเต็มอยู่ในไดร์ฟถาวรอยู่แล้ว
-LINE_IMG_DAYS = _env_int("SARABAN_LINE_IMG_DAYS", 90, 0, 3650)
 _LINE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{40}")
 _line_key = None
-_line_pruned_at = 0.0
 
 
 def public_base_url() -> str:
@@ -260,23 +257,25 @@ def _line_token_ok(token: str) -> bool:
         token[24:].encode(), _line_sig(token[:24]).encode())
 
 
-def publish_line_image(src_path: str) -> str:
-    """คัดลอกรูปไปที่ที่เปิดให้ดึงได้ แล้วคืน URL — คืน "" ถ้ารันในเครื่อง
+def publish_line_image(src_path: str, day: str = None) -> str:
+    """รูปหน้าที่ส่งเข้า LINE: สำรองขึ้นไดร์ฟคู่กับไฟล์ PDF แล้วคืน URL ให้ LINE มาดึง
 
-    คัดลอกออกมาแทนที่จะเสิร์ฟจากโฟลเดอร์งานโดยตรง เพราะ _cleanup() ลบโฟลเดอร์งาน
-    ทิ้งตาม JOB_TTL ถ้า LINE มาดึงช้ากว่านั้นจะได้รูปหาย และฝากสำเนาขึ้นไดร์ฟเบื้องหลัง
-    (LINE มาดึงครั้งแรกทันทีหลังส่ง ใช้สำเนาบนเครื่องได้เลย ไม่ต้องรออัปเสร็จ)
+    src_path คือรูปที่บันทึกไว้ข้างไฟล์ PDF แล้ว (ชื่อตามไฟล์ PDF) ส่วน day คือโฟลเดอร์ของวันนั้น
+    — ขึ้นไดร์ฟไปอยู่โฟลเดอร์เดียวกับ PDF ด้วยชื่อเดียวกัน (ทำเบื้องหลัง ไม่ให้ผู้ใช้รอ)
+    คืน "" ถ้ารันในเครื่อง (ผู้เรียกถอยไปใช้ imgbb) แต่ยังสำรองขึ้นไดร์ฟให้ถ้าเปิดใช้ไว้
+
+    บน hosting คัดลอกไว้อีกชุดที่ชื่อเป็นโทเคน ให้ LINE มาดึงครั้งแรกได้ทันทีหลังส่ง
+    (ไม่ต้องรอฝากขึ้นไดร์ฟเสร็จ) และอยู่รอดแม้ _cleanup() ลบโฟลเดอร์งานทิ้ง
     """
     base = public_base_url()
-    if not base:
-        return ""
-    os.makedirs(_LINE_IMG_DIR, exist_ok=True)
-    token = _new_line_token()
-    dest = os.path.join(_LINE_IMG_DIR, token + ".jpg")
-    shutil.copyfile(src_path, dest)
-    _trim_line_images()
-    _backup_line_image(token, dest)
-    return f"{base}/api/line-image/{token}.jpg"
+    token = ""
+    if base:
+        os.makedirs(_LINE_IMG_DIR, exist_ok=True)
+        token = _new_line_token()
+        shutil.copyfile(src_path, os.path.join(_LINE_IMG_DIR, token + ".jpg"))
+        _trim_line_images()
+    _backup_line_image(src_path, day, token)
+    return f"{base}/api/line-image/{token}.jpg" if token else ""
 
 
 def _trim_line_images():
@@ -293,25 +292,20 @@ def _trim_line_images():
             pass
 
 
-def _backup_line_image(token: str, path: str):
-    """ฝากรูปขึ้นไดร์ฟเบื้องหลัง (คิวเดียวกับงานไดร์ฟอื่น ยิงทีละคำสั่ง) แล้วเก็บกวาดรูปเก่า"""
+def _backup_line_image(path: str, day: str, token: str):
+    """ฝากรูปขึ้นไดร์ฟเบื้องหลัง (คิวเดียวกับงานไดร์ฟอื่น ยิงทีละคำสั่ง)"""
     def work():
-        global _line_pruned_at
         try:
             import drive as _dr
             if not _dr.enabled():
                 return
-            # อัปจากสำเนาบนเครื่อง ถ้าโดนเก็บกวาดไปก่อนถึงคิว (รูปเยอะมาก) ก็ข้าม
-            if os.path.exists(path):
-                _dr.line_image_put(path, token + ".jpg")
-            # เก็บกวาดรูปที่เก่าเกิน LINE_IMG_DAYS วัน — วันละครั้งพอ
-            if LINE_IMG_DAYS and time.time() - _line_pruned_at > 12 * 3600:
-                _line_pruned_at = time.time()
-                gone = _dr.line_images_prune(LINE_IMG_DAYS)
-                if gone:
-                    print(f"ลบรูปที่ส่ง LINE ที่เก่าเกิน {LINE_IMG_DAYS} วันออกจากไดร์ฟ {gone} รูป")
+            src = path
+            if not os.path.exists(src) and token:   # รูปข้างไฟล์ PDF หายก่อนถึงคิว ใช้ชุดสำหรับ LINE
+                src = os.path.join(_LINE_IMG_DIR, token + ".jpg")
+            if os.path.exists(src):
+                _dr.line_image_put(src, os.path.basename(path), day=day, token=token)
         except Exception as e:
-            print(f"ฝากรูปที่ส่ง LINE ขึ้นไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+            print(f"สำรองรูปที่ส่ง LINE ขึ้นไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
 
     _drive_tasks.put(work)
 
@@ -332,7 +326,7 @@ def line_image_path(token: str) -> str:
         import drive as _dr
         if _dr.enabled():
             os.makedirs(_LINE_IMG_DIR, exist_ok=True)
-            if _dr.line_image_get(token + ".jpg", path):
+            if _dr.line_image_get(token, path):
                 _trim_line_images()
                 return path
     except Exception as e:
@@ -1163,10 +1157,13 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
                 img = layer(pi_of[n])
             else:                               # หน้าที่อยู่ระหว่างกลาง ไม่มีอะไรวาง
                 img = _render_pdf_page(job["pdf_path"], n, DPI)[0]
-            p = os.path.join(d, f"line{n}.jpg")
+            # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน ชื่อตามไฟล์ PDF + เลขหน้า
+            # (เลขหน้าตรงกับใน PDF ที่บันทึกแล้ว หน้ากระดาษเปล่าที่ต่อท้ายคือหน้าสุดท้าย)
+            p = os.path.join(folder, f"{os.path.splitext(os.path.basename(out))[0]}"
+                                     f"_หน้า{to_thai_digits(n)}.jpg")
             img.convert("RGB").save(p, "JPEG", quality=88)
             # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
-            url = publish_line_image(p) or upload_to_imgbb(p)
+            url = publish_line_image(p, day=today) or upload_to_imgbb(p)
             if url:
                 urls.append(url)
         photo_ok = len(urls) == len(pages)

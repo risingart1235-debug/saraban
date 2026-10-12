@@ -1778,6 +1778,7 @@ class SarabanApp(tk.Tk):
                 # หน้าที่เลือกไว้บนจอ (เริ่มต้น = หน้าแรกถึงหน้าที่ลงเกษียณ กติกาเดียวกับหน้าเว็บ)
                 # หน้ากระดาษเปล่าส่งได้เฉพาะตอนมีของวางไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
                 pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page)
+                pdf_stem = os.path.splitext(os.path.basename(final_pdf_path))[0]
                 img_urls = []
                 for n in pages_to_send:
                     img = page_imgs.get(n)
@@ -1785,8 +1786,10 @@ class SarabanApp(tk.Tk):
                         img = Image.open(doc['page_paths'][n])
                     elif img is None:          # หน้าเกินที่แสดงบนจอ (เอกสารหนามาก) ดึงจาก PDF
                         img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
-                    jpg = self._job_path(job, f"line{n}.jpg")
-                    img.convert('RGB').save(jpg, "JPEG")
+                    # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน (Drive for Desktop
+                    # ซิงก์ขึ้นไดร์ฟให้) ชื่อตามไฟล์ PDF + เลขหน้า เหมือนหน้าเว็บ
+                    jpg = os.path.join(save_folder, f"{pdf_stem}_หน้า{to_thai_digits(n)}.jpg")
+                    img.convert('RGB').save(jpg, "JPEG", quality=88)
                     url = upload_to_imgbb(jpg)
                     if url:
                         img_urls.append(url)
