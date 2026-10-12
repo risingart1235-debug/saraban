@@ -155,6 +155,24 @@ class RenderBlockTests(unittest.TestCase):
         left, right = below[0], block.width - below[2]
         self.assertLess(abs(left - right), 12)                # roughly centred
 
+    def test_percentage_resizes_only_the_signature_and_never_the_date(self):
+        def parts(pct):
+            block = sig.render_block(self.png, "๑๒ ต.ค. ๖๙", pct, self.CM)
+            im = rgba(self.png)
+            w = int(sig.SIG_WIDTH_CM * self.CM * pct / 100)
+            sig_h = round(im.height * w / im.width)
+            a = block.getchannel("A")
+            s_box = a.crop((0, 0, block.width, sig_h)).getbbox()
+            d_box = a.crop((0, sig_h, block.width, block.height)).getbbox()
+            return s_box[2] - s_box[0], (d_box[2] - d_box[0], d_box[3] - d_box[1])
+        sig50, date50 = parts(50)
+        sig100, date100 = parts(100)
+        sig200, date200 = parts(200)
+        self.assertEqual(date50, date100)
+        self.assertEqual(date200, date100)
+        self.assertAlmostEqual(sig200 / sig100, 2, delta=0.05)
+        self.assertAlmostEqual(sig50 / sig100, 0.5, delta=0.05)
+
     def test_signature_is_drawn_in_the_text_colour_on_a_clear_background(self):
         block = sig.render_block(self.png, "๑๒ ต.ค. ๖๙", 100, self.CM)
         sig_h = round(rgba(self.png).height * int(sig.SIG_WIDTH_CM * self.CM) / rgba(self.png).width)

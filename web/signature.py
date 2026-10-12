@@ -17,6 +17,7 @@ MAX_PIXELS = 16_000_000
 # ฝากในชีตเป็น base64 — ช่องหนึ่งของ Google Sheets รับได้ไม่เกิน ๕๐,๐๐๐ ตัวอักษร
 MAX_STORE_BYTES = 36 * 1024
 SIG_WIDTH_CM = 4.0              # ความกว้างลายเซ็นบนเอกสารที่ขนาด ๑๐๐%
+DATE_FONT_PX = 46               # ขนาดตัวอักษรวันที่ใต้ลายเซ็น เท่าคำเกษียณที่ ๑๐๐% (ไม่ย่อขยายตามลายเซ็น)
 # สีเส้นลายเซ็นและวันที่ใต้ลายเซ็น — สีเดียวกับคำเกษียณ (core.render_transparent_kasien)
 INK = (0, 51, 153)
 
@@ -143,7 +144,8 @@ def render_block(sig_png: bytes, date_text: str, size_pct, px_per_cm: float):
     sig = _as_ink(sig.resize((w, h), Image.LANCZOS))
 
     date = core.to_thai_digits(str(date_text or "").strip())
-    font_size = max(10, int(46 * scale))         # เท่าตัวหนังสือคำเกษียณที่ขนาดเดียวกัน
+    # วันที่ขนาดคงที่ เท่าตัวหนังสือคำเกษียณที่ ๑๐๐% — % ที่ผู้ใช้ปรับ ย่อขยายเฉพาะภาพลายเซ็น
+    font_size = DATE_FONT_PX
     font = core.get_font(font_size)
     tw = int(core.get_text_w(date, font)) if date else 0
     gap = int(font_size * 0.15)
