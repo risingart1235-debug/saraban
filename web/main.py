@@ -542,7 +542,8 @@ def _png_data_uri(png: bytes) -> str:
 def api_my_signature(user: str = Depends(current_user)):
     import store as _s
     png = _s.get_store().load_signature(user)
-    return {"ok": True, "has": bool(png), "png": _png_data_uri(png) if png else ""}
+    # แสดงแบบที่จะออกบนเอกสารจริง รูปที่อัปไว้ก่อนปรับสีจะได้ไม่หลอกตาว่ายังเป็นสีเดิม
+    return {"ok": True, "has": bool(png), "png": _png_data_uri(_sig.display_png(png)) if png else ""}
 
 
 @app.post("/api/me/signature")

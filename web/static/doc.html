@@ -157,16 +157,17 @@
         <button class="btn grey small" id="sigPick">📷 เลือกรูปลายเซ็น</button>
         <input id="sigFile" type="file" accept="image/*" class="hidden">
       </div>
+      <!-- ขนาดตั้งได้ตั้งแต่ก่อนแทรก และจำค่าล่าสุดไว้ แทรกครั้งต่อไปใช้ขนาดนี้เลย -->
+      <div class="row hidden" id="sigSizeRow" style="margin:0 0 10px">
+        <label>ขนาดลายเซ็น</label>
+        <div class="stepper"><button id="sgm">−</button><span id="sgv">100%</span><button id="sgp">+</button></div>
+      </div>
       <button class="btn small hidden" id="sigAdd">✍️ แทรกลายเซ็นใต้คำเกษียณ</button>
       <div id="sigEdit" class="hidden">
         <p class="prevlab">ตัวอย่างที่จะพิมพ์ลงเอกสาร — ลากบนภาพเอกสารเพื่อย้ายได้</p>
         <div class="prev"><img id="sigPrev" alt="ตัวอย่างลายเซ็น"></div>
         <label for="sigDate">วันที่ใต้ลายเซ็น</label>
         <input id="sigDate" type="text">
-        <div class="row">
-          <label>ขนาดลายเซ็น</label>
-          <div class="stepper"><button id="sgm">−</button><span id="sgv">100%</span><button id="sgp">+</button></div>
-        </div>
         <div class="chips"><button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button></div>
       </div>
       <div id="sigMsg" class="hidden" style="margin-top:10px"></div>
@@ -502,6 +503,14 @@ $('ssp').onclick = () => { D.stamp.size_pct = Math.min(300, D.stamp.size_pct + 5
 
 // ---------- ลายเซ็น ----------
 let hasSig = false;
+// ขนาดลายเซ็นที่ใช้ล่าสุด จำไว้ในเครื่อง แทรกครั้งต่อไปใช้ขนาดนี้เลย
+const SIG_SIZE_KEY = 'saraban.sig.size';
+let sigSize = (() => {
+  try {
+    const v = parseInt(localStorage.getItem(SIG_SIZE_KEY), 10);
+    return v >= 20 && v <= 300 ? v : 100;
+  } catch (e) { return 100; }
+})();
 function openSig(open) {
   $('sigPanel').classList.toggle('hidden', !open);
   $('sigToggle').classList.toggle('open', open);
@@ -516,6 +525,8 @@ function sigMsg(kind, text) {
 }
 function showSigCard() {
   $('sigUpload').classList.toggle('hidden', hasSig);
+  $('sigSizeRow').classList.toggle('hidden', !hasSig);
+  $('sgv').textContent = (D.sig ? D.sig.size_pct : sigSize) + '%';
   $('sigAdd').classList.toggle('hidden', !hasSig || !!D.sig);
   $('sigEdit').classList.toggle('hidden', !D.sig);
 }
@@ -539,7 +550,7 @@ async function renderSig(o) {
 
 $('sigAdd').onclick = async () => {
   const src = isBox(sel) ? objOf(sel) : D.boxes[0];
-  const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: 100, date: null };
+  const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: sigSize, date: null };
   const b = $('sigAdd'); b.disabled = true;
   try { await renderSig(o); }
   catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
@@ -567,9 +578,10 @@ function reSig(delay = 400) {
 }
 $('sigDate').addEventListener('input', () => { if (D.sig) { D.sig.date = $('sigDate').value; reSig(); } });
 function sigStep(delta) {
-  if (!D.sig) return;
-  D.sig.size_pct = Math.max(20, Math.min(300, D.sig.size_pct + delta));
-  $('sgv').textContent = D.sig.size_pct + '%'; reSig(0);
+  sigSize = Math.max(20, Math.min(300, (D.sig ? D.sig.size_pct : sigSize) + delta));
+  try { localStorage.setItem(SIG_SIZE_KEY, String(sigSize)); } catch (e) {}
+  $('sgv').textContent = sigSize + '%';
+  if (D.sig) { D.sig.size_pct = sigSize; reSig(0); }
 }
 $('sgm').onclick = () => sigStep(-10);
 $('sgp').onclick = () => sigStep(10);

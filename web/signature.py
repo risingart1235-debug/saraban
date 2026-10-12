@@ -6,7 +6,7 @@
 """
 import io
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
 import core
 
@@ -16,7 +16,8 @@ MAX_PIXELS = 16_000_000
 # ฝากในชีตเป็น base64 — ช่องหนึ่งของ Google Sheets รับได้ไม่เกิน ๕๐,๐๐๐ ตัวอักษร
 MAX_STORE_BYTES = 36 * 1024
 SIG_WIDTH_CM = 4.0              # ความกว้างลายเซ็นบนเอกสารที่ขนาด ๑๐๐%
-DATE_INK = (0, 51, 153, 255)    # สีวันที่ใต้ลายเซ็น เดียวกับคำเกษียณ
+# สีเส้นลายเซ็นและวันที่ใต้ลายเซ็น — สีเดียวกับคำเกษียณ (core.render_transparent_kasien)
+INK = (0, 51, 153)
 
 
 class SignatureError(ValueError):
@@ -47,9 +48,11 @@ def clean_upload(raw: bytes) -> bytes:
     except Exception:
         raise SignatureError("เปิดรูปไม่ได้ — ใช้ไฟล์ JPG หรือ PNG")
     img.thumbnail((1600, 1600))
-    rgba = img.convert("RGBA")
-    # PNG ที่ตัดพื้นมาแล้วใช้ตามนั้น ที่เหลือ (รูปถ่าย/สแกน) ต้องตัดพื้นกระดาษออกเอง
-    sig = rgba if rgba.getchannel("A").getextrema()[0] < 250 else _remove_paper(rgba)
+    # วางบนกระดาษขาวก่อนเสมอ ส่วนที่โปร่งใสอยู่แล้วกลายเป็นพื้นกระดาษ แล้วตัดพื้นทิ้งทีเดียว
+    # (เดิมรูปที่มีจุดโปร่งใสถูกใช้ตามนั้นเลย PNG พื้นขาวที่มีมุมมนโปร่งใสจึงติดกล่องขาวมาทั้งกล่อง)
+    flat = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    flat.alpha_composite(img.convert("RGBA"))
+    sig = _remove_paper(flat)
     box = sig.getchannel("A").point(lambda v: 255 if v > 60 else 0).getbbox()
     if not box:
         raise SignatureError("ไม่พบเส้นลายเซ็นในรูป — เซ็นด้วยปากกาสีเข้มบนกระดาษขาว แล้วถ่ายให้ชัด")
@@ -72,21 +75,41 @@ def _remove_paper(rgba):
     paper = small.filter(ImageFilter.MaxFilter(5)).resize(gray.size, Image.BILINEAR)
     ink = ImageChops.subtract(paper, gray)
     alpha = ink.point(lambda v: 0 if v < 30 else 255 if v > 100 else (v - 30) * 255 // 70)
-    # ระบายเส้นด้วยสีหมึกสีเดียว (ค่าเฉลี่ยของจุดที่เข้มชัด) ได้เส้นคมสม่ำเสมอ ไม่ติดสีกระดาษ
-    strong = alpha.point(lambda v: 255 if v >= 250 else 0)
-    stat = ImageStat.Stat(rgba.convert("RGB"), mask=strong)
-    color = tuple(int(c) for c in stat.mean) if stat.count[0] else (20, 30, 90)
-    out = Image.new("RGBA", rgba.size, color + (0,))
+    # ระบายเส้นด้วยสีข้อความสีเดียว ไม่ว่าเซ็นด้วยปากกาสีอะไร ได้เส้นคมสม่ำเสมอ ไม่ติดสีกระดาษ
+    out = Image.new("RGBA", rgba.size, INK + (0,))
     out.putalpha(alpha)
     return out
+
+
+def _as_ink(sig):
+    """ระบายลายเซ็นที่เก็บไว้เป็นสีข้อความ และให้ส่วนที่สว่างโปร่งใส
+
+    รูปที่อัปไว้ก่อนมีการปรับสี (สีปากกาเดิม หรือ PNG ที่ติดพื้นขาวมา) จะได้ผลเหมือนรูปใหม่
+    โดยไม่ต้องอัปใหม่ — เส้นหมึกเข้มเสมอ ส่วนพื้นกระดาษสว่าง จึงแยกกันด้วยความสว่าง
+    """
+    dark = sig.convert("L").point(lambda v: 255 if v <= 175 else 0 if v >= 235 else (235 - v) * 255 // 60)
+    out = Image.new("RGBA", sig.size, INK + (0,))
+    out.putalpha(ImageChops.multiply(sig.getchannel("A"), dark))
+    return out
+
+
+def display_png(sig_png: bytes) -> bytes:
+    """รูปลายเซ็นตามที่จะออกบนเอกสาร (สีข้อความ พื้นใส) ไว้แสดงในเมนูผู้ใช้"""
+    buf = io.BytesIO()
+    _as_ink(Image.open(io.BytesIO(sig_png)).convert("RGBA")).save(buf, "PNG", optimize=True)
+    return buf.getvalue()
 
 
 def _encode(sig) -> bytes:
     sig = sig.copy()
     sig.thumbnail((600, 300), Image.LANCZOS)
     for _ in range(8):
+        # เส้นเป็นสีข้อความสีเดียว ต่างกันแค่ความทึบ PNG ธรรมดาจึงเล็กพออยู่แล้ว ไม่ต้องลดจำนวนสี
+        # (ลดสีแล้วเส้นที่เข้มสุดทึบไม่เต็ม) ระบายสีใหม่หลังย่อ เพราะการย่อทำให้สีขอบคลาดไปนิด
+        ink = Image.new("RGBA", sig.size, INK + (0,))
+        ink.putalpha(sig.getchannel("A"))
         buf = io.BytesIO()
-        sig.quantize(colors=64, method=Image.Quantize.FASTOCTREE).save(buf, "PNG", optimize=True)
+        ink.save(buf, "PNG", optimize=True)
         if buf.tell() <= MAX_STORE_BYTES:
             return buf.getvalue()
         sig = sig.resize((max(1, int(sig.width * 0.8)), max(1, int(sig.height * 0.8))), Image.LANCZOS)
@@ -103,7 +126,8 @@ def render_block(sig_png: bytes, date_text: str, size_pct, px_per_cm: float):
     sig = Image.open(io.BytesIO(sig_png)).convert("RGBA")
     w = max(10, int(SIG_WIDTH_CM * px_per_cm * scale))
     h = max(1, round(sig.height * w / sig.width))
-    sig = sig.resize((w, h), Image.LANCZOS)
+    # ย่อก่อนแล้วค่อยระบายสี — ย่อทีหลังสีขอบเส้นจะคลาดจากสีข้อความไปนิดหน่อย
+    sig = _as_ink(sig.resize((w, h), Image.LANCZOS))
 
     date = core.to_thai_digits(str(date_text or "").strip())
     font_size = max(10, int(46 * scale))         # เท่าตัวหนังสือคำเกษียณที่ขนาดเดียวกัน
@@ -116,7 +140,9 @@ def render_block(sig_png: bytes, date_text: str, size_pct, px_per_cm: float):
     height = h + (gap + line_h if date else 0)
 
     img = Image.new("RGBA", (width, height), (255, 255, 255, 0))
-    img.paste(sig, ((width - w) // 2, 0), sig)
+    # alpha_composite ไม่ใช่ paste(sig, mask=sig) — แบบหลังผสมขอบเส้นกับพื้นขาวและยกกำลังความทึบ
+    # ขอบลายเซ็นจะบางและซีดกว่าจริง
+    img.alpha_composite(sig, ((width - w) // 2, 0))
     if date:
-        ImageDraw.Draw(img).text(((width - tw) // 2, h + gap), date, font=font, fill=DATE_INK)
+        ImageDraw.Draw(img).text(((width - tw) // 2, h + gap), date, font=font, fill=INK + (255,))
     return img

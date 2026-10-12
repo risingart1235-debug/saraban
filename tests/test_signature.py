@@ -51,6 +51,26 @@ def rgba(png):
     return Image.open(io.BytesIO(png)).convert("RGBA")
 
 
+def visible_colours(img):
+    return {p[:3] for p in img.get_flattened_data() if p[3] > 0}
+
+
+def opaque_share(img):
+    px = img.get_flattened_data()
+    return sum(1 for p in px if p[3] > 200) / len(px)
+
+
+def white_card_png():
+    """a PNG people often have: opaque white background, transparent rounded corners, black ink"""
+    im = Image.new("RGBA", (600, 220), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([0, 0, 599, 219], radius=30, fill=(255, 255, 255, 255))
+    d.line([(60, 160), (200, 50), (330, 170), (540, 60)], fill=(10, 10, 10, 255), width=8)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
 class ShortDateTests(unittest.TestCase):
     def test_day_short_month_and_two_digit_buddhist_year_in_thai_digits(self):
         self.assertEqual(sig.thai_short_date(datetime(2026, 10, 12)), "๑๒ ต.ค. ๖๙")
@@ -67,10 +87,8 @@ class CleanUploadTests(unittest.TestCase):
         for corner in ((0, 0), (im.width - 1, 0), (0, im.height - 1), (im.width - 1, im.height - 1)):
             self.assertEqual(alpha.getpixel(corner), 0)
         self.assertEqual(alpha.getextrema()[1], 255)          # ink is solid
-        r, g, b, _ = im.getpixel(max(((x, y) for x in range(0, im.width, 3)
-                                      for y in range(0, im.height, 3)),
-                                     key=lambda p: alpha.getpixel(p)))
-        self.assertGreater(b, r)                              # blue pen stays blue
+        # whatever the pen, the strokes take the endorsement text colour
+        self.assertEqual(visible_colours(im), {sig.INK})
 
     def test_photo_taken_sideways_is_turned_upright(self):
         exif = Image.Exif()
@@ -80,7 +98,7 @@ class CleanUploadTests(unittest.TestCase):
         im = rgba(sig.clean_upload(buf.getvalue()))
         self.assertGreater(im.height, im.width)
 
-    def test_png_already_without_background_is_used_as_is(self):
+    def test_png_already_without_background_is_trimmed_and_recoloured(self):
         src = Image.new("RGBA", (400, 150), (0, 0, 0, 0))
         ImageDraw.Draw(src).line([(20, 100), (380, 40)], fill=(0, 0, 0, 255), width=6)
         buf = io.BytesIO()
@@ -88,6 +106,13 @@ class CleanUploadTests(unittest.TestCase):
         im = rgba(sig.clean_upload(buf.getvalue()))
         self.assertEqual(im.getpixel((0, 0))[3], 0)
         self.assertLess(im.width, 400)                        # trimmed to the stroke
+        self.assertEqual(visible_colours(im), {sig.INK})
+
+    def test_white_background_png_with_see_through_corners_loses_its_background(self):
+        # used to be kept as-is because some pixels were already transparent -> a white box
+        im = rgba(sig.clean_upload(white_card_png()))
+        self.assertLess(opaque_share(im), 0.2)
+        self.assertEqual(visible_colours(im), {sig.INK})
 
     def test_huge_picture_is_refused_before_it_is_decoded(self):
         buf = io.BytesIO()
@@ -118,6 +143,17 @@ class RenderBlockTests(unittest.TestCase):
         self.assertIsNotNone(below)                           # something is drawn under it
         left, right = below[0], block.width - below[2]
         self.assertLess(abs(left - right), 12)                # roughly centred
+
+    def test_signature_is_drawn_in_the_text_colour_on_a_clear_background(self):
+        block = sig.render_block(self.png, "๑๒ ต.ค. ๖๙", 100, self.CM)
+        sig_h = round(rgba(self.png).height * int(sig.SIG_WIDTH_CM * self.CM) / rgba(self.png).width)
+        self.assertEqual(visible_colours(block.crop((0, 0, block.width, sig_h))), {sig.INK})
+
+    def test_signature_saved_before_the_recolouring_is_drawn_the_same_way(self):
+        # stored as uploaded earlier: black ink on an opaque white card
+        block = sig.render_block(white_card_png(), "", 100, self.CM)
+        self.assertEqual(visible_colours(block), {sig.INK})
+        self.assertLess(opaque_share(block), 0.2)
 
     def test_size_scales_signature_and_no_date_means_no_date_line(self):
         small = sig.render_block(self.png, "", 100, self.CM)
@@ -238,6 +274,14 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(self.a.get("/api/me/signature").json()["has"])    # b can't delete a's
         self.a.delete("/api/me/signature")
         self.assertFalse(self.a.get("/api/me/signature").json()["has"])
+
+    def test_menu_shows_an_older_signature_the_way_documents_will(self):
+        self.st.sigs["ครูเอ"] = white_card_png()              # uploaded before recolouring
+        uri = self.a.get("/api/me/signature").json()["png"]
+        import base64
+        shown = rgba(base64.b64decode(uri.split(",", 1)[1]))
+        self.assertEqual(visible_colours(shown), {sig.INK})
+        self.assertLess(opaque_share(shown), 0.2)
 
     def test_bad_picture_gets_a_readable_400(self):
         r = self.upload(self.a, jpeg(Image.new("RGB", (600, 400), (230, 230, 230))))
