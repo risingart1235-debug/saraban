@@ -42,16 +42,16 @@
              margin:0 -16px; display:flex; gap:8px }
   #savebar .btn { margin:0 }
   /* ปุ่มพับ/กางชุดแก้ไข — หน้าตาเหมือนการ์ดใบหนึ่ง กดง่ายด้วยนิ้ว */
-  #editToggle {
+  #editToggle, #sigToggle {
     display:flex; align-items:center; justify-content:space-between; gap:8px;
     width:100%; min-height:52px; margin-bottom:14px; padding:12px 16px;
     background:var(--card); border:1px solid var(--line); border-radius:12px;
     font-family:inherit; font-size:15px; font-weight:700; color:var(--blue);
     text-align:left; cursor:pointer;
   }
-  #editToggle:active { background:#eef2ff }
-  #caret { transition:transform .15s }
-  #editToggle.open #caret { transform:rotate(180deg) }
+  #editToggle:active, #sigToggle:active { background:#eef2ff }
+  #caret, #sigCaret { transition:transform .15s }
+  #editToggle.open #caret, #sigToggle.open #sigCaret { transform:rotate(180deg) }
   /* ตัวอย่างสดในแผงแก้ไข — ของจริงไปโผล่บนภาพเอกสารซึ่งอยู่ใต้แผง
      ถ้าไม่มีตรงนี้ ต้องเลื่อนจอลงไปดูทุกครั้งที่พิมพ์
      วางไว้เหนือช่องพิมพ์ เพราะบนมือถือคีย์บอร์ดจะบังครึ่งล่างของจอ */
@@ -144,6 +144,35 @@
       </div>
     </div>
     </div><!-- /editPanel -->
+
+    <!-- ลายเซ็น — แยกแท็บจากชุดแก้ไข เพราะไม่ได้ใส่ทุกเรื่อง จะแทรกก็ต่อเมื่อกดปุ่มแทรกเองเท่านั้น -->
+    <button id="sigToggle" aria-expanded="false">
+      <span>✍️ ลายเซ็น</span><span id="sigCaret">▾</span>
+    </button>
+    <div id="sigPanel" class="hidden">
+    <div class="card">
+      <div id="sigUpload" class="hidden">
+        <p class="hint">ยังไม่มีรูปลายเซ็น — เซ็นบนกระดาษขาวด้วยปากกาสีเข้ม แล้วถ่ายรูป
+          ระบบจะตัดพื้นหลังออกให้ และจำไว้ใช้ครั้งต่อไป</p>
+        <button class="btn grey small" id="sigPick">📷 เลือกรูปลายเซ็น</button>
+        <input id="sigFile" type="file" accept="image/*" class="hidden">
+      </div>
+      <button class="btn small hidden" id="sigAdd">✍️ แทรกลายเซ็นใต้คำเกษียณ</button>
+      <div id="sigEdit" class="hidden">
+        <p class="prevlab">ตัวอย่างที่จะพิมพ์ลงเอกสาร — ลากบนภาพเอกสารเพื่อย้ายได้</p>
+        <div class="prev"><img id="sigPrev" alt="ตัวอย่างลายเซ็น"></div>
+        <label for="sigDate">วันที่ใต้ลายเซ็น</label>
+        <input id="sigDate" type="text">
+        <div class="row">
+          <label>ขนาดลายเซ็น</label>
+          <div class="stepper"><button id="sgm">−</button><span id="sgv">100%</span><button id="sgp">+</button></div>
+        </div>
+        <div class="chips"><button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button></div>
+      </div>
+      <div id="sigMsg" class="hidden" style="margin-top:10px"></div>
+      <p class="tiny" style="margin-top:10px">เปลี่ยนหรือลบรูปลายเซ็นที่จำไว้ ได้ที่เมนู 👤 มุมขวาบนของหน้าแรก</p>
+    </div>
+    </div>
 
     <div class="stage"><div id="pages"></div></div>
   </div>
@@ -248,6 +277,8 @@ function build() {
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
+  D.sig = null;                 // ลายเซ็นไม่แทรกเอง ต้องกดปุ่มแทรกก่อน
+  loadSig();
   const pref = indentPref();
   if (pref !== null) {
     for (const b of D.boxes) if (b.indent_pct !== pref) { b.indent_pct = pref; renderBox(b); }
@@ -283,7 +314,11 @@ function posOverlay(o) {
   o._el.style.top  = (o.top_cm  * D.cm / ps.h * 100) + '%';
 }
 
-function objOf(id) { return id === 'stamp' ? D.stamp : D.boxes.find(b => b.id === id); }
+function objOf(id) {
+  return id === 'stamp' ? D.stamp : id === 'sig' ? D.sig : D.boxes.find(b => b.id === id);
+}
+// ตรายางกับลายเซ็นไม่ใช่กล่องข้อความ — แตะแล้วแผงคำเกษียณต้องไม่เผลอไปแก้มัน
+const isBox = (id) => id !== 'stamp' && id !== 'sig';
 
 // ---------- ลากด้วยนิ้ว (ข้ามหน้าได้) ----------
 let drag = null;
@@ -346,12 +381,15 @@ $('editToggle').onclick = () => openEditor($('editPanel').classList.contains('hi
 function select(id) {
   sel = id;
   for (const el of document.querySelectorAll('.ov')) el.classList.toggle('sel', el.dataset.id === id);
-  const isStamp = id === 'stamp';
+  const other = !isBox(id);
   // หรี่แทนการซ่อน — การ์ดนี้อยู่เหนือภาพเอกสาร ถ้าซ่อนตอนแตะตรายาง
   // ภาพข้างล่างจะกระโดดขึ้นกลางคันขณะที่นิ้วยังลากอยู่ ทำให้ลากพลาด
-  $('selBox').classList.toggle('dim', isStamp);
-  for (const el of $('selBox').querySelectorAll('textarea, button')) el.disabled = isStamp;
-  if (isStamp) { $('selTitle').textContent = 'ตรายาง (เลือกอยู่)'; return; }
+  $('selBox').classList.toggle('dim', other);
+  for (const el of $('selBox').querySelectorAll('textarea, button')) el.disabled = other;
+  if (other) {
+    $('selTitle').textContent = id === 'sig' ? 'ลายเซ็น (เลือกอยู่)' : 'ตรายาง (เลือกอยู่)';
+    return;
+  }
   const b = objOf(id);
   const n = D.boxes.findIndex(x => x.id === id) + 1;
   $('selTitle').textContent = `คำเกษียณ กล่องที่ ${n}`;
@@ -367,7 +405,7 @@ function select(id) {
 // ---------- วาดกล่องใหม่หลังแก้ ----------
 let tm = null;
 function reBox(delay = 400) {
-  const b = objOf(sel); if (!b || sel === 'stamp') return;
+  const b = objOf(sel); if (!b || !isBox(sel)) return;
   clearTimeout(tm);
   tm = setTimeout(() => renderBox(b), delay);
 }
@@ -403,7 +441,7 @@ function showIndent(b) {
   $('bindHint').classList.toggle('hidden', b.indent_pct > 0);
 }
 function setIndent(pct) {
-  const b = objOf(sel); if (!b || sel === 'stamp') return;
+  const b = objOf(sel); if (!b || !isBox(sel)) return;
   b.indent_pct = pct; showIndent(b); reBox(0);
   try { localStorage.setItem(INDENT_KEY, String(pct)); } catch (e) {}
 }
@@ -462,13 +500,116 @@ for (const f of ['d', 't']) $(f).addEventListener('input', () => { clearTimeout(
 $('ssm').onclick = () => { D.stamp.size_pct = Math.max(20, D.stamp.size_pct - 5); $('ssv').textContent = D.stamp.size_pct + '%'; reStamp(); };
 $('ssp').onclick = () => { D.stamp.size_pct = Math.min(300, D.stamp.size_pct + 5); $('ssv').textContent = D.stamp.size_pct + '%'; reStamp(); };
 
+// ---------- ลายเซ็น ----------
+let hasSig = false;
+function openSig(open) {
+  $('sigPanel').classList.toggle('hidden', !open);
+  $('sigToggle').classList.toggle('open', open);
+  $('sigToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+$('sigToggle').onclick = () => openSig($('sigPanel').classList.contains('hidden'));
+
+function sigMsg(kind, text) {
+  const m = $('sigMsg');
+  if (!text) { m.classList.add('hidden'); return; }
+  m.className = kind; m.textContent = text;
+}
+function showSigCard() {
+  $('sigUpload').classList.toggle('hidden', hasSig);
+  $('sigAdd').classList.toggle('hidden', !hasSig || !!D.sig);
+  $('sigEdit').classList.toggle('hidden', !D.sig);
+}
+async function loadSig() {
+  try {
+    const r = await fetch('/api/me/signature');
+    hasSig = r.ok && !!(await readJSON(r)).has;
+  } catch (e) { hasSig = false; }
+  showSigCard();
+}
+
+// วาดลายเซ็น + วันที่ที่เซิร์ฟเวอร์ (ใช้รูปที่จำไว้ของคนที่ล็อกอินอยู่)
+async function renderSig(o) {
+  const r = await fetch(`/api/doc/${JOB}/signature`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date: o.date, size_pct: o.size_pct }) });
+  const d = await readJSON(r);
+  if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'วาดลายเซ็นไม่สำเร็จ');
+  Object.assign(o, { png: d.png, w: d.w, h: d.h, date: d.date, size_pct: d.size_pct });
+}
+
+$('sigAdd').onclick = async () => {
+  const src = isBox(sel) ? objOf(sel) : D.boxes[0];
+  const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: 100, date: null };
+  const b = $('sigAdd'); b.disabled = true;
+  try { await renderSig(o); }
+  catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
+  b.disabled = false;
+  if (src) {                    // วางใต้กล่องคำเกษียณ กึ่งกลางกล่อง
+    o.left_cm = src.left_cm + (src.w - o.w) / 2 / D.cm;
+    o.top_cm = src.top_cm + src.h / D.cm + 0.2;
+  }
+  D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
+  $('sigDate').value = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
+  sigMsg(); showSigCard(); select('sig');
+  o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+
+let sgt = null;
+function reSig(delay = 400) {
+  clearTimeout(sgt);
+  sgt = setTimeout(async () => {
+    const o = D.sig; if (!o) return;
+    try { await renderSig(o); } catch (e) { sigMsg('err', e.message); return; }
+    if (o !== D.sig) return;    // ระหว่างรอ ผู้ใช้กดเอาลายเซ็นออกไปแล้ว
+    o._el.querySelector('img').src = o.png; $('sigPrev').src = o.png;
+    clamp(o); posOverlay(o);
+  }, delay);
+}
+$('sigDate').addEventListener('input', () => { if (D.sig) { D.sig.date = $('sigDate').value; reSig(); } });
+function sigStep(delta) {
+  if (!D.sig) return;
+  D.sig.size_pct = Math.max(20, Math.min(300, D.sig.size_pct + delta));
+  $('sgv').textContent = D.sig.size_pct + '%'; reSig(0);
+}
+$('sgm').onclick = () => sigStep(-10);
+$('sgp').onclick = () => sigStep(10);
+$('sigDel').onclick = () => {
+  if (!D.sig) return;
+  D.sig._el.remove(); D.sig = null;
+  showSigCard(); select(D.boxes[0] ? D.boxes[0].id : 'stamp');
+};
+
+// ยังไม่มีรูป: เลือกรูปตรงนี้ได้เลย ระบบตัดพื้นหลังแล้วจำไว้ใช้ครั้งต่อไป แล้วแทรกให้ทันที
+$('sigPick').onclick = () => $('sigFile').click();
+$('sigFile').onchange = async () => {
+  const f = $('sigFile').files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  const b = $('sigPick'); b.disabled = true;
+  sigMsg('ok', 'กำลังตัดพื้นหลังลายเซ็น...');
+  try {
+    const r = await fetch('/api/me/signature', { method: 'POST', body: fd });
+    const d = await readJSON(r);
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'อัปรูปไม่สำเร็จ');
+    hasSig = true; showSigCard();
+    sigMsg('ok', 'จำรูปลายเซ็นไว้แล้ว ครั้งต่อไปกดแทรกได้เลย');
+    $('sigAdd').click();
+  } catch (e) {
+    sigMsg('err', e.message);
+  } finally {
+    b.disabled = false; $('sigFile').value = '';
+  }
+};
+
 // ---------- บันทึก / ไม่รับ ----------
 function payload() {
   const strip = (o) => ({ page: o.page, left_cm: o.left_cm, top_cm: o.top_cm,
                           size_pct: o.size_pct, wrap_pct: o.wrap_pct, indent_pct: o.indent_pct,
                           bg: o.bg, border: o.border, text: o.text });
+  const g = D.sig;
   return { date: $('d').value, time: $('t').value,
-           stamp: strip(D.stamp), boxes: D.boxes.map(strip) };
+           stamp: strip(D.stamp), boxes: D.boxes.map(strip),
+           signature: g ? { page: g.page, left_cm: g.left_cm, top_cm: g.top_cm,
+                            size_pct: g.size_pct, date: g.date } : null };
 }
 
 $('save').onclick = async () => {

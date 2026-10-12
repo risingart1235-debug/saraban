@@ -532,6 +532,49 @@ async def api_change_password(request: Request, user: str = Depends(current_user
     return resp
 
 
+# ---------- รูปลายเซ็นของตัวเอง (แทรกใต้คำเกษียณ) ----------
+# เห็น/ใช้ได้เฉพาะลายเซ็นของตัวเอง ไม่มีทางเรียกลายเซ็นของคนอื่นมาวางได้
+def _png_data_uri(png: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+@app.get("/api/me/signature")
+def api_my_signature(user: str = Depends(current_user)):
+    import store as _s
+    png = _s.get_store().load_signature(user)
+    return {"ok": True, "has": bool(png), "png": _png_data_uri(png) if png else ""}
+
+
+@app.post("/api/me/signature")
+async def api_set_my_signature(request: Request, user: str = Depends(current_user)):
+    """อัปรูปลายเซ็น — ตัดพื้นกระดาษออก ครอป ย่อ แล้วเก็บไว้ใช้ทุกเรื่อง ทุกเครื่อง"""
+    raw_len = request.headers.get("content-length", "")
+    if raw_len.isdigit() and int(raw_len) > _sig.MAX_UPLOAD_BYTES + 1024 * 1024:
+        raise HTTPException(status_code=413, detail="รูปใหญ่เกิน ๑๐ MB")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not callable(getattr(upload, "read", None)):
+        raise HTTPException(status_code=400, detail="ไม่ได้แนบรูปลายเซ็น")
+    try:
+        raw = await upload.read(_sig.MAX_UPLOAD_BYTES + 1)
+    finally:
+        await upload.close()
+    try:
+        png = await asyncio.to_thread(_sig.clean_upload, raw)
+    except _sig.SignatureError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    import store as _s
+    await asyncio.to_thread(_s.get_store().save_signature, user, png)
+    return {"ok": True, "has": True, "png": _png_data_uri(png)}
+
+
+@app.delete("/api/me/signature")
+def api_delete_my_signature(user: str = Depends(current_user)):
+    import store as _s
+    _s.get_store().delete_signature(user)
+    return {"ok": True, "has": False}
+
+
 @app.get("/api/me")
 def api_me(user: str = Depends(current_user)):
     u = load_users().get(user, {})
@@ -703,6 +746,7 @@ def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
 # ==========================================================
 import sppweb
 from web import docmode
+from web import signature as _sig
 
 _spp_session_state = None       # cookie ทุกตัว + User-Agent; ไม่แชร์ requests.Session ข้ามเธรด
 _spp_session_lock = threading.Lock()
@@ -1131,6 +1175,26 @@ async def api_doc_box(job_id: str, request: Request, user: str = Depends(current
     return docmode.render_box(job, await request.json())
 
 
+@app.post("/api/doc/{job_id}/signature")
+async def api_doc_signature(job_id: str, request: Request, user: str = Depends(current_user)):
+    """วาดลายเซ็นของคนที่กำลังลงรับ + วันที่ใต้ลายเซ็น ตามขนาดที่เลือก"""
+    _job_or_404(job_id, user)
+    d = await request.json()
+    import store as _s
+    png = await asyncio.to_thread(_s.get_store().load_signature, user)    # อ่านชีต ห้ามขวาง event loop
+    if not png:
+        raise HTTPException(status_code=404, detail="ยังไม่มีรูปลายเซ็น")
+    # ไม่ส่งวันที่มา = วันนี้ / ส่งช่องว่างมา = ตั้งใจไม่ใส่วันที่
+    date = _sig.thai_short_date() if d.get("date") is None else to_thai_digits(str(d["date"]).strip())
+    try:
+        size = int(d.get("size_pct", 100))
+    except (TypeError, ValueError):
+        size = 100
+    img = await asyncio.to_thread(_sig.render_block, png, date, size, docmode.CM)
+    return {"png": docmode._png_uri(img), "w": img.width, "h": img.height,
+            "date": date, "size_pct": max(20, min(300, size))}
+
+
 @app.post("/api/doc/{job_id}/stamp")
 async def api_doc_stamp(job_id: str, request: Request, user: str = Depends(current_user)):
     job = _job_or_404(job_id, user)
@@ -1152,10 +1216,20 @@ async def api_doc_save(job_id: str, request: Request, user: str = Depends(curren
         with _receipt_lock:
             return core.register_document(**fields)
 
+    # แทรกลายเซ็นไว้ ต้องมีรูปจริงก่อนจองเลขรับ ไม่งั้นได้เลขที่เอกสารไม่มีลายเซ็นตามที่เห็นบนจอ
+    signature_png = None
+    if payload.get("signature"):
+        import store as _s
+        signature_png = await asyncio.to_thread(_s.get_store().load_signature, user)
+        if not signature_png:
+            raise HTTPException(status_code=400, detail=(
+                "ไม่พบรูปลายเซ็นของคุณ — อัปรูปใหม่ หรือกดเอาลายเซ็นออกก่อนบันทึก"))
+
     try:
         # แปลง/รวม PDF, อัปโหลด Drive และส่ง LINE เป็นงาน blocking ทั้งหมด
         # ต้องออกจาก async event loop เพื่อให้ request อื่นยังตอบได้
-        return await asyncio.to_thread(docmode.finalize, job, payload, reserve)
+        return await asyncio.to_thread(docmode.finalize, job, payload, reserve,
+                                       signature_png=signature_png)
     except docmode.AlreadyHandledError as e:
         # เรื่องนี้ถูกลงรับ/ข้ามจากที่อื่นไปแล้วระหว่างที่เปิดหน้านี้ค้างไว้
         # (เช่นเปิดค้างในโหมด ๒ แล้วไปกดลงรับเรื่องเดียวกันในโหมด ๑)

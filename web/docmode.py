@@ -23,6 +23,7 @@ from urllib.parse import quote
 import core
 from core import now_th
 import sppweb
+from web import signature as sigmod
 from core import (
     Image,
     render_transparent_stamp, render_transparent_kasien,
@@ -914,7 +915,7 @@ def _reserve_for_job(job: dict, reserve_fn, store):
     return str(receipt_no)
 
 
-def finalize(job, payload: dict, reserve_fn) -> dict:
+def finalize(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dict:
     # ด่านตรวจก่อนแตะเลขรับ — ต้องมั่นใจว่าอัปไฟล์ขึ้นไดร์ฟได้จริงก่อน
     # เช็คตรงนี้ (ก่อน _claim_save) เพื่อให้งานยังอยู่สถานะ ready กดใหม่ได้เลย
     import drive as _dr
@@ -928,7 +929,7 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
     if existing is not None:
         return existing
     try:
-        result = _finalize_claimed(job, payload, reserve_fn)
+        result = _finalize_claimed(job, payload, reserve_fn, signature_png)
     except Exception as e:
         _set(job, status="save_error", step="บันทึกยังไม่สมบูรณ์",
              error=f"{type(e).__name__}: {e}")
@@ -938,8 +939,8 @@ def finalize(job, payload: dict, reserve_fn) -> dict:
     return result
 
 
-def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
-    """วางตรายาง+คำเกษียณลงหน้าจริง รวมเป็น PDF ลงทะเบียน แล้วส่ง LINE"""
+def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dict:
+    """วางตรายาง+คำเกษียณ(+ลายเซ็น)ลงหน้าจริง รวมเป็น PDF ลงทะเบียน แล้วส่ง LINE"""
     date_str = normalize_typed_date(payload.get("date", "")) or get_thai_date()
     time_str = to_thai_digits(str(payload.get("time", "")).strip()) or get_thai_time_rounded()
     st = payload.get("stamp", {})
@@ -981,6 +982,21 @@ def _finalize_claimed(job, payload: dict, reserve_fn) -> dict:
         bgp = layer(pi)
         bgp.paste(k, (max(0, min(x, bgp.width - k.width)),
                       max(0, min(y, bgp.height - k.height))), k)
+
+    # ลายเซ็น + วันที่ใต้ลายเซ็น (แทรกเฉพาะตอนผู้ใช้กดแทรก) — วางอิสระจากกล่องคำเกษียณ
+    sig = payload.get("signature")
+    if sig and signature_png:
+        date = sigmod.thai_short_date() if sig.get("date") is None else str(sig["date"])
+        k = sigmod.render_block(signature_png, date, sig.get("size_pct", 100), CM)
+        pi = int(sig.get("page", 0))
+        x = int(float(sig.get("left_cm", 1)) * CM)
+        y = int(float(sig.get("top_cm", 1)) * CM)
+        if pi >= len(job["pages"]):
+            extra_pages.append((k, x, y))
+        else:
+            bgp = layer(pi)
+            bgp.paste(k, (max(0, min(x, bgp.width - k.width)),
+                          max(0, min(y, bgp.height - k.height))), k)
 
     # ---- ประกอบเป็น PDF ----
     d = job["dir"]

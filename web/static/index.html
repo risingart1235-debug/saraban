@@ -43,6 +43,9 @@
   #profMenu .pitem .sub { display:block; font-weight:400; font-size:12px; color:var(--muted); margin-top:2px }
   #profMenu .psec { font-weight:700; color:var(--blue); margin-bottom:8px; font-size:15px }
   #profMenu label { margin-top:8px }
+  #profMenu .sigbox { background:#fff; border:1px dashed #b6bcc6; border-radius:8px;
+                      padding:8px; text-align:center; margin-bottom:8px }
+  #profMenu .sigbox img { max-width:100%; max-height:90px }
   #profMenu .pout {
     width:100%; min-height:50px; border:0; border-top:1px solid var(--line);
     background:#fff5f5; color:#b91c1c; font-family:inherit; font-size:15px;
@@ -86,6 +89,19 @@
     <label for="pwNew2">พิมพ์รหัสใหม่อีกครั้ง</label>
     <input id="pwNew2" type="password" autocomplete="new-password">
     <button class="btn grey small" id="pwSave" style="margin-top:12px">บันทึกรหัสใหม่</button>
+  </div>
+
+  <!-- รูปลายเซ็นที่จำไว้ — ใช้แทรกใต้คำเกษียณ (กดแทรกในหน้าจัดเอกสาร) -->
+  <div class="pbody" style="border-top:1px solid var(--line)">
+    <div class="psec">✍️ รูปลายเซ็น</div>
+    <div id="sigMsg" class="hidden"></div>
+    <div class="sigbox"><img id="sigImg" class="hidden" alt="รูปลายเซ็น">
+      <span id="sigNone" class="tiny">ยังไม่มีรูปลายเซ็น</span></div>
+    <p class="tiny" style="margin:0 0 8px">เซ็นบนกระดาษขาวด้วยปากกาสีเข้ม แล้วถ่ายรูป
+      ระบบตัดพื้นหลังออกให้เอง</p>
+    <button class="btn grey small" id="sigPick">📷 เลือกรูปลายเซ็น</button>
+    <input id="sigFile" type="file" accept="image/*" class="hidden">
+    <button class="btn grey small hidden" id="sigRemove" style="margin-top:8px;color:#b91c1c">ลบรูปลายเซ็น</button>
   </div>
 
   <button class="pout" id="out">🚪 ออกจากระบบ</button>
@@ -222,6 +238,41 @@ $('pwSave').onclick = async () => {
   // ยังมีคนรออนุมัติอยู่ก็ต้องคาจุดแดงไว้ อย่าเก็บไปพร้อมกับคำเตือนรหัสผ่าน
   if (!$('pbadge').innerHTML) $('dot').classList.add('hidden');
   setTimeout(() => openMenu(false), 1800);      // ปิดเมนูให้เองหลังสำเร็จ
+};
+
+// ---------- รูปลายเซ็น ----------
+function showSig(png) {
+  $('sigImg').src = png || '';
+  $('sigImg').classList.toggle('hidden', !png);
+  $('sigNone').classList.toggle('hidden', !!png);
+  $('sigRemove').classList.toggle('hidden', !png);
+  $('sigPick').textContent = png ? '📷 เปลี่ยนรูปลายเซ็น' : '📷 เลือกรูปลายเซ็น';
+}
+function sigNote(kind, text) {
+  const m = $('sigMsg'); m.className = kind; m.textContent = text;
+}
+fetch('/api/me/signature').then(r => r.ok ? r.json() : null).then(d => { if (d) showSig(d.png); }).catch(() => {});
+$('sigPick').onclick = () => $('sigFile').click();
+$('sigFile').onchange = async () => {
+  const f = $('sigFile').files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  $('sigPick').disabled = true; sigNote('ok', 'กำลังตัดพื้นหลังลายเซ็น...');
+  try {
+    const r = await fetch('/api/me/signature', { method: 'POST', body: fd });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'อัปรูปไม่สำเร็จ');
+    showSig(d.png); sigNote('ok', 'บันทึกรูปลายเซ็นแล้ว');
+  } catch (e) {
+    sigNote('err', e.message);
+  } finally {
+    $('sigPick').disabled = false; $('sigFile').value = '';
+  }
+};
+$('sigRemove').onclick = async () => {
+  if (!confirm('ลบรูปลายเซ็นที่จำไว้ใช่ไหม?')) return;
+  const r = await fetch('/api/me/signature', { method: 'DELETE' });
+  if (r.ok) { showSig(''); sigNote('ok', 'ลบรูปลายเซ็นแล้ว'); }
+  else sigNote('err', 'ลบไม่สำเร็จ');
 };
 
 $('out').onclick = async () => {

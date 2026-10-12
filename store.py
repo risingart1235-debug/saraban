@@ -560,6 +560,33 @@ class LocalStore(StatusMixin, UsersMixin):
                 json.dump(users, f, ensure_ascii=False, indent=2)
             os.replace(tmp, p)        # สลับแบบอะตอมมิก กันไฟล์พังถ้าดับกลางคัน
 
+    # ---- รูปลายเซ็นของผู้ใช้ (PNG พื้นใส) ----
+    def _signature_path(self, username):
+        import hashlib
+        # ชื่อผู้ใช้อาจเป็นภาษาไทยหรือมีอักขระที่ใช้ตั้งชื่อไฟล์ไม่ได้ จึงตั้งชื่อไฟล์จากแฮช
+        name = hashlib.sha1(str(username).encode("utf-8")).hexdigest()[:20]
+        return os.path.join(core._p("signatures"), name + ".png")
+
+    def load_signature(self, username):
+        try:
+            with open(self._signature_path(username), "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def save_signature(self, username, png: bytes):
+        p = self._signature_path(username)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p + ".tmp", "wb") as f:
+            f.write(png)
+        os.replace(p + ".tmp", p)
+
+    def delete_signature(self, username):
+        try:
+            os.remove(self._signature_path(username))
+        except FileNotFoundError:
+            pass
+
     # ---- ถอยกลับเวลาลงรับผิด ----
     def remove_history(self, book_id: str) -> bool:
         """เอาเรื่องออกจากประวัติ เพื่อให้กลับมาขึ้นในรายการ 'หนังสือใหม่' อีกครั้ง"""
@@ -627,6 +654,9 @@ class SheetsStore(StatusMixin, UsersMixin):
     TAB_HIST = "ประวัติที่ดึงแล้ว"
     TAB_USERS = "ผู้ใช้เว็บ"
     TAB_SEND = "ทะเบียนส่ง"
+    # ลายเซ็นแยกแท็บจากผู้ใช้ — แท็บผู้ใช้ถูกอ่านแทบทุก request และเขียนทับทั้งแท็บ
+    # ไม่ควรพารูปไปด้วยทุกครั้ง และแท็บผู้ใช้ตั้งใจให้คนเปิดอ่านรู้เรื่อง
+    TAB_SIG = "ลายเซ็น"
     USERS_TTL = 15          # วินาที — current_user เรียกทุก request จึงต้องแคช
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -668,7 +698,8 @@ class SheetsStore(StatusMixin, UsersMixin):
     def _ensure_tabs(self):
         meta = self._run(self._api.get(spreadsheetId=self.sheet_id))
         have = {s["properties"]["title"] for s in meta.get("sheets", [])}
-        want = [t for t in (self.TAB_REG, self.TAB_HIST, self.TAB_USERS, self.TAB_SEND)
+        want = [t for t in (self.TAB_REG, self.TAB_HIST, self.TAB_USERS, self.TAB_SEND,
+                            self.TAB_SIG)
                 if t not in have]
         if want:
             self._run(self._api.batchUpdate(spreadsheetId=self.sheet_id, body={"requests": [
@@ -681,6 +712,8 @@ class SheetsStore(StatusMixin, UsersMixin):
             self._append(self.TAB_USERS, [USER_COLS])
         if self.TAB_SEND in want:
             self._append(self.TAB_SEND, [SEND_HEADERS])
+        if self.TAB_SIG in want:
+            self._append(self.TAB_SIG, [["username", "รูปลายเซ็น (PNG base64)", "อัปเดตเมื่อ"]])
 
     RETRY = 3               # ลองซ้ำกี่ครั้งเมื่อเน็ตสะดุด
 
@@ -993,6 +1026,45 @@ class SheetsStore(StatusMixin, UsersMixin):
                     valueInputOption="RAW", body={"values": rows}))
             self._users_cache = None
             self._drop_cache()
+
+    # ---- รูปลายเซ็นของผู้ใช้ — เก็บเป็น base64 ช่องละรูป (รูปถูกย่อให้ไม่เกินเพดานช่องแล้ว) ----
+    def _signature_row(self, username, fresh=False):
+        """คืน (เลขแถวในชีต, base64) ของผู้ใช้คนนี้ หรือ (None, "") ถ้ายังไม่มี"""
+        rows = self._get(self.TAB_SIG, "A:C", fresh=fresh)
+        for i, r in enumerate(rows[1:], start=2):
+            if r and str(r[0]).strip() == username and len(r) > 1 and str(r[1]).strip():
+                return i, str(r[1]).strip()
+        return None, ""
+
+    def load_signature(self, username):
+        import base64
+        _, data = self._signature_row(username)
+        try:
+            return base64.b64decode(data) if data else None
+        except Exception:
+            return None
+
+    def save_signature(self, username, png: bytes):
+        import base64
+        row = [username, base64.b64encode(png).decode("ascii"),
+               now_th().strftime("%Y-%m-%d %H:%M:%S")]
+        with _mem_lock:
+            i, _ = self._signature_row(username, fresh=True)
+            if i:
+                self._run(self._api.values().update(
+                    spreadsheetId=self.sheet_id, range=f"'{self.TAB_SIG}'!A{i}:C{i}",
+                    valueInputOption="RAW", body={"values": [row]}))
+                self._drop_cache()
+            else:
+                self._append(self.TAB_SIG, [row])
+
+    def delete_signature(self, username):
+        with _mem_lock:
+            i, _ = self._signature_row(username, fresh=True)
+            if i:
+                self._run(self._api.values().clear(
+                    spreadsheetId=self.sheet_id, range=f"'{self.TAB_SIG}'!A{i}:C{i}", body={}))
+                self._drop_cache()
 
     # ---- ถอยกลับเวลาลงรับผิด ----
     def _tab_id(self, title):

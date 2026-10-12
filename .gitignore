@@ -12,6 +12,7 @@ token*.json
 token.txt
 phone_config.json
 spp.txt
+signatures/
 
 # ===== ข้อมูลราชการ / ไฟล์งาน =====
 history_ids.txt
