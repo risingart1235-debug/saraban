@@ -207,7 +207,8 @@ def contained_path(root: str, *parts: str):
 # บนเครื่องตัวเองยังใช้ imgbb เหมือนเดิม เพราะเซิร์ฟเวอร์อยู่หลังเราเตอร์บ้าน
 # LINE เข้าไม่ถึง — public_base_url() จะว่าง แล้วโค้ดถอยไปใช้ imgbb เอง
 _LINE_IMG_DIR = core._w("_lineimg")
-_LINE_IMG_KEEP = 60            # เก็บรูปล่าสุดเท่านี้ เกินแล้วลบตัวเก่าทิ้ง
+_LINE_IMG_KEEP = 120           # เก็บรูปล่าสุดเท่านี้ เกินแล้วลบตัวเก่าทิ้ง (เรื่องละไม่เกิน ๔ รูป)
+LINE_MAX_IMAGES = 4            # ข้อความ ๑ + รูป ๔ = ๕ ชิ้น เต็มเพดานต่อการส่งหนึ่งครั้งของ LINE
 _line_images = {}              # โทเคน -> ที่อยู่ไฟล์
 
 
@@ -243,6 +244,18 @@ def publish_line_image(src_path: str) -> str:
             except OSError:
                 pass
     return f"{base}/api/line-image/{token}.jpg"
+
+
+def line_pages(last_page: int) -> list:
+    """เลขหน้าที่จะส่งรูปเข้า LINE: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้
+
+    เกษียณหน้า ๒ ส่ง ๒ หน้า หน้า ๓ ส่ง ๓ หน้า คนในกลุ่มจะได้เห็นคำเกษียณด้วย
+    ไม่ใช่เห็นแค่หน้าแรกที่มีตรายาง — ไกลกว่าเพดาน ๔ รูป ส่งหน้าแรก (ตรายาง)
+    กับหน้าท้ายๆ จนถึงหน้าที่ลงเกษียณ
+    """
+    if last_page <= LINE_MAX_IMAGES:
+        return list(range(1, last_page + 1))
+    return [1] + list(range(last_page - LINE_MAX_IMAGES + 2, last_page + 1))
 
 
 def line_image_path(token: str) -> str:
@@ -951,6 +964,11 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     receipt_no = _reserve_for_job(job, reserve_fn, store)
 
     out_pages = {}          # index หน้าใน PDF -> รูปที่วางของเสร็จแล้ว
+    total = job["total_pages"]
+    used = set()            # เลขหน้าจริงที่มีตรายาง/คำเกษียณ/ลายเซ็น (total+1 = หน้ากระดาษเปล่า)
+
+    def pdf_page(pi):
+        return total + 1 if pi >= len(job["pages"]) else job["pages"][pi]["index"]
 
     def layer(pi):
         if pi not in out_pages:
@@ -959,6 +977,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
 
     stamp_img = render_transparent_stamp(receipt_no, int(st.get("size_pct", 100)), date_str, time_str)
     pi = min(int(st.get("page", 0)), len(job["pages"]) - 1)
+    used.add(pdf_page(pi))
     bg = layer(pi)
     bg.paste(stamp_img,
              (max(0, min(int(float(st.get("left_cm", 1)) * CM), bg.width - stamp_img.width)),
@@ -970,6 +989,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         if not (b.get("text") or "").strip():
             continue
         pi = int(b.get("page", 0))
+        used.add(pdf_page(pi))
         img_w = job["pages"][min(pi, len(job["pages"]) - 1)]["w"]
         max_w = max(10, int(img_w * 0.42 * (b.get("wrap_pct", 100) / 100.0)))
         k = render_transparent_kasien(b.get("text", ""), max_w, b.get("size_pct", 100),
@@ -990,6 +1010,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         k = sigmod.render_block(signature_png, sigmod.short_date_of(date_str),
                                 sig.get("size_pct", 100), CM)
         pi = int(sig.get("page", 0))
+        used.add(pdf_page(pi))
         x = int(float(sig.get("left_cm", 1)) * CM)
         y = int(float(sig.get("top_cm", 1)) * CM)
         if pi >= len(job["pages"]):
@@ -1007,7 +1028,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         img.convert("RGB").save(p, "PDF", resolution=float(DPI))
         made[job["pages"][pi]["index"]] = p
 
-    blank_pdf = None
+    blank_pdf = blank = None
     if extra_pages:
         blank = Image.new("RGB", (job["pages"][0]["w"], job["pages"][0]["h"]), "white")
         for k, x, y in extra_pages:
@@ -1017,7 +1038,6 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         blank.save(blank_pdf, "PDF", resolution=float(DPI))
 
     merger = PdfMerger()
-    total = job["total_pages"]
     for n in range(1, total + 1):
         if n in made:
             merger.append(made[n])                       # หน้าที่วางของแล้ว
@@ -1052,11 +1072,23 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     line_ok = None
     photo_ok = False          # รูปกับข้อความล้มแยกกันได้ ต้องรายงานแยกกัน
     try:
-        p1 = os.path.join(d, "line.jpg")
-        layer(0).convert("RGB").save(p1, "JPEG", quality=88)
-        # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
-        url = publish_line_image(p1) or upload_to_imgbb(p1)
-        photo_ok = bool(url)
+        pi_of = {p["index"]: i for i, p in enumerate(job["pages"])}
+        pages = line_pages(max(used))
+        urls = []
+        for n in pages:
+            if n > total:                       # หน้ากระดาษเปล่าท้ายเล่มที่ลงเกษียณไว้
+                img = blank
+            elif n in pi_of:                    # หน้าที่เปิดให้วางของ (วางแล้วหรือยังก็ได้)
+                img = layer(pi_of[n])
+            else:                               # หน้าที่อยู่ระหว่างกลาง ไม่มีอะไรวาง
+                img = _render_pdf_page(job["pdf_path"], n, DPI)[0]
+            p = os.path.join(d, f"line{n}.jpg")
+            img.convert("RGB").save(p, "JPEG", quality=88)
+            # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
+            url = publish_line_image(p) or upload_to_imgbb(p)
+            if url:
+                urls.append(url)
+        photo_ok = len(urls) == len(pages)
         dd = job["doc_date"]
         shown = (format_scraped_date(dd) if ("ม.ค." not in dd and "ก.พ." not in dd and dd != "-")
                  else to_thai_digits(dd))
@@ -1068,7 +1100,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
                f"🌟หนังสือลงวันที่ : {shown}\n"
                f"⚠️คำเกษียนหนังสือ:{kasien_line}\n"
                f"{job['attach']}")
-        line_ok = bool(send_line_with_image(msg, url))
+        line_ok = bool(send_line_with_image(msg, urls))
     except Exception:
         line_ok = False
 

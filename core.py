@@ -411,11 +411,16 @@ def upload_to_imgbb(image_path):
         return None
 
 def send_line_with_image(text, image_url=None):
+    """ส่งข้อความ + รูป เข้ากลุ่ม LINE — image_url เป็น URL เดียว หรือรายการ URL ก็ได้
+
+    LINE รับได้ไม่เกิน ๕ ชิ้นต่อการส่งหนึ่งครั้ง (ข้อความ ๑ + รูป ๔) ส่งรวดเดียว
+    นับโควตาเป็นข้อความเดียว เท่ากับส่งรูปเดียว
+    """
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'}
-    if image_url:
-        payload = {'to': LINE_GROUP_ID, 'messages': [{'type': 'text', 'text': text}, {'type': 'image', 'originalContentUrl': image_url, 'previewImageUrl': image_url}]}
-    else:
-        payload = {'to': LINE_GROUP_ID, 'messages': [{'type': 'text', 'text': text}]}
+    urls = image_url if isinstance(image_url, (list, tuple)) else [image_url]
+    messages = ([{'type': 'text', 'text': text}] + [
+        {'type': 'image', 'originalContentUrl': u, 'previewImageUrl': u} for u in urls if u])[:5]
+    payload = {'to': LINE_GROUP_ID, 'messages': messages}
     try:
         r = requests.post('https://api.line.me/v2/bot/message/push', headers=headers, json=payload, timeout=30)
         if r.status_code != 200:
