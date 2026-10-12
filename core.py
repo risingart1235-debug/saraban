@@ -142,6 +142,50 @@ def _w(name):
     """ที่อยู่ไฟล์ที่ต้องเขียนได้จริง"""
     return os.path.join(WORK_DIR, name)
 
+
+# ความลับที่ตั้งไว้บน hosting อยู่แล้ว เอามาแปลงเป็นกุญแจของเซิร์ฟเวอร์ ไม่ต้องตั้งตัวแปรเพิ่ม
+# (ไม่ใช้โทเคนมือถือ เพราะโทเคนนั้นถูกคัดลอกไปไว้ในมือถือ ไม่ควรเป็นกุญแจของเว็บได้)
+_SERVER_SECRET_ENV = ("SARABAN_SESSION_SECRET", "SARABAN_SA_JSON", "SARABAN_DRIVE_OAUTH",
+                      "SARABAN_GEMINI_API_KEY", "SARABAN_LINE_ACCESS_TOKEN")
+
+
+def server_key(purpose):
+    """กุญแจลับของเซิร์ฟเวอร์สำหรับงานหนึ่งๆ (คุกกี้ล็อกอิน, ลิงก์รูปที่ส่ง LINE)
+
+    ต้องได้ค่าเดิมทุกครั้งที่เซิร์ฟเวอร์บูตใหม่ ไม่งั้นของที่เซ็นไว้ก่อนเริ่มใหม่ใช้ไม่ได้หมด
+    ๑. SARABAN_SESSION_SECRET ถ้าตั้งไว้ / ๒. ความลับที่ตั้งไว้บน hosting อยู่แล้ว
+    ๓. เครื่องในโรงเรียน: สุ่มครั้งแรกแล้วเก็บเป็นไฟล์ session.key ไว้ใช้ต่อ
+    แต่ละงานได้กุญแจคนละดอก (แปลงด้วยชื่องาน) รู้ดอกหนึ่งก็ปลอมของอีกงานไม่ได้
+    """
+    import hashlib
+    import hmac
+    label = purpose.encode() if isinstance(purpose, str) else purpose
+    for name in _SERVER_SECRET_ENV:
+        v = os.environ.get(name, "").strip()
+        if v:
+            return hmac.new(v.encode(), label, hashlib.sha256).digest()
+    return hmac.new(_local_secret(), label, hashlib.sha256).digest()
+
+
+def _local_secret():
+    import secrets
+    path = _w("session.key")
+    try:
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) >= 32:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+    except OSError:
+        pass          # เขียนไฟล์ไม่ได้ ใช้กุญแจสุ่มไปก่อน (เริ่มใหม่แล้วของที่เซ็นไว้ใช้ไม่ได้ แบบเดิม)
+    return key
+
 # ที่เก็บไฟล์งาน — ตั้งผ่านตัวแปรระบบ SARABAN_OUTPUT ได้
 # เครื่องที่ทำงานอยู่ใช้ C:\แฟ้มเสนอ_ผอ เหมือนเดิม ส่วนเซิร์ฟเวอร์ Linux ตั้งเป็นที่อื่น
 OUTPUT_ROOT = os.environ.get("SARABAN_OUTPUT") or (

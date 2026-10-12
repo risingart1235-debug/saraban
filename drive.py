@@ -374,6 +374,78 @@ def queue_fetch(file_id: str, dest: str) -> str:
     return dest
 
 
+# ==========================================================
+# รูปที่ส่งเข้า LINE — ฝากไว้ให้ลิงก์ในแชตยังเปิดได้หลังเซิร์ฟเวอร์เกิดใหม่
+# ==========================================================
+# LINE ไม่ได้เก็บรูปต้นฉบับไว้เองตลอด พอมีคนกดเปิดดูทีหลัง LINE จะมาดึงจากลิงก์อีกรอบ
+# ถ้าตอนนั้นเซิร์ฟเวอร์เพิ่งเริ่มใหม่ (ดิสก์ถูกล้าง) จะขึ้นว่ารูปหมดอายุ จึงฝากสำเนาไว้ที่นี่
+# ไฟล์ไม่ได้แชร์สาธารณะ เปิดได้ทางเดียวคือผ่านลิงก์ที่เซิร์ฟเวอร์เซ็นกำกับไว้
+LINE_FOLDER_NAME = "รูปที่ส่ง LINE"
+
+
+def _line_folder() -> str:
+    with _io_lock:      # สองเธรดเรียกพร้อมกันตอนเพิ่งบูต จะได้ไม่สร้างโฟลเดอร์ชื่อซ้ำสองอัน
+        return ensure_subfolder(LINE_FOLDER_NAME, target_folder())
+
+
+def line_image_put(local_jpg: str, name: str) -> str:
+    """ฝากรูปไว้ คืน id ของไฟล์ (คืน "" ถ้าไม่ได้เปิดใช้ไดร์ฟ)"""
+    if not enabled():
+        return ""
+    from googleapiclient.http import MediaFileUpload
+    f = _run(_service().files().create(
+        body={"name": name, "parents": [_line_folder()]},
+        media_body=MediaFileUpload(local_jpg, mimetype="image/jpeg", resumable=False),
+        fields="id", supportsAllDrives=True))
+    return f.get("id", "")
+
+
+def line_image_get(name: str, dest: str) -> bool:
+    """ดึงรูปที่ฝากไว้กลับลงเครื่อง — False ถ้าไม่มีรูปนี้ (ลบไปตามอายุแล้ว หรือฝากไม่ทัน)"""
+    if not enabled():
+        return False
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "", name)
+    # LINE มักขอรูปเดียวกันซ้อนกัน (รูปย่อ + รูปเต็ม) ให้ดึงทีละคำขอ คนหลังเจอไฟล์ที่ได้แล้ว
+    with _io_lock:
+        if os.path.exists(dest):
+            return True
+        res = _run(_service().files().list(
+            q=f"name = '{safe}' and '{_line_folder()}' in parents and trashed = false",
+            fields="files(id)", pageSize=1,
+            supportsAllDrives=True, includeItemsFromAllDrives=True))
+        files = res.get("files", [])
+        if not files:
+            return False
+        part = dest + ".part"
+        try:
+            queue_fetch(files[0]["id"], part)
+            os.replace(part, dest)        # ไฟล์ครึ่งๆ กลางๆ จะไม่ถูกเสิร์ฟออกไป
+        finally:
+            if os.path.exists(part):
+                os.remove(part)
+        return True
+
+
+def line_images_prune(days: int) -> int:
+    """ลบรูปที่ฝากไว้นานเกิน days วัน คืนจำนวนที่ลบ"""
+    if not enabled() or days <= 0:
+        return 0
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    svc = _service()
+    q = f"'{_line_folder()}' in parents and trashed = false and createdTime < '{cutoff}'"
+    removed = 0
+    while True:
+        files = _run(svc.files().list(q=q, fields="files(id)", pageSize=100,
+                                      supportsAllDrives=True,
+                                      includeItemsFromAllDrives=True)).get("files", [])
+        for f in files:
+            _run(svc.files().delete(fileId=f["id"], supportsAllDrives=True))
+            removed += 1
+        if len(files) < 100:
+            return removed
+
+
 def check() -> dict:
     """ทดสอบว่าเข้าถึงโฟลเดอร์ได้จริงไหม
 

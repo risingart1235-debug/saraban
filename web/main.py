@@ -106,34 +106,8 @@ SESSION_SECONDS = 60 * 60 * 12
 
 def _session_key() -> bytes:
     """กุญแจเซ็นคุกกี้ — ต้องได้ค่าเดิมทุกครั้งที่บูต ไม่งั้นเริ่มใหม่แล้วก็หลุดเหมือนเดิม
-
-    ๑. SARABAN_SESSION_SECRET ถ้าตั้งไว้
-    ๒. ความลับที่ตั้งไว้บน hosting อยู่แล้ว (กุญแจ service account ฯลฯ) แปลงเป็นกุญแจใหม่
-       ไม่ต้องไปตั้งตัวแปรเพิ่มบน Render และไม่ได้ใช้ความลับตัวจริงเซ็นตรงๆ
-       (ไม่ใช้โทเคนมือถือ เพราะโทเคนนั้นถูกคัดลอกไปไว้ในมือถือ ไม่ควรเป็นกุญแจเข้าเว็บได้)
-    ๓. เครื่องในโรงเรียน: สุ่มครั้งแรกแล้วเก็บเป็นไฟล์ไว้ใช้ต่อ
-    """
-    for name in ("SARABAN_SESSION_SECRET", "SARABAN_SA_JSON", "SARABAN_DRIVE_OAUTH",
-                 "SARABAN_GEMINI_API_KEY", "SARABAN_LINE_ACCESS_TOKEN"):
-        v = os.environ.get(name, "").strip()
-        if v:
-            return hmac.new(v.encode(), b"saraban login cookie", hashlib.sha256).digest()
-    path = core._w("session.key")
-    try:
-        with open(path, "rb") as f:
-            key = f.read()
-        if len(key) >= 32:
-            return key
-    except OSError:
-        pass
-    key = secrets.token_bytes(32)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
-    except OSError:
-        pass          # เขียนไฟล์ไม่ได้ ใช้กุญแจสุ่มไปก่อน (เริ่มใหม่แล้วต้องล็อกอินใหม่ แบบเดิม)
-    return key
+    (ที่มาของกุญแจดู core.server_key — ไม่ต้องตั้งอะไรเพิ่มบน Render)"""
+    return core.server_key("saraban login cookie")
 
 
 _SESSION_KEY = _session_key()
@@ -480,14 +454,18 @@ async def api_send_request(request: Request):
 def api_line_image(token: str):
     """ให้เซิร์ฟเวอร์ของ LINE มาดึงรูปหน้าที่ลงรับ
 
-    ต้องเปิดสาธารณะ ไม่มีล็อกอิน เพราะ LINE มาดึงแบบไม่มีตัวตน กันด้วยโทเคน
-    สุ่ม ๒๔ ไบต์แทน เดาไม่ได้ ไม่ถูกลิสต์ที่ไหน และหายไปเองเมื่อเซิร์ฟเวอร์รีสตาร์ท
-    ปลอดภัยกว่าเดิมที่อัปหนังสือราชการขึ้นเว็บฝากรูปสาธารณะแบบถาวร
+    ต้องเปิดสาธารณะ ไม่มีล็อกอิน เพราะ LINE มาดึงแบบไม่มีตัวตน กันด้วยโทเคนสุ่ม
+    ที่เซ็นกำกับไว้ เดาไม่ได้ ปลอมไม่ได้ ไม่ถูกลิสต์ที่ไหน ปลอดภัยกว่าเดิมที่อัป
+    หนังสือราชการขึ้นเว็บฝากรูปสาธารณะแบบถาวร
+    เซิร์ฟเวอร์เพิ่งเริ่มใหม่ก็ยังเปิดได้ — ดึงสำเนาที่ฝากไว้บนไดร์ฟกลับมาให้ (อยู่ได้
+    SARABAN_LINE_IMG_DAYS วัน) เดิมรูปหายทุกครั้งที่เซิร์ฟเวอร์หลับแล้วตื่น LINE ขึ้นว่าหมดอายุ
     """
     path = docmode.line_image_path(token)
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="ไม่พบรูป")
-    return FileResponse(path, media_type="image/jpeg")
+    # ลิงก์หนึ่งคือรูปเดียวตลอดไป ให้ LINE เก็บไว้ได้นาน ไม่ต้องกลับมาปลุกเซิร์ฟเวอร์บ่อยๆ
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=2592000, immutable"})
 
 
 @app.get("/healthz")

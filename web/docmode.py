@@ -9,10 +9,13 @@ import os
 import io
 import re
 import base64
+import hashlib
+import hmac
 import queue
 import secrets
 import shutil
 import threading
+import time
 import traceback
 import unicodedata
 import uuid
@@ -210,9 +213,19 @@ def contained_path(root: str, *parts: str):
 #
 # บนเครื่องตัวเองยังใช้ imgbb เหมือนเดิม เพราะเซิร์ฟเวอร์อยู่หลังเราเตอร์บ้าน
 # LINE เข้าไม่ถึง — public_base_url() จะว่าง แล้วโค้ดถอยไปใช้ imgbb เอง
+#
+# รูปหมดอายุเร็ว (ไม่ถึงชั่วโมง): เดิมเก็บรูปไว้แค่บนดิสก์ชั่วคราวกับรายชื่อในหน่วยความจำ
+# Render ฟรีหลับเองเมื่อไม่มีใครเข้า ๑๕ นาที และเริ่มใหม่ทุกครั้งที่ deploy ตื่นมาทั้งสองอย่าง
+# ว่างเปล่า LINE มาดึงรูปตอนมีคนกดเปิดดูทีหลังเจอ "ไม่พบ" จึงขึ้นว่ารูปหมดอายุ
+# ตอนนี้ฝากสำเนาไว้บนไดร์ฟด้วย ลิงก์เซ็นกำกับไว้ (ไม่ต้องจำในหน่วยความจำ) เริ่มใหม่แล้ว
+# มีคนเปิดเมื่อไร ดึงกลับจากไดร์ฟมาให้ — รูปไม่ได้เปิดสาธารณะ ดูได้ผ่านลิงก์นี้ทางเดียวเหมือนเดิม
 _LINE_IMG_DIR = core._w("_lineimg")
-_LINE_IMG_KEEP = 120           # เก็บรูปล่าสุดเท่านี้ เกินแล้วลบตัวเก่าทิ้ง (เรื่องละไม่เกิน ๔ รูป)
-_line_images = {}              # โทเคน -> ที่อยู่ไฟล์
+_LINE_IMG_KEEP = 120           # สำเนาบนเครื่องเก็บล่าสุดเท่านี้ ที่เก่ากว่านั้นดึงจากไดร์ฟเอา
+# เก็บบนไดร์ฟกี่วัน (๐ = เก็บตลอด) — ไฟล์ PDF ฉบับเต็มอยู่ในไดร์ฟถาวรอยู่แล้ว
+LINE_IMG_DAYS = _env_int("SARABAN_LINE_IMG_DAYS", 90, 0, 3650)
+_LINE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{40}")
+_line_key = None
+_line_pruned_at = 0.0
 
 
 def public_base_url() -> str:
@@ -225,37 +238,106 @@ def public_base_url() -> str:
             or os.environ.get("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
 
 
+def _line_sig(head: str) -> str:
+    global _line_key
+    if _line_key is None:
+        _line_key = core.server_key("saraban line image")
+    mac = hmac.new(_line_key, head.encode(), hashlib.sha256).digest()[:12]
+    return base64.urlsafe_b64encode(mac).decode()
+
+
+def _new_line_token() -> str:
+    """โทเคนในลิงก์รูป = สุ่ม ๒๔ ตัว + ลายเซ็น ๑๖ ตัว (เดาไม่ได้ และปลอมไม่ได้)"""
+    head = secrets.token_urlsafe(18)
+    return head + _line_sig(head)
+
+
+def _line_token_ok(token: str) -> bool:
+    """ตรวจลายเซ็นก่อนเสมอ — โทเคนมั่วๆ ตอบ "ไม่พบ" ทันที ไม่ต้องไปถามไดร์ฟ
+    (ไม่งั้นใครยิงลิงก์มั่วรัวๆ ก็ทำให้เซิร์ฟเวอร์ไปค้นไดร์ฟจนคิวงานไดร์ฟอื่นติดหมด)"""
+    token = str(token or "")
+    return bool(_LINE_TOKEN_RE.fullmatch(token)) and hmac.compare_digest(
+        token[24:].encode(), _line_sig(token[:24]).encode())
+
+
 def publish_line_image(src_path: str) -> str:
     """คัดลอกรูปไปที่ที่เปิดให้ดึงได้ แล้วคืน URL — คืน "" ถ้ารันในเครื่อง
 
     คัดลอกออกมาแทนที่จะเสิร์ฟจากโฟลเดอร์งานโดยตรง เพราะ _cleanup() ลบโฟลเดอร์งาน
-    ทิ้งตาม JOB_TTL ถ้า LINE มาดึงช้ากว่านั้นจะได้รูปหาย
+    ทิ้งตาม JOB_TTL ถ้า LINE มาดึงช้ากว่านั้นจะได้รูปหาย และฝากสำเนาขึ้นไดร์ฟเบื้องหลัง
+    (LINE มาดึงครั้งแรกทันทีหลังส่ง ใช้สำเนาบนเครื่องได้เลย ไม่ต้องรออัปเสร็จ)
     """
     base = public_base_url()
     if not base:
         return ""
     os.makedirs(_LINE_IMG_DIR, exist_ok=True)
-    token = secrets.token_urlsafe(24)
+    token = _new_line_token()
     dest = os.path.join(_LINE_IMG_DIR, token + ".jpg")
     shutil.copyfile(src_path, dest)
-    with _lock:
-        _line_images[token] = dest
-        while len(_line_images) > _LINE_IMG_KEEP:
-            old = _line_images.pop(next(iter(_line_images)))
-            try:
-                os.remove(old)
-            except OSError:
-                pass
+    _trim_line_images()
+    _backup_line_image(token, dest)
     return f"{base}/api/line-image/{token}.jpg"
 
 
-def line_image_path(token: str) -> str:
-    """หาที่อยู่ไฟล์จากโทเคน — ดูจากทะเบียนในหน่วยความจำเท่านั้น
+def _trim_line_images():
+    """สำเนาบนเครื่องเก็บแค่ล่าสุด _LINE_IMG_KEEP รูป ที่เก่ากว่านั้นยังอยู่บนไดร์ฟ"""
+    try:
+        files = sorted((e for e in os.scandir(_LINE_IMG_DIR) if e.name.endswith(".jpg")),
+                       key=lambda e: e.stat().st_mtime)
+    except OSError:
+        return
+    for e in files[:-_LINE_IMG_KEEP]:
+        try:
+            os.remove(e.path)
+        except OSError:
+            pass
 
-    ไม่เอาโทเคนไปต่อเป็นชื่อไฟล์ตรงๆ จะได้ไม่มีทางหลุดไปอ่านไฟล์อื่นในเครื่อง
+
+def _backup_line_image(token: str, path: str):
+    """ฝากรูปขึ้นไดร์ฟเบื้องหลัง (คิวเดียวกับงานไดร์ฟอื่น ยิงทีละคำสั่ง) แล้วเก็บกวาดรูปเก่า"""
+    def work():
+        global _line_pruned_at
+        try:
+            import drive as _dr
+            if not _dr.enabled():
+                return
+            # อัปจากสำเนาบนเครื่อง ถ้าโดนเก็บกวาดไปก่อนถึงคิว (รูปเยอะมาก) ก็ข้าม
+            if os.path.exists(path):
+                _dr.line_image_put(path, token + ".jpg")
+            # เก็บกวาดรูปที่เก่าเกิน LINE_IMG_DAYS วัน — วันละครั้งพอ
+            if LINE_IMG_DAYS and time.time() - _line_pruned_at > 12 * 3600:
+                _line_pruned_at = time.time()
+                gone = _dr.line_images_prune(LINE_IMG_DAYS)
+                if gone:
+                    print(f"ลบรูปที่ส่ง LINE ที่เก่าเกิน {LINE_IMG_DAYS} วันออกจากไดร์ฟ {gone} รูป")
+        except Exception as e:
+            print(f"ฝากรูปที่ส่ง LINE ขึ้นไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+
+    _drive_tasks.put(work)
+
+
+def line_image_path(token: str) -> str:
+    """หาไฟล์รูปจากโทเคน คืน "" ถ้าไม่มี
+
+    โทเคนผ่านการตรวจลายเซ็นและรูปแบบ (ตัวอักษร A-Z a-z 0-9 _ - ยาว ๔๐ ตัวพอดี) ก่อนจะเอาไป
+    ต่อเป็นชื่อไฟล์ จึงไม่มีทางหลุดไปอ่านไฟล์อื่นในเครื่อง
+    ไม่มีบนเครื่อง (เซิร์ฟเวอร์เพิ่งเริ่มใหม่ ดิสก์ถูกล้าง) ก็ดึงสำเนาที่ฝากไว้บนไดร์ฟกลับมา
     """
-    with _lock:
-        return _line_images.get(token, "")
+    if not _line_token_ok(token):
+        return ""
+    path = os.path.join(_LINE_IMG_DIR, token + ".jpg")
+    if os.path.exists(path):
+        return path
+    try:
+        import drive as _dr
+        if _dr.enabled():
+            os.makedirs(_LINE_IMG_DIR, exist_ok=True)
+            if _dr.line_image_get(token + ".jpg", path):
+                _trim_line_images()
+                return path
+    except Exception as e:
+        print(f"ดึงรูปที่ส่ง LINE กลับจากไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+    return ""
 
 
 # ==========================================================
