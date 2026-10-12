@@ -14,10 +14,21 @@
   }
   .page:last-child { margin-bottom:0 }
   .page > img.bg { width:100%; display:block; pointer-events:none }
-  .page .plabel {
-    position:absolute; top:0; left:0; background:rgba(0,0,0,.55); color:#fff;
-    font-size:11px; padding:3px 8px; border-radius:0 0 8px 0; z-index:5; pointer-events:none;
+  .page .phead {
+    position:absolute; top:0; left:0; z-index:6; display:flex; align-items:flex-start; gap:6px;
+    pointer-events:none;
   }
+  .page .plabel {
+    background:rgba(0,0,0,.55); color:#fff;
+    font-size:11px; padding:3px 8px; border-radius:0 0 8px 0;
+  }
+  /* เลือกว่าหน้านี้ส่งเข้า LINE ไหม — เขียว = ส่ง (สีเดียวกับ LINE) */
+  .page .lbtn {
+    pointer-events:auto; margin-top:4px; border:1px solid #9ca3af; background:rgba(255,255,255,.95);
+    color:#4b5563; border-radius:999px; padding:3px 10px; font-size:12px; font-family:inherit;
+    cursor:pointer;
+  }
+  .page .lbtn.on { background:#06c755; border-color:#06c755; color:#fff; font-weight:700 }
   .ov { position:absolute; cursor:grab; touch-action:none; }
   .ov img { width:100%; display:block; pointer-events:none }
   .ov.sel { outline:2px dashed #e91e63; outline-offset:2px }
@@ -175,6 +186,8 @@
     </div>
     </div>
 
+    <p class="tiny" style="margin:0 0 8px">📤 <span id="lineSum"></span>
+      — แตะปุ่มบนแต่ละหน้าเพื่อเลือก (ไม่เกิน ๔ หน้า)</p>
     <div class="stage"><div id="pages"></div></div>
   </div>
 
@@ -272,14 +285,16 @@ function build() {
 
   // หน้าเอกสาร + หน้ากระดาษเปล่าท้ายเล่มไว้วางคำเกษียณ
   const box = $('pages'); box.innerHTML = '';
-  D.pages.forEach((p, i) => box.appendChild(mkPage(i, p.name, p.png, p.w, p.h)));
+  D.pages.forEach((p, i) => box.appendChild(mkPage(i, p.name, p.png, p.w, p.h, p.index)));
   const last = D.pages[D.pages.length - 1];
-  box.appendChild(mkPage(D.pages.length, 'หน้ากระดาษเปล่า (ต่อท้าย)', null, last.w, last.h));
+  box.appendChild(mkPage(D.pages.length, 'หน้ากระดาษเปล่า (ต่อท้าย)', null, last.w, last.h,
+                         D.total_pages + 1));
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
   D.sig = null;                 // ลายเซ็นไม่แทรกเอง ต้องกดปุ่มแทรกก่อน
   loadSig();
+  linePick = null; showLine();
   const pref = indentPref();
   if (pref !== null) {
     for (const b of D.boxes) if (b.indent_pct !== pref) { b.indent_pct = pref; renderBox(b); }
@@ -287,11 +302,13 @@ function build() {
   select(D.boxes[0] ? D.boxes[0].id : 'stamp');
 }
 
-function mkPage(i, name, png, w, h) {
+function mkPage(i, name, png, w, h, pdfNo) {
   const el = document.createElement('div');
   el.className = 'page'; el.dataset.index = i;
   el.style.aspectRatio = `${w} / ${h}`;
-  el.innerHTML = `<span class="plabel">${name}</span>` + (png ? `<img class="bg" src="${png}">` : '');
+  el.innerHTML = `<div class="phead"><span class="plabel">${name}</span>` +
+    `<button class="lbtn" data-line="${pdfNo}"></button></div>` +
+    (png ? `<img class="bg" src="${png}">` : '');
   return el;
 }
 
@@ -335,6 +352,7 @@ function onDown(e) {
     ev.currentTarget.classList.remove('dragging');
     ev.currentTarget.removeEventListener('pointermove', onMove);
     drag = null;
+    showLine();
   };
   e.currentTarget.addEventListener('pointerup', up, { once: true });
   e.currentTarget.addEventListener('pointercancel', up, { once: true });
@@ -356,6 +374,9 @@ function onMove(e) {
       const ni = +p.dataset.index;
       if (ni !== o.page) {
         o.page = ni; p.appendChild(o._el);
+        // ย้ายกล่องไปอยู่หน้าใหม่ = ถอดออกจากหน้าเดิม เบราว์เซอร์จะปล่อยการจับนิ้วทิ้ง
+        // ต้องจับใหม่ ไม่งั้นลากข้ามได้แค่หน้าเดียวแล้วกล่องหยุดตามนิ้ว (ปล่อยนิ้วก็ไม่รู้ตัว)
+        o._el.setPointerCapture(e.pointerId);
         o.top_cm = (e.clientY - r.top) / r.height * pageSize(ni).h / D.cm;
       }
       break;
@@ -466,7 +487,7 @@ $('bdel').onclick = () => {
   if (D.boxes.length <= 1) { alert('ต้องเหลือกล่องคำเกษียณอย่างน้อย ๑ กล่อง'); return; }
   const b = objOf(sel); b._el.remove();
   D.boxes = D.boxes.filter(x => x.id !== sel);
-  select(D.boxes[0].id);
+  select(D.boxes[0].id); showLine();
 };
 
 $('badd').onclick = async () => {
@@ -479,7 +500,7 @@ $('badd').onclick = async () => {
   const r = await fetch(`/api/doc/${JOB}/box`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nb) });
   Object.assign(nb, await readJSON(r));
-  D.boxes.push(nb); addOverlay(id, nb); select(id);
+  D.boxes.push(nb); addOverlay(id, nb); select(id); showLine();
   // เพิ่งเพิ่มกล่อง ต้องพิมพ์ข้อความต่อทันที พาไปที่ช่องพิมพ์ให้เลย
   $('selBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
@@ -561,7 +582,7 @@ $('sigAdd').onclick = async () => {
   }
   D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
   $('sigDateVal').textContent = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
-  sigMsg(); showSigCard(); select('sig');
+  sigMsg(); showSigCard(); select('sig'); showLine();
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
@@ -590,7 +611,7 @@ $('sgp').onclick = () => sigStep(10);
 $('sigDel').onclick = () => {
   if (!D.sig) return;
   D.sig._el.remove(); D.sig = null;
-  showSigCard(); select(D.boxes[0] ? D.boxes[0].id : 'stamp');
+  showSigCard(); select(D.boxes[0] ? D.boxes[0].id : 'stamp'); showLine();
 };
 
 // ยังไม่มีรูป: เลือกรูปตรงนี้ได้เลย ระบบตัดพื้นหลังแล้วจำไว้ใช้ครั้งต่อไป แล้วแทรกให้ทันที
@@ -614,13 +635,54 @@ $('sigFile').onchange = async () => {
   }
 };
 
+// ---------- เลือกหน้าที่จะส่งเข้า LINE ----------
+// เริ่มต้น: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้ (กติกาเดียวกับเซิร์ฟเวอร์ core.line_pages)
+// และเปลี่ยนตามเวลาลากของไปหน้าอื่น จนกว่าจะแตะเลือกเอง — แตะแล้วยึดตามที่เลือก
+const LINE_MAX = 4;           // ข้อความ ๑ + รูป ๔ = เพดาน ๕ ชิ้นต่อการส่งหนึ่งครั้งของ LINE
+let linePick = null;          // null = ยังไม่ได้เลือกเอง ใช้ค่าอัตโนมัติ
+const thaiNum = (n) => String(n).replace(/[0-9]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'[c]);
+function pdfPageOf(i) { return i >= D.pages.length ? D.total_pages + 1 : D.pages[i].index; }
+function autoLinePages() {
+  const used = [pdfPageOf(D.stamp.page)];
+  for (const b of D.boxes) if ((b.text || '').trim()) used.push(pdfPageOf(b.page));
+  if (D.sig) used.push(pdfPageOf(D.sig.page));
+  const last = Math.max(1, ...used);
+  if (last <= LINE_MAX) return Array.from({ length: last }, (_, k) => k + 1);
+  return [1, last - 2, last - 1, last];
+}
+function linePages() { return linePick || autoLinePages(); }
+function showLine() {
+  const chosen = new Set(linePages());
+  for (const b of document.querySelectorAll('.lbtn')) {
+    const on = chosen.has(+b.dataset.line);
+    b.classList.toggle('on', on);
+    b.textContent = on ? '✓ ส่ง LINE' : 'ไม่ส่ง LINE';
+  }
+  const names = [...chosen].sort((a, b) => a - b)
+    .map(n => n > D.total_pages ? 'กระดาษเปล่า' : thaiNum(n));
+  $('lineSum').textContent = names.length
+    ? 'ส่งเข้า LINE: หน้า ' + names.join(', ')
+    : 'ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป';
+}
+$('pages').addEventListener('click', (e) => {
+  const b = e.target.closest('.lbtn'); if (!b) return;
+  const n = +b.dataset.line, cur = new Set(linePages());
+  if (cur.has(n)) cur.delete(n);
+  else if (cur.size >= LINE_MAX) {
+    alert(`ส่งรูปเข้า LINE ได้ครั้งละไม่เกิน ${thaiNum(LINE_MAX)} หน้า — แตะเอาหน้าอื่นออกก่อน`);
+    return;
+  } else cur.add(n);
+  linePick = [...cur].sort((a, b) => a - b);
+  showLine();
+});
+
 // ---------- บันทึก / ไม่รับ ----------
 function payload() {
   const strip = (o) => ({ page: o.page, left_cm: o.left_cm, top_cm: o.top_cm,
                           size_pct: o.size_pct, wrap_pct: o.wrap_pct, indent_pct: o.indent_pct,
                           bg: o.bg, border: o.border, text: o.text });
   const g = D.sig;
-  return { date: $('d').value, time: $('t').value,
+  return { date: $('d').value, time: $('t').value, line_pages: linePages(),
            stamp: strip(D.stamp), boxes: D.boxes.map(strip),
            signature: g ? { page: g.page, left_cm: g.left_cm, top_cm: g.top_cm,
                             size_pct: g.size_pct } : null };

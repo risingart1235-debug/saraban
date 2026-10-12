@@ -30,7 +30,7 @@ from core import (
     find_stamp_pos, find_kasien_pos,
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
-    format_scraped_date, get_next_receipt_no, line_pages,
+    format_scraped_date, get_next_receipt_no, line_pages, LINE_MAX_IMAGES,
     upload_to_imgbb, send_line_with_image, PdfMerger,
 )
 
@@ -243,6 +243,13 @@ def publish_line_image(src_path: str) -> str:
             except OSError:
                 pass
     return f"{base}/api/line-image/{token}.jpg"
+
+
+def chosen_line_pages(chosen, total: int, has_blank: bool) -> list:
+    """หน้าที่ผู้ใช้เลือกส่งเข้า LINE บนหน้าจอ — เอาเฉพาะหน้าที่มีจริงในไฟล์ ไม่ซ้ำ เรียงตามหน้า
+    ไม่เกินเพดานของ LINE (หน้ากระดาษเปล่าท้ายเล่ม = total+1 มีเมื่อวางของไว้เท่านั้น)"""
+    valid = set(range(1, total + 1)) | ({total + 1} if has_blank else set())
+    return sorted({int(n) for n in chosen if str(n).isdigit() and int(n) in valid})[:LINE_MAX_IMAGES]
 
 
 def line_image_path(token: str) -> str:
@@ -799,12 +806,11 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                       "png": _png_uri(_render_pdf_page(pdf_path, sig_page, PREVIEW_DPI)[0]),
                       "w": psig.width, "h": psig.height, "index": sig_page})
 
-    # เรื่องที่ขึ้นคำเตือน "อาจไม่ใช่หนังสือของโรงเรียนเรา" ต้องเห็นครบทุกหน้า
-    # เพราะบัญชีรายชื่อที่ส่งมาด้วยมักอยู่หน้าท้ายๆ ไม่ใช่หน้าแรก ถ้าเห็นแค่หน้าแรก
-    # กับหน้าลายเซ็น ก็ตัดสินไม่ได้ว่าโรงเรียนเราอยู่ในรายชื่อหรือเปล่า
-    # เรื่องที่เรียนถึงทุกแห่งในสังกัด (auto) ไม่ต้องทำ เพราะไม่ต้องตรวจอะไร
+    # แสดงทุกหน้าในเอกสาร (ไม่เกิน MAX_REVIEW_PAGES) — วางของได้ทุกหน้า เลือกได้ว่าจะส่งหน้าไหน
+    # เข้า LINE และเรื่องที่ขึ้นคำเตือน "อาจไม่ใช่หนังสือของโรงเรียนเรา" ก็ได้ตรวจบัญชีรายชื่อ
+    # ที่มักอยู่หน้าท้ายๆ ด้วย (เดิมแสดงครบเฉพาะเรื่องที่ขึ้นคำเตือน)
     all_pages = False
-    if category != "auto" and total > len(pages):
+    if total > len(pages):
         shown = {pg["index"] for pg in pages}
         scale = DPI // PREVIEW_DPI          # w/h ต้องเป็นขนาดที่ DPI เต็ม เพราะใช้คิดตำแหน่งเป็นซม.
         for n in range(1, min(total, MAX_REVIEW_PAGES) + 1):
@@ -1060,7 +1066,11 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     photo_ok = False          # รูปกับข้อความล้มแยกกันได้ ต้องรายงานแยกกัน
     try:
         pi_of = {p["index"]: i for i, p in enumerate(job["pages"])}
-        pages = line_pages(max(used))
+        chosen = payload.get("line_pages")
+        if isinstance(chosen, list):            # เลือกเองบนหน้าจอ (ไม่เลือกสักหน้า = ข้อความอย่างเดียว)
+            pages = chosen_line_pages(chosen, total, blank is not None)
+        else:                                   # หน้าเว็บรุ่นเก่าไม่ได้ส่งมา ใช้กติกาเดิม
+            pages = line_pages(max(used))
         urls = []
         for n in pages:
             if n > total:                       # หน้ากระดาษเปล่าท้ายเล่มที่ลงเกษียณไว้

@@ -49,6 +49,24 @@ class DesktopPagesWithItemsTests(unittest.TestCase):
         self.assertEqual(core.pages_with_items([(5000, 200)], self.PAGES[:2]), set())
 
 
+class ChosenPagesTests(unittest.TestCase):
+    """pages ticked on screen: only real pages, once each, in page order, at most 4"""
+
+    def test_keeps_real_pages_in_order_once(self):
+        from web import docmode
+        self.assertEqual(docmode.chosen_line_pages([3, 1, 1, "2", "x", -1, 9], 5, False), [1, 2, 3])
+
+    def test_blank_page_only_when_something_was_placed_on_it(self):
+        from web import docmode
+        self.assertEqual(docmode.chosen_line_pages([6], 5, True), [6])
+        self.assertEqual(docmode.chosen_line_pages([6], 5, False), [])
+
+    def test_nothing_ticked_means_text_only_and_never_more_than_four(self):
+        from web import docmode
+        self.assertEqual(docmode.chosen_line_pages([], 5, False), [])
+        self.assertEqual(docmode.chosen_line_pages([5, 4, 3, 2, 1], 5, False), [1, 2, 3, 4])
+
+
 class SendLineTests(unittest.TestCase):
     def sent(self, image_url):
         with patch.object(core.requests, "post") as post:
