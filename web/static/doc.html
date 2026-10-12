@@ -166,8 +166,8 @@
       <div id="sigEdit" class="hidden">
         <p class="prevlab">ตัวอย่างที่จะพิมพ์ลงเอกสาร — ลากบนภาพเอกสารเพื่อย้ายได้</p>
         <div class="prev"><img id="sigPrev" alt="ตัวอย่างลายเซ็น"></div>
-        <label for="sigDate">วันที่ใต้ลายเซ็น</label>
-        <input id="sigDate" type="text">
+        <p class="tiny" style="margin:0 0 4px">วันที่ใต้ลายเซ็น <span id="sigDateVal" style="color:var(--text);font-size:14px"></span>
+          — ตามวันที่ลงรับบนตรายาง แก้ได้ที่ช่องวันที่ของตรายาง (✏️ แก้คำเกษียณ / วัน-เวลาตรายาง)</p>
         <div class="chips"><button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button></div>
       </div>
       <div id="sigMsg" class="hidden" style="margin-top:10px"></div>
@@ -542,7 +542,7 @@ async function loadSig() {
 async function renderSig(o) {
   const r = await fetch(`/api/doc/${JOB}/signature`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ date: o.date, size_pct: o.size_pct }) });
+    body: JSON.stringify({ receipt_date: $('d').value, size_pct: o.size_pct }) });
   const d = await readJSON(r);
   if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'วาดลายเซ็นไม่สำเร็จ');
   Object.assign(o, { png: d.png, w: d.w, h: d.h, date: d.date, size_pct: d.size_pct });
@@ -550,7 +550,7 @@ async function renderSig(o) {
 
 $('sigAdd').onclick = async () => {
   const src = isBox(sel) ? objOf(sel) : D.boxes[0];
-  const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: sigSize, date: null };
+  const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: sigSize };
   const b = $('sigAdd'); b.disabled = true;
   try { await renderSig(o); }
   catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
@@ -560,7 +560,7 @@ $('sigAdd').onclick = async () => {
     o.top_cm = src.top_cm + src.h / D.cm + 0.2;
   }
   D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
-  $('sigDate').value = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
+  $('sigDateVal').textContent = o.date; $('sgv').textContent = o.size_pct + '%'; $('sigPrev').src = o.png;
   sigMsg(); showSigCard(); select('sig');
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
@@ -573,10 +573,12 @@ function reSig(delay = 400) {
     try { await renderSig(o); } catch (e) { sigMsg('err', e.message); return; }
     if (o !== D.sig) return;    // ระหว่างรอ ผู้ใช้กดเอาลายเซ็นออกไปแล้ว
     o._el.querySelector('img').src = o.png; $('sigPrev').src = o.png;
+    $('sigDateVal').textContent = o.date;
     clamp(o); posOverlay(o);
   }, delay);
 }
-$('sigDate').addEventListener('input', () => { if (D.sig) { D.sig.date = $('sigDate').value; reSig(); } });
+// แก้วันที่ลงรับบนตรายาง -> วันที่ใต้ลายเซ็นเปลี่ยนตาม
+$('d').addEventListener('input', () => { if (D.sig) reSig(); });
 function sigStep(delta) {
   sigSize = Math.max(20, Math.min(300, (D.sig ? D.sig.size_pct : sigSize) + delta));
   try { localStorage.setItem(SIG_SIZE_KEY, String(sigSize)); } catch (e) {}
@@ -621,7 +623,7 @@ function payload() {
   return { date: $('d').value, time: $('t').value,
            stamp: strip(D.stamp), boxes: D.boxes.map(strip),
            signature: g ? { page: g.page, left_cm: g.left_cm, top_cm: g.top_cm,
-                            size_pct: g.size_pct, date: g.date } : null };
+                            size_pct: g.size_pct } : null };
 }
 
 $('save').onclick = async () => {

@@ -11,7 +11,6 @@ import random
 import re
 import tempfile
 import unittest
-from datetime import datetime
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
@@ -72,9 +71,21 @@ def white_card_png():
 
 
 class ShortDateTests(unittest.TestCase):
-    def test_day_short_month_and_two_digit_buddhist_year_in_thai_digits(self):
-        self.assertEqual(sig.thai_short_date(datetime(2026, 10, 12)), "๑๒ ต.ค. ๖๙")
-        self.assertEqual(sig.thai_short_date(datetime(2027, 1, 5)), "๕ ม.ค. ๗๐")
+    """the date under the signature is the receipt date on the stamp, written short"""
+
+    def test_receipt_date_becomes_day_short_month_and_two_digit_year(self):
+        self.assertEqual(sig.short_date_of("๑๒ ต.ค. ๒๕๖๙"), "๑๒ ต.ค. ๖๙")
+        self.assertEqual(sig.short_date_of("5 มี.ค. 2570"), "๕ มี.ค. ๗๐")    # not mixed up with ม.ค.
+        self.assertEqual(sig.short_date_of("๑ ม.ค. ๗๐"), "๑ ม.ค. ๗๐")       # already short
+        self.assertEqual(sig.short_date_of("12 ตุลาคม 2569"), "๑๒ ต.ค. ๖๙")   # full month name
+        self.assertEqual(sig.short_date_of("12 ต.ค. 2026"), "๑๒ ต.ค. ๖๙")     # typed in C.E.
+
+    def test_whatever_the_stamp_date_field_accepts_works_the_same(self):
+        for typed in ("1/11/2569", "01-11-69", "2026-11-01", "๑ พ.ย. ๒๕๖๙"):
+            self.assertEqual(sig.short_date_of(core.normalize_typed_date(typed)), "๑ พ.ย. ๖๙", typed)
+
+    def test_unreadable_date_is_kept_as_typed_rather_than_guessed(self):
+        self.assertEqual(sig.short_date_of("วันพรุ่งนี้"), "วันพรุ่งนี้")
 
 
 class CleanUploadTests(unittest.TestCase):
@@ -282,6 +293,17 @@ class EndpointTests(unittest.TestCase):
         shown = rgba(base64.b64decode(uri.split(",", 1)[1]))
         self.assertEqual(visible_colours(shown), {sig.INK})
         self.assertLess(opaque_share(shown), 0.2)
+
+    def test_preview_date_follows_the_receipt_date_on_the_stamp(self):
+        self.st.sigs["ครูเอ"] = sig.clean_upload(jpeg(phone_photo()))
+        job = {"id": "j", "user": "ครูเอ", "source": "upload", "status": "ready"}
+        with patch.object(webmain.docmode, "_jobs", {"j": job}):
+            r = self.a.post("/api/doc/j/signature", json={"receipt_date": "1/11/2569", "size_pct": 100})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["date"], "๑ พ.ย. ๖๙")
+            # stamp date left empty -> today, exactly like the stamp itself
+            r = self.a.post("/api/doc/j/signature", json={"receipt_date": "", "size_pct": 100})
+            self.assertEqual(r.json()["date"], sig.short_date_of(core.get_thai_date()))
 
     def test_bad_picture_gets_a_readable_400(self):
         r = self.upload(self.a, jpeg(Image.new("RGB", (600, 400), (230, 230, 230))))

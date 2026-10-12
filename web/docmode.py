@@ -986,8 +986,9 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     # ลายเซ็น + วันที่ใต้ลายเซ็น (แทรกเฉพาะตอนผู้ใช้กดแทรก) — วางอิสระจากกล่องคำเกษียณ
     sig = payload.get("signature")
     if sig and signature_png:
-        date = sigmod.thai_short_date() if sig.get("date") is None else str(sig["date"])
-        k = sigmod.render_block(signature_png, date, sig.get("size_pct", 100), CM)
+        # วันที่ใต้ลายเซ็นใช้วันที่ลงรับ (ตัวเดียวกับที่ประทับบนตรายาง) เสมอ
+        k = sigmod.render_block(signature_png, sigmod.short_date_of(date_str),
+                                sig.get("size_pct", 100), CM)
         pi = int(sig.get("page", 0))
         x = int(float(sig.get("left_cm", 1)) * CM)
         y = int(float(sig.get("top_cm", 1)) * CM)

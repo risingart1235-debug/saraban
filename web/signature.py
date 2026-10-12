@@ -5,6 +5,7 @@
 ใช้ซ้ำได้ทุกเรื่องจากทุกเครื่อง ไม่ต้องอัปใหม่
 """
 import io
+import re
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
@@ -24,11 +25,23 @@ class SignatureError(ValueError):
     """รูปที่อัปโหลดใช้เป็นลายเซ็นไม่ได้ — ข้อความบอกผู้ใช้ได้ตรงๆ"""
 
 
-def thai_short_date(dt=None) -> str:
-    """วันที่ใต้ลายเซ็น เช่น ๑๒ ต.ค. ๖๙"""
-    dt = dt or core.now_th()
-    return core.to_thai_digits(
-        f"{dt.day} {core.THAI_MONTHS_ABBR[dt.month - 1]} {(dt.year + 543) % 100:02d}")
+def short_date_of(receipt_date: str) -> str:
+    """วันที่ลงรับแบบบนตรายาง (เช่น ๑๒ ต.ค. ๒๕๖๙) -> แบบใต้ลายเซ็น ๑๒ ต.ค. ๖๙
+
+    วันที่ใต้ลายเซ็นต้องเป็นวันเดียวกับวันที่ลงรับเสมอ จึงแปลงจากค่านั้น ไม่ใช้วันนี้แยกต่างหาก
+    อ่านไม่ออก (พิมพ์รูปแบบแปลก) ก็ใช้ตามที่พิมพ์มา ดีกว่าเดาวันผิด
+    """
+    text = core.to_arabic_digits(str(receipt_date or "")).strip()
+    month = next((i for i, m in enumerate(core.THAI_MONTHS_ABBR) if m in text), None)
+    if month is None:
+        month = next((i for i, m in enumerate(core.THAI_MONTHS_FULL) if m in text), None)
+    nums = re.findall(r"\d+", text)
+    if month is None or len(nums) < 2:
+        return core.to_thai_digits(text)
+    day, year = int(nums[0]), int(nums[-1])
+    if 1900 <= year < 2400:            # พิมพ์เป็น ค.ศ.
+        year += 543
+    return core.to_thai_digits(f"{day} {core.THAI_MONTHS_ABBR[month]} {year % 100:02d}")
 
 
 def clean_upload(raw: bytes) -> bytes:

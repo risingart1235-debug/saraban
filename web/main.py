@@ -1185,8 +1185,8 @@ async def api_doc_signature(job_id: str, request: Request, user: str = Depends(c
     png = await asyncio.to_thread(_s.get_store().load_signature, user)    # อ่านชีต ห้ามขวาง event loop
     if not png:
         raise HTTPException(status_code=404, detail="ยังไม่มีรูปลายเซ็น")
-    # ไม่ส่งวันที่มา = วันนี้ / ส่งช่องว่างมา = ตั้งใจไม่ใส่วันที่
-    date = _sig.thai_short_date() if d.get("date") is None else to_thai_digits(str(d["date"]).strip())
+    # วันที่ใต้ลายเซ็น = วันที่ลงรับบนตรายาง (แปลงแบบเดียวกับตอนบันทึก) ว่าง = วันนี้ เหมือนตรายาง
+    date = _sig.short_date_of(normalize_typed_date(str(d.get("receipt_date") or "")) or get_thai_date())
     try:
         size = int(d.get("size_pct", 100))
     except (TypeError, ValueError):
