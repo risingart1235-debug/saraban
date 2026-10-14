@@ -869,12 +869,12 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     stamp = render_transparent_stamp(receipt_no, 100)
     sx, sy = find_stamp_pos(p1, stamp.width, stamp.height)
 
-    # ตำแหน่งคำเกษียณ — ที่ว่างใกล้ลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น (ย่อตัวอักษรลงได้ถ้าจำเป็น)
-    # ทั้งหน้าไม่มีที่ว่างจริงๆ ค่อยไปหน้ากระดาษเปล่าที่แทรกต่อจากหน้าลายเซ็น (มุมซ้ายบน)
+    # ตำแหน่งคำเกษียณ — ชิดลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น ขนาด ๑๐๐% เสมอ (ไม่ย่อ)
+    # ที่ว่างข้างลายเซ็นไม่พอก็ยังวางข้างลายเซ็น ทับตัวหนังสือบ้าง ผู้ใช้ลากย้ายเอง (บอกไว้บนจอ)
     target = psig if psig is not None else p1
-    spot = place_kasien(target, ai_text, first_page=psig is None, dpi=DPI)
-    kx, ky, ksize, kwrap = spot or (int(2.0 * CM), int(3.0 * CM), 100, 100)
+    kx, ky, ksize, kwrap = place_kasien(target, ai_text, first_page=psig is None, dpi=DPI)
     kbox = render_transparent_kasien(ai_text, int(target.width * 0.42 * kwrap / 100.0), ksize)
+    kclear = kasien_clear_at(target, ai_text, kx, ky, dpi=DPI)
 
     pages = [{"name": "หน้าแรก", "png": _png_uri(_render_pdf_page(pdf_path, 1, PREVIEW_DPI)[0]),
               "w": p1.width, "h": p1.height, "index": 1}]
@@ -917,11 +917,9 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                 "png": _png_uri(stamp), "w": stamp.width, "h": stamp.height},
          boxes=[{"id": "b1", "text": ai_text, "size_pct": ksize, "wrap_pct": kwrap,
                  "indent_pct": 100, "bg": False, "border": False,
-                 # หน้าลายเซ็นไม่มีที่ว่างพอแม้ย่อแล้ว -> วางบนหน้ากระดาษเปล่าแทน
-                 # (index เท่ากับจำนวนหน้าที่ส่งไป = หน้าเปล่าที่หน้าจอแทรกไว้ต่อจากหน้าลายเซ็น)
-                 "page": kpage if spot else len(pages),
+                 "page": kpage,
                  "left_cm": round(kx / CM, 2), "top_cm": round(ky / CM, 2),
-                 "fitted": spot is not None,
+                 "fitted": kclear,             # False = ทับตัวหนังสืออยู่ หน้าจอบอกให้ลากย้าย
                  "png": _png_uri(kbox), "w": kbox.width, "h": kbox.height}])
 
 
@@ -959,16 +957,15 @@ def _num(value, default, lo, hi):
 
 
 def fit_box(job, data: dict) -> dict:
-    """ปุ่ม 📍 ย้ายไปใกล้ลายเซ็น — หาที่ให้กล่องคำเกษียณใหม่บนหน้าที่มีลายเซ็นผู้ส่ง
+    """ปุ่ม 📍 ย้ายไปใกล้ลายเซ็น — จัดกล่องคำเกษียณใหม่ให้ชิดลายเซ็นผู้ส่ง (กดเองเท่านั้น)
 
-    ใช้หลังแก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ แทรกลายเซ็นแล้วไม่มีที่ หรือลากไปไว้ไกล
+    ใช้หลังแก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ หรือลากไปไว้ไกล — ขนาด/ความกว้างคงเดิม
+    (ไม่ย่อ) หาที่ว่างก่อน ไม่มีที่ว่างใกล้ๆ ก็วางชิดลายเซ็นทั้งที่ทับตัวหนังสือบ้าง (fitted=False)
     data: page = หน้าที่กล่องอยู่ตอนนี้ — ถ้าเป็นหน้าเอกสาร หาที่บนหน้านั้น (AI ชี้หน้าลายเซ็นผิด
                  ผู้ใช้ลากไปหน้าที่ถูกแล้วกดได้) ถ้าอยู่บนกระดาษเปล่า กลับไปหน้าที่มีลายเซ็น
           box = ข้อความ/ขนาด/ความกว้าง/ย่อหน้า/พื้น/กรอบ/ตำแหน่ง ของกล่องนี้
           sig = {w, h} ลายเซ็นผู้ลงรับที่ย้ายตามไปไว้ใต้กล่อง (ไม่ส่งมา = ไม่ได้แทรก)
           avoid = [{page, left_cm, top_cm, w, h}] ของอื่นที่วางไว้แล้ว ห้ามทับ
-          keep = ที่เดิมไม่ทับตัวหนังสือก็อยู่ที่เดิม (ตอนกดแทรกลายเซ็น — ทับเมื่อไหร่ค่อยย้ายทั้งคู่)
-    ไม่มีที่ว่างพอแม้ย่อแล้ว ก็ไปหน้ากระดาษเปล่าที่แทรกต่อจากหน้าลายเซ็น (มุมซ้ายบน)
     """
     box = data.get("box") or {}
     n_pages = len(job["pages"])
@@ -996,24 +993,13 @@ def fit_box(job, data: dict) -> dict:
                    size_pct=size, wrap_pct=wrap, fitted=fitted)
         return out
 
-    page_img = None
-    if data.get("keep") and 0 <= cur <= n_pages:
-        x, y = _num(box.get("left_cm"), 0, 0, 100) * CM, _num(box.get("top_cm"), 0, 0, 100) * CM
-        here = (Image.new("RGB", _blank_size(job), "white") if cur == n_pages else
-                _render_pdf_page(job["pdf_path"], job["pages"][cur]["index"], DPI)[0])
-        if kasien_clear_at(here, text, x, y, size_pct=size, wrap_pct=wrap, base_w=_page_w(job, cur),
-                           avoid=[r for p, r in others if p == cur], **style):
-            return answer(cur, x, y, size, wrap, cur < n_pages)
-        if cur == kpage:
-            page_img = here
     page_no = job["pages"][kpage]["index"]
-    if page_img is None:
-        page_img = _render_pdf_page(job["pdf_path"], page_no, DPI)[0]
-    spot = place_kasien(page_img, text, size_pct=size, wrap_pct=wrap, first_page=page_no == 1,
-                        avoid=[r for p, r in others if p == kpage], **style)
-    if spot:
-        return answer(kpage, *spot, True)
-    return answer(n_pages, int(2.0 * CM), int(3.0 * CM), size, wrap, False)
+    page_img = _render_pdf_page(job["pdf_path"], page_no, DPI)[0]
+    avoid = [r for p, r in others if p == kpage]
+    x, y, size, wrap = place_kasien(page_img, text, size_pct=size, wrap_pct=wrap,
+                                    first_page=page_no == 1, avoid=avoid, **style)
+    fitted = kasien_clear_at(page_img, text, x, y, size_pct=size, wrap_pct=wrap, avoid=avoid, **style)
+    return answer(kpage, x, y, size, wrap, fitted)
 
 
 def render_stamp(job, size_pct: int, date_str: str, time_str: str) -> dict:

@@ -141,9 +141,10 @@
         <button id="bbd">ตีกรอบ</button>
         <button id="bdel" style="color:#b91c1c">ลบกล่องนี้</button>
       </div>
-      <!-- แก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ / แทรกลายเซ็นแล้วไม่มีที่ / ลากไปไกล — กดทีเดียวจัดให้ใหม่ -->
+      <!-- แก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ / ลากไปไกล — กดทีเดียวจัดให้ใหม่ (ไม่ย้ายเองถ้าไม่กด) -->
       <button class="btn small" id="bfit" style="margin-top:10px">📍 ย้ายไปใกล้ลายเซ็น</button>
-      <p class="tiny" style="margin:4px 0 0">หาที่ว่างข้างลายเซ็นผู้ส่งให้ใหม่ ไม่ทับตัวหนังสือ
+      <p class="tiny" style="margin:4px 0 0">จัดกล่องให้ชิดลายเซ็นผู้ส่ง ขนาดเท่าเดิม — หาที่ว่างก่อน
+        ถ้าข้างลายเซ็นไม่มีที่ว่างอาจทับตัวหนังสือบ้าง ลากย้ายเองได้
         (ลายเซ็นผู้ลงรับที่อยู่ใต้กล่องย้ายตามไปด้วย)</p>
       <button class="btn grey small" id="badd" style="margin-top:10px">➕ เพิ่มกล่องข้อความ</button>
     </div>
@@ -185,7 +186,7 @@
         <p class="tiny" style="margin:0 0 4px">วันที่ใต้ลายเซ็น <span id="sigDateVal" style="color:var(--text);font-size:14px"></span>
           — ตามวันที่ลงรับบนตรายาง แก้ได้ที่ช่องวันที่ของตรายาง (✏️ แก้คำเกษียณ / วัน-เวลาตรายาง)</p>
         <div class="chips">
-          <button id="sigFit">📍 จัดที่ใหม่ ไม่ให้ทับตัวหนังสือ</button>
+          <button id="sigFit">📍 ย้ายไปใกล้ลายเซ็นผู้ส่ง (พร้อมคำเกษียณ)</button>
           <button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button>
         </div>
       </div>
@@ -325,15 +326,13 @@ function build() {
   }).catch(() => {});
 }
 
-// บอกเหตุผลเวลาคำเกษียณไม่ได้อยู่บนหน้าลายเซ็น หรือตัวเล็กกว่าปกติ ผู้ใช้จะได้ไม่งงว่าหายไปไหน
+// คำเกษียณวางชิดลายเซ็นผู้ส่งขนาด ๑๐๐% เสมอ ข้างลายเซ็นไม่มีที่ว่างก็ทับตัวหนังสือบ้าง — บอกให้รู้
+// ว่าตั้งใจ (ผู้ใช้ลากย้ายเอง) ลากกล่องไปแล้วก็ซ่อน
 function kasienNote(b) {
   const n = $('knote');
-  n.textContent = !b ? '' : b.page >= D.pages.length
-    ? `ℹ️ หน้าที่มีลายเซ็น (หน้า ${thaiNum(blankAfter())}) ไม่มีที่ว่างพอ จึงวางคำเกษียณไว้บนกระดาษเปล่า` +
-      'ที่แทรกต่อจากหน้านั้น — จะลากไปวางบนหน้าลายเซ็นเองก็ได้'
-    : b.size_pct < 100
-      ? `ℹ️ ย่อคำเกษียณเหลือ ${thaiNum(b.size_pct)}% ให้พอดีที่ว่างใกล้ลายเซ็น — ขยายได้ที่ ✏️ แก้คำเกษียณ`
-      : '';
+  n.textContent = b && b.fitted === false && b.page < D.pages.length
+    ? 'ℹ️ ข้างลายเซ็นผู้ส่งมีที่ว่างไม่พอ คำเกษียณจึงทับตัวหนังสืออยู่บ้าง — ลากย้ายได้ตามสะดวก'
+    : '';
   n.classList.toggle('hidden', !n.textContent);
 }
 
@@ -391,6 +390,7 @@ function onDown(e) {
     ev.currentTarget.classList.remove('dragging');
     ev.currentTarget.removeEventListener('pointermove', onMove);
     drag = null;
+    if (D.boxes[0] && id === D.boxes[0].id) kasienNote(null);   // ย้ายเองแล้ว ไม่ต้องเตือนต่อ
     showLine();
   };
   e.currentTarget.addEventListener('pointerup', up, { once: true });
@@ -544,9 +544,10 @@ $('badd').onclick = async () => {
   $('selBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
-// ---------- 📍 ย้ายไปใกล้ลายเซ็น ----------
-// เซิร์ฟเวอร์หาที่ว่างข้างลายเซ็นผู้ส่งให้ใหม่ (ย่อตัวอักษรได้ถ้าจำเป็น) บนหน้าที่กล่องอยู่
-// ถ้าอยู่บนกระดาษเปล่าก็กลับไปหน้าที่มีลายเซ็น — ลายเซ็นผู้ลงรับที่วางไว้ใต้กล่องย้ายตามไปด้วย
+// ---------- 📍 ย้ายไปใกล้ลายเซ็น (กดเองเท่านั้น ระบบไม่ย้ายให้เอง) ----------
+// เซิร์ฟเวอร์จัดกล่องให้ชิดลายเซ็นผู้ส่งบนหน้าที่กล่องอยู่ ขนาดเท่าเดิม (ไม่ย่อ) — หาที่ว่างก่อน
+// ไม่มีก็ชิดลายเซ็นตรงที่ทับตัวหนังสือน้อยสุด ถ้าอยู่บนกระดาษเปล่าก็กลับไปหน้าที่มีลายเซ็น
+// ลายเซ็นผู้ลงรับที่วางไว้ใต้กล่องย้ายตามไปด้วย
 function sigUnder(b) {
   const g = D.sig;
   if (!g || g.page !== b.page) return false;
@@ -554,21 +555,21 @@ function sigUnder(b) {
   return gap > -1 && gap < 3 &&
          g.left_cm < b.left_cm + b.w / D.cm && g.left_cm + g.w / D.cm > b.left_cm;
 }
-// g = ลายเซ็นผู้ลงรับที่ต้องอยู่ใต้กล่อง (ย้ายตาม) / keep = ที่เดิมไม่ทับตัวหนังสือก็ไม่ต้องย้าย
-async function fitBox(b, g, keep) {
+// g = ลายเซ็นผู้ลงรับที่ต้องอยู่ใต้กล่อง (ย้ายตาม)
+async function fitBox(b, g) {
   // ของอื่นที่วางไว้แล้ว (ตรายาง กล่องอื่น ลายเซ็นที่ไม่ได้อยู่ใต้กล่องนี้) ห้ามทับ
   const avoid = [D.stamp, ...D.boxes.filter(x => x !== b), ...(D.sig && D.sig !== g ? [D.sig] : [])]
     .map(o => ({ page: o.page, left_cm: o.left_cm, top_cm: o.top_cm, w: o.w, h: o.h }));
   const r = await fetch(`/api/doc/${JOB}/fit`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page: b.page, keep: !!keep, avoid, sig: g ? { w: g.w, h: g.h } : null,
+    body: JSON.stringify({ page: b.page, avoid, sig: g ? { w: g.w, h: g.h } : null,
                            box: { text: b.text, size_pct: b.size_pct, wrap_pct: b.wrap_pct,
                                   indent_pct: b.indent_pct, bg: b.bg, border: b.border,
                                   left_cm: b.left_cm, top_cm: b.top_cm } }) });
   const d = await readJSON(r);
   if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'หาที่วางไม่สำเร็จ');
   Object.assign(b, { page: d.page, left_cm: d.left_cm, top_cm: d.top_cm, size_pct: d.size_pct,
-                     wrap_pct: d.wrap_pct, png: d.png, w: d.w, h: d.h });
+                     wrap_pct: d.wrap_pct, png: d.png, w: d.w, h: d.h, fitted: d.fitted });
   pageEl(b.page).appendChild(b._el);
   b._el.querySelector('img').src = b.png;
   clamp(b); posOverlay(b);
@@ -586,7 +587,7 @@ async function fitClick(btn, b, g) {
   const label = btn.textContent;
   btn.disabled = true; btn.textContent = '⏳ กำลังหาที่ว่าง...';
   try {
-    await fitBox(b, g, false);
+    await fitBox(b, g);
     b._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (e) {
     alert(e.message);
@@ -670,12 +671,8 @@ $('sigAdd').onclick = async () => {
   const b = $('sigAdd'); b.disabled = true;
   try { await renderSig(o); }
   catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
-  // ใต้คำเกษียณไม่มีที่ (ลายเซ็นจะทับตัวหนังสือ) ก็ย้ายคำเกษียณพร้อมลายเซ็นไปที่ว่างใกล้ลายเซ็นผู้ส่ง
-  // ที่เดิมว่างพอก็อยู่ที่เดิม — หาที่ไม่สำเร็จก็วางใต้กล่องแบบเดิม ลากเองได้
-  const label = b.textContent;
-  b.textContent = '⏳ กำลังแทรกลายเซ็น...';
-  if (src) await fitBox(src, o, true).catch(() => {});
-  b.disabled = false; b.textContent = label;
+  b.disabled = false;
+  // วางใต้คำเกษียณเสมอ ไม่ย้ายคำเกษียณเอง — ทับตัวหนังสือก็ลากย้ายเอง (หรือกด 📍 ในแผงลายเซ็น)
   if (src) {                    // วางใต้กล่องคำเกษียณ กึ่งกลางกล่อง
     o.page = src.page;
     o.left_cm = src.left_cm + (src.w - o.w) / 2 / D.cm;
@@ -684,7 +681,7 @@ $('sigAdd').onclick = async () => {
   placeSig(o); select('sig');
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
-// ปรับขนาดลายเซ็นแล้วไปทับตัวหนังสือ ฯลฯ — จัดคำเกษียณพร้อมลายเซ็นไปที่ว่างใกล้ลายเซ็นผู้ส่งอีกรอบ
+// ปรับขนาดลายเซ็นแล้วไปทับตัวหนังสือ ฯลฯ — จัดคำเกษียณพร้อมลายเซ็นไปชิดลายเซ็นผู้ส่งอีกรอบ (กดเอง)
 $('sigFit').onclick = () => {
   const b = D.sig && (D.boxes.find(sigUnder) || D.boxes[0]);
   if (b) fitClick($('sigFit'), b, D.sig);

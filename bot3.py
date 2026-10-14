@@ -1427,24 +1427,16 @@ class SarabanApp(tk.Tk):
             sx, sy = find_stamp_pos(self.page_full[1], tmp_stamp.width, tmp_stamp.height)
             self.stamp_orig_x, self.stamp_orig_y = sx + 20, sy + self.page_y[1]
 
-            # คำเกษียณ: ที่ว่างใกล้ลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น (ไม่มีก็หน้าแรก) ย่อได้ถ้าจำเป็น
-            # ทั้งหน้าไม่มีที่ว่างจริงๆ ค่อยวางบนกระดาษเปล่าที่แทรกต่อจากหน้านั้น (เหมือนหน้าเว็บ)
+            # คำเกษียณ: ชิดลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น (ไม่มีก็หน้าแรก) ขนาด ๑๐๐% เสมอ ไม่ย่อ
+            # ข้างลายเซ็นไม่มีที่ว่างก็ยังวางตรงนั้น ทับตัวหนังสือบ้าง ผู้ใช้ลากย้ายเอง (เหมือนหน้าเว็บ)
             box = self.kasien_boxes[0]
-            spot = place_kasien(self.page_full[sig_page], box['text'], first_page=sig_page == 1,
-                                base_w=self.W, dpi=self.A4_DPI)
-            if spot:
-                kx, ky, size, wrap = spot
-                box['pct'].set(size)
-                box['wrap_pct'].set(wrap)
-                box['x'], box['y'] = kx + 20, ky + self.page_y[sig_page]
-                if size < 100:
-                    self.set_status(f"ย่อคำเกษียณเหลือ {to_thai_digits(size)}% "
-                                    "ให้พอดีที่ว่างใกล้ลายเซ็นผู้ส่ง")
-            else:
-                cm = self.A4_DPI / 2.54
-                box['x'], box['y'] = 20 + 2 * cm, self.page_y[doc['total_pages'] + 1] + 3 * cm
-                self.set_status("หน้าที่มีลายเซ็นไม่มีที่ว่างพอ — วางคำเกษียณไว้บนกระดาษเปล่า"
-                                "ที่แทรกต่อจากหน้านั้น")
+            target = self.page_full[sig_page]
+            kx, ky, _, _ = place_kasien(target, box['text'], first_page=sig_page == 1,
+                                        base_w=self.W, dpi=self.A4_DPI)
+            box['x'], box['y'] = kx + 20, ky + self.page_y[sig_page]
+            if not kasien_clear_at(target, box['text'], kx, ky, base_w=self.W, dpi=self.A4_DPI):
+                self.set_status("ข้างลายเซ็นผู้ส่งมีที่ว่างไม่พอ คำเกษียณจึงทับตัวหนังสืออยู่บ้าง "
+                                "— ลากย้ายได้ตามสะดวก")
 
     def update_render(self, rebuild_bg=False):
         if rebuild_bg:

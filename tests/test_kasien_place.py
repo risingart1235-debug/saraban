@@ -1,12 +1,14 @@
-"""Where the endorsement (คำเกษียณ) goes: next to the sender's signature, never at the end.
+"""Where the endorsement (คำเกษียณ) goes: next to the sender's signature, at full size.
 
 The endorsement used to be searched for only in a fixed left strip of the signature
 page.  When the strip had no tall gap, the web app threw it onto a blank page appended
 after the last page - behind every attachment, pages away from the signature it
 belongs to - and when it did "fit" it could sit half on top of "ขอแสดงความนับถือ".
 Now the whole signature page is searched for real white space nearest the signature
-block, the text is shrunk (down to 70%) before giving up, and the blank page, when it
-is still needed, sits right after the signature page in the saved PDF.
+block.  The text is never shrunk and the box never narrowed (the user wants 100% as
+before): with no white space beside the signature it still goes next to it, over a
+little text, and the user drags it - better than far away or on a blank page.  A blank
+page the user drags it onto sits right after the signature page in the saved PDF.
 Offline: letters are drawn on the spot, the AI / Drive / LINE are fakes.
 """
 from __future__ import annotations
@@ -151,33 +153,38 @@ class PlaceKasienTests(unittest.TestCase):
                 self.assertEqual(ink_in(page, ink), 0)
                 self.assertLess(gap_cm(ink, block), 1.5)
 
-    def test_tucks_in_beside_the_signature_with_a_narrower_box(self):
+    def tight_page(self):
+        """the signature block reaches the bottom: no white space beside it at 100%"""
         im, d = blank_page()
-        y = body(d, 230, 27)                     # the signature block reaches the bottom
-        block = closing(d, y + 30)
-        spot = core.place_kasien(im, TEXT)
-        self.assertIsNotNone(spot)
-        self.assertEqual(spot[2], 100)
-        self.assertLess(spot[3], 100)            # narrower, not smaller
-        _, ink = kasien_box(spot)
-        self.assertEqual(ink_in(im, ink), 0)
-        self.assertLess(ink[2], block[0])        # left of ขอแสดงความนับถือ ...
-        self.assertLess(ink[1], block[3])        # ... at the same height
+        y = body(d, 230, 27)
+        return im, closing(d, y + 30)
 
-    def test_shrinks_rather_than_leave_the_page(self):
-        im = full_page()
-        # a white hole just too narrow for the endorsement at 100% however it is wrapped
-        narrowest = min(r[2] - r[0] for r in (kasien_box((0, 0, 100, w))[1] for w in (70, 100, 150)))
-        hole = (3 * CM, H - 9 * CM, 3 * CM + narrowest + 0.6 * CM - 4, H - 4 * CM)
+    def test_no_room_beside_the_signature_still_goes_next_to_it_at_full_size(self):
+        im, block = self.tight_page()
+        spot = core.place_kasien(im, TEXT)
+        self.assertEqual(spot[2:], (100, 100))   # not shrunk, box not narrowed
+        _, ink = kasien_box(spot)
+        self.assertLess(gap_cm(ink, block), 0.5)
+        self.assertLess(ink[1], block[3])        # beside the signature, not under it
+        self.assertFalse(core.kasien_clear_at(im, TEXT, *spot[:2]))   # covers a little text ...
+        self.assertLess(ink_in(im, ink, margin=0), 3000)              # ... only a little
+        self.assertTrue(0 <= ink[0] and ink[2] <= W and 0 <= ink[1] and ink[3] <= H)
+
+    def test_white_space_far_away_does_not_pull_it_away_from_the_signature(self):
+        im, block = self.tight_page()
+        hole = (3 * CM, 0.20 * H, 16 * CM, 0.33 * H)      # ~12 cm above the signature
         ImageDraw.Draw(im).rectangle([int(v) for v in hole], fill="white")
         spot = core.place_kasien(im, TEXT)
-        self.assertIsNotNone(spot)
-        self.assertLess(spot[2], 100)
-        self.assertGreaterEqual(spot[2], core.KASIEN_MIN_SIZE)
-        self.assertEqual(ink_in(im, kasien_box(spot)[1]), 0)
+        _, ink = kasien_box(spot)
+        self.assertEqual(spot[2:], (100, 100))
+        self.assertGreater(ink[1], hole[3])               # not up in the hole
+        self.assertLess(gap_cm(ink, block), 0.5)
 
-    def test_no_white_space_anywhere_means_none(self):
-        self.assertIsNone(core.place_kasien(full_page(), TEXT))
+    def test_a_full_page_still_gets_a_spot_on_the_page_at_full_size(self):
+        spot = core.place_kasien(full_page(), TEXT)
+        self.assertEqual(spot[2:], (100, 100))
+        _, ink = kasien_box(spot)
+        self.assertTrue(0 <= ink[0] and ink[2] <= W and 0 <= ink[1] and ink[3] <= H)
 
     def test_first_page_keeps_clear_of_the_letterhead_and_the_stamp(self):
         im, _ = blank_page()
@@ -307,11 +314,22 @@ class WebPrepareAndSaveTests(unittest.TestCase):
         self.assertEqual(len(core.PdfReader(out).pages), 4)             # no blank page added
         self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๒.jpg"])
 
-    def test_full_signature_page_puts_the_blank_page_right_after_it(self):
+    def test_full_signature_page_keeps_it_there_at_full_size_and_says_it_covers_text(self):
         job = self.prepared(full_page())
         box = job["boxes"][0]
-        self.assertEqual(box["page"], len(job["pages"]))                 # the blank page
-        self.assertFalse(box["fitted"])
+        self.assertEqual(job["pages"][box["page"]]["index"], 2)        # not the blank page
+        self.assertEqual((box["size_pct"], box["wrap_pct"]), (100, 100))
+        self.assertFalse(box["fitted"])                                   # the screen tells the user
+        out, _ = self.saved(job)
+        self.assertEqual(len(core.PdfReader(out).pages), 4)             # no blank page added
+
+    def on_blank_page(self, job):
+        """the user drags the endorsement onto the blank page by hand"""
+        job["boxes"][0].update(page=len(job["pages"]), left_cm=2.0, top_cm=3.0)
+        return job
+
+    def test_blank_page_dragged_to_by_hand_is_filed_right_after_the_signature_page(self):
+        job = self.on_blank_page(self.prepared(full_page()))
         out, sent = self.saved(job)
         pages = self.pages_of(out)
         self.assertEqual(len(pages), 5)
@@ -322,7 +340,7 @@ class WebPrepareAndSaveTests(unittest.TestCase):
         self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๒.jpg", "หน้า๓.jpg"])
 
     def test_pages_ticked_on_screen_are_sent_in_file_order(self):
-        job = self.prepared(full_page())
+        job = self.on_blank_page(self.prepared(full_page()))
         _, sent = self.saved(job, line_pages=[5, 3, 1])
         self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๓.jpg", "หน้า๔.jpg"])
 
@@ -338,30 +356,15 @@ class WebPrepareAndSaveTests(unittest.TestCase):
         self.assertEqual(ink_in(sig, ink, margin=0.1 * CM), 0)
         self.assertLess(gap_cm(ink, block), 2.5)
 
-    def test_pin_button_with_no_room_says_so_and_uses_the_blank_page(self):
+    def test_pin_button_with_no_room_stays_next_to_the_signature_at_the_same_size(self):
         job = self.prepared(full_page())
-        r = self.docmode.fit_box(job, {"page": 1, "box": job["boxes"][0]})
-        self.assertFalse(r["fitted"])
-        self.assertEqual(r["page"], len(job["pages"]))
-
-    def test_inserting_the_signature_moves_nothing_when_there_is_room_under_the_endorsement(self):
-        job = self.prepared(signature_page(4)[0])            # lots of room
-        box = job["boxes"][0]
-        r = self.docmode.fit_box(job, {"page": box["page"], "box": box, "keep": True,
-                                       "sig": {"w": 315, "h": 190}})
-        self.assertEqual((r["page"], r["left_cm"], r["top_cm"]), (box["page"], box["left_cm"], box["top_cm"]))
-
-    def test_inserting_the_signature_over_text_moves_both_to_free_space(self):
-        sig, _ = signature_page(14)
-        job = self.prepared(sig)
-        box = job["boxes"][0]
-        tall = {"w": 315, "h": 400}                         # would cover the contact lines
-        r = self.docmode.fit_box(job, {"page": box["page"], "box": box, "keep": True, "sig": tall})
-        self.assertNotEqual((r["left_cm"], r["top_cm"]), (box["left_cm"], box["top_cm"]))
-        self.assertEqual(r["page"], box["page"])            # still on the signature page
-        self.assertTrue(core.kasien_clear_at(sig, TEXT, r["left_cm"] * CM, r["top_cm"] * CM,
-                                             size_pct=r["size_pct"], wrap_pct=r["wrap_pct"],
-                                             below=(315, 400)))
+        box = dict(job["boxes"][0], page=len(job["pages"]))            # dragged onto the blank page
+        r = self.docmode.fit_box(job, {"page": box["page"], "box": box})
+        self.assertFalse(r["fitted"])                                    # covers text, user drags it
+        self.assertEqual(job["pages"][r["page"]]["index"], 2)           # back on the signature page
+        self.assertEqual((r["size_pct"], r["wrap_pct"]), (100, 100))
+        r = self.docmode.fit_box(job, {"page": 1, "box": dict(box, size_pct=130, wrap_pct=80)})
+        self.assertEqual((r["size_pct"], r["wrap_pct"]), (130, 80))     # the user's own size kept
 
     def test_other_boxes_are_only_avoided_on_their_own_page(self):
         sig, _ = signature_page(14)

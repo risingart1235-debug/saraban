@@ -743,13 +743,16 @@ def find_stamp_pos(pil_img, stamp_w, stamp_h):
             except: pass
     return W - stamp_w - RIGHT_MARGIN, 20
 
-# --- ที่วางคำเกษียณ: ที่ว่างจริงที่ชิดลายเซ็นผู้ส่งที่สุด ---
+# --- ที่วางคำเกษียณ: ชิดลายเซ็นผู้ส่ง ขนาดเท่าที่ตั้งไว้ ---
 # เดิมดูแค่แถบซ้ายกว้าง ๔๒% ของหน้า ไม่มีช่องสูงพอเมื่อไหร่ หน้าเว็บโยนคำเกษียณไปหน้ากระดาษเปล่า
 # ท้ายเล่ม (หลังสิ่งที่ส่งมาด้วยทั้งหมด) ห่างลายเซ็นไปหลายหน้า แต่บางทีก็นับว่าว่างทั้งที่ทับ
 # "ขอแสดงความนับถือ" กับลายเซ็นอยู่ครึ่งตัว เพราะไม่นับตัวหนังสือที่ล้นเข้ามาไม่ถึง ๖ จุด
-# ตอนนี้หาได้ทั้งหน้าและห้ามทับหมึก ไม่พอค่อยย่อตัวอักษร/ปรับความกว้างกล่อง เลือกที่ใกล้ลายเซ็นสุด
-KASIEN_MIN_SIZE = 70                   # ย่อได้ถึง ๗๐% (ราว ๑๑.๕ pt พิมพ์แล้วยังอ่านสบาย)
-SHRINK_COST_CM = 1.5                   # ย่อตัวอักษร ๑๐% ยอมแลกกับได้ที่ใกล้ลายเซ็นขึ้น ๑.๕ ซม.
+# ตอนนี้หาได้ทั้งหน้า เอาที่ว่างจริงที่ชิดลายเซ็นที่สุด — ไม่ย่อตัวอักษร ไม่บีบกล่อง (ผู้ใช้ขอ ๑๐๐%
+# เหมือนเดิม) ข้างลายเซ็นไม่มีที่ว่างก็ยังวางข้างลายเซ็น ทับตัวหนังสือบ้างได้ ผู้ใช้ลากย้ายเอง
+# ดีกว่าไปไกลหรือไปหน้ากระดาษเปล่า
+OVERLAP_CM = 3.0                       # ทับตัวหนังสือ = เหมือนห่างลายเซ็นเพิ่ม ๓ ซม. (ที่ว่างไกลกว่านั้นไม่เอา)
+INK_CELLS_PER_CM = 100                 # ทับหมึกเพิ่มทุก ๑ ตร.ซม. = ห่างเพิ่ม ๑ ซม. (ทับน้อยดีกว่าทับมาก)
+CROWD_CM = 0.5                         # ไม่ทับแต่ชิดตัวหนังสือไม่ถึง ๓ มม. = ห่างเพิ่มครึ่งเซนต์
 NEAR_TIE_CM = 0.5                      # ใกล้พอๆ กัน (ต่างไม่ถึงครึ่งเซนต์) เอาที่ชิดซ้าย แล้วที่สูงกว่า
 _CELL = 8                              # ตารางหมึกช่องละ ๘ จุด (๑ มม. ที่ 200 DPI)
 
@@ -872,76 +875,64 @@ def kasien_clear_at(page_img, text, x, y, *, indent_pct=100, size_pct=100, wrap_
 def place_kasien(page_img, text, *, indent_pct=100, size_pct=100, wrap_pct=100, bg=False,
                  border=False, below=None, avoid=(), first_page=False, base_w=None,
                  dpi=PDF_RENDER_DPI):
-    """หาที่วางคำเกษียณบนหน้าที่มีลายเซ็นผู้ส่ง: ที่ว่างจริง (ไม่ทับหมึก) ที่ชิดลายเซ็นที่สุด
+    """หาที่วางคำเกษียณบนหน้าที่มีลายเซ็นผู้ส่ง: ชิดลายเซ็นที่สุด ขนาดและความกว้างตามที่ตั้งไว้
 
-    ลองตัวอักษรตั้งแต่ขนาดที่ตั้งไว้ (size_pct) ลงไปทีละ ๑๐% ถึง ๗๐% กับความกว้างกล่อง ๓ แบบ
-    (ตามที่ตั้งไว้ / แคบลง แทรกข้างลายเซ็นได้ / กว้างขึ้น ลงแถบว่างเตี้ยๆ ได้) หาที่ว่างได้ทั้งหน้า
-    แล้วเอาแบบที่ห่างลายเซ็นน้อยสุด — ย่อทุก ๑๐% คิดเป็นห่างเพิ่ม ๑.๕ ซม. (ไม่ย่อถ้าไม่จำเป็น)
-    below = (กว้าง, สูง) ลายเซ็นผู้ลงรับที่วางกึ่งกลางใต้กล่อง ห่าง ๒ มม. ต้องมีที่ให้ด้วย
-    avoid = [(ซ้าย, บน, ขวา, ล่าง)] ของที่วางไว้แล้วบนหน้านี้ (ตรายาง กล่องอื่น) ห้ามทับ
+    ไม่ย่อตัวอักษร ไม่บีบ/ขยายกล่อง (ผู้ใช้ขอ ๑๐๐% เหมือนเดิม) — เอาที่ว่างจริง (ไม่ทับหมึก)
+    ที่ใกล้ลายเซ็นที่สุด แต่ถ้าที่ว่างอยู่ไกลกว่าที่ติดลายเซ็นเกิน OVERLAP_CM ก็วางติดลายเซ็น
+    ตรงที่ทับตัวหนังสือน้อยที่สุดแทน ผู้ใช้ลากย้ายเอง (ดีกว่าไปไกล หรือไปหน้ากระดาษเปล่า)
+    below = (กว้าง, สูง) ลายเซ็นผู้ลงรับที่วางกึ่งกลางใต้กล่อง ห่าง ๒ มม. นับเป็นส่วนหนึ่งของกล่อง
+    avoid = [(ซ้าย, บน, ขวา, ล่าง)] ของที่วางไว้แล้วบนหน้านี้ (ตรายาง กล่องอื่น) นับเป็นหมึก
     first_page = หน้าแรก (ครึ่งบนเป็นหัวหนังสือกับตรายางเลขรับ ไม่วางตรงนั้น)
     base_w = ความกว้างที่ใช้คิดความกว้างกล่อง (๔๒% แบบเดียวกับตอนวาดจริง) ไม่ส่งมา = กว้างของหน้านี้
 
-    คืน (x, y, ขนาด%, ความกว้าง%) — x, y = พิกเซลมุมซ้ายบนของภาพคำเกษียณบนหน้านี้
-    หรือ None ถ้าย่อสุดแล้วทั้งหน้าก็ยังไม่มีที่ว่าง (ผู้เรียกวางบนกระดาษเปล่าที่แทรกต่อจากหน้านี้)
+    คืน (x, y, ขนาด%, ความกว้าง%) เสมอ — x, y = พิกเซลมุมซ้ายบนของภาพคำเกษียณบนหน้านี้
+    ขนาด/ความกว้างคือค่าที่ส่งมา (ทับตัวหนังสือหรือเปล่า ถามต่อได้ที่ kasien_clear_at)
     """
     W, H = page_img.size
     base_w = base_w or W
     cell_cm = dpi / 2.54 / _CELL
+    size = max(20, min(300, int(size_pct)))
+    wrap = max(30, min(250, int(wrap_pct)))
     grid, gw, gh, inked = _page_ink(page_img, avoid)
     r_top, r_bot = int(gh * (0.40 if first_page else 0.15)), int(gh * 0.96)
     # ซ้ายเว้นที่เจาะรู/เย็บแฟ้ม ขวาเว้นขอบที่เครื่องพิมพ์พิมพ์ไม่ถึง (เท่าตรายาง)
     c_left, c_right = int(gw * 0.08), (W - 70) // _CELL
+    _, ink, whole = _footprint(text, size, wrap, indent_pct, bg, border, below, base_w, dpi)
+    if ink is None:                       # ไม่มีข้อความ วางตรงไหนก็ได้
+        return c_left * _CELL, r_top * _CELL, size, wrap
     # ต่ำกว่า ๙๓% เป็นท้ายกระดาษ (คำขวัญ ที่อยู่เว็บ) ไม่ใช่ลายเซ็น
     lines = _text_lines(grid, gw, r_top, int(gh * 0.93))
     sig = _signature_block(lines, gw, cell_cm)
     if sig is None and lines:             # หาลายเซ็นไม่เจอ ก็ให้ชิดท้ายเนื้อความไว้
         sig = (lines[-1][2], lines[-1][0], lines[-1][3], lines[-1][1])
     clear = max(1, round(0.3 * cell_cm))  # ห่างหมึกบนหน้ารอบด้านราว ๓ มม.
-    # ไม่ขยายเกินที่ผู้ใช้ตั้งไว้ ย่อเฉพาะตอนจำเป็น (ตั้งไว้เล็กกว่า ๗๐% เองก็ใช้ขนาดนั้น)
-    top_size = max(20, min(300, int(size_pct)))
-    sizes = sorted({*range(top_size, KASIEN_MIN_SIZE, -10), min(top_size, KASIEN_MIN_SIZE)},
-                   reverse=True)
-    wrap0 = max(30, min(250, int(wrap_pct)))
-    wraps = dict.fromkeys((wrap0, max(30, round(wrap0 * 0.7)), min(250, round(wrap0 * 1.5))))
+    iw, ih = -(-(ink[2] - ink[0]) // _CELL), -(-(ink[3] - ink[1]) // _CELL)  # ปัดขึ้น
+    cw, ch = iw + 2 * clear, ih + 2 * clear
+    tol = 2 + cw * ch // 1000             # ยอมจุดเปื้อนไม่กี่ช่อง (งานสแกน)
+    # ภาพทั้งแผ่นต้องอยู่ในกระดาษ ไม่งั้นตอนวางจริงถูกดันเข้ามาจนคลาดจากที่หาไว้
+    c_min = max(c_left, -(-(ink[0] - whole[0]) // _CELL) - clear)
+    c_max = max(c_min, min(c_right - cw, (W - whole[2] + ink[0]) // _CELL - clear))
+    r_max = max(r_top, min(r_bot - ch, (H - whole[3] + ink[1]) // _CELL - clear))
 
-    best = None      # (ห่างสุดของแบบนี้, ค่าย่อ, ที่ว่างที่ใกล้พอๆ กัน, ขนาด, กว้าง, ...)
-    for size in sizes:
-        for wrap in wraps:
-            penalty = SHRINK_COST_CM * (top_size - size) / 10 + (0 if wrap == wrap0 else 0.5)
-            if best is not None and penalty > best[0]:
-                continue                  # ต่อให้ชิดลายเซ็นพอดีก็ยังแพ้แบบที่เจอแล้ว
-            _, ink, whole = _footprint(text, size, wrap, indent_pct, bg, border, below, base_w, dpi)
-            if ink is None:               # ไม่มีข้อความ วางตรงไหนก็ได้
-                return c_left * _CELL, r_top * _CELL, top_size, wrap0
-            iw, ih = -(-(ink[2] - ink[0]) // _CELL), -(-(ink[3] - ink[1]) // _CELL)  # ปัดขึ้น
-            cw, ch = iw + 2 * clear, ih + 2 * clear
-            tol = 2 + cw * ch // 1000     # ยอมจุดเปื้อนไม่กี่ช่อง (งานสแกน)
-            # ภาพทั้งแผ่นต้องอยู่ในกระดาษ ไม่งั้นตอนวางจริงถูกดันเข้ามาจนคลาดจากที่หาไว้
-            c_min = max(c_left, -(-(ink[0] - whole[0]) // _CELL) - clear)
-            c_max = min(c_right - cw, (W - whole[2] + ink[0]) // _CELL - clear)
-            r_max = min(r_bot - ch, (H - whole[3] + ink[1]) // _CELL - clear)
-            low, near = None, []
-            for r0 in range(r_top, r_max + 1, 2):
-                for c0 in range(c_min, c_max + 1, 2):
-                    if inked(c0, r0, c0 + cw, r0 + ch) > tol:
-                        continue
-                    cost = penalty
-                    if sig:
-                        kx, ky = c0 + clear, r0 + clear
-                        dx = max(0, sig[0] - (kx + iw), kx - sig[2])
-                        dy = max(0, sig[1] - (ky + ih), ky - sig[3])
-                        cost += math.hypot(dx, dy) / cell_cm
-                    if low is None or cost < low:
-                        low = cost
-                        near = [f for f in near if f[0] <= low + NEAR_TIE_CM]
-                    if cost <= low + NEAR_TIE_CM:
-                        near.append((cost, c0, r0))
-            if low is not None and (best is None or (low, penalty) < best[:2]):
-                best = (low, penalty, near, size, wrap, ink[:2], (cw, ch, tol))
-    if best is None:
-        return None
-    _, _, near, size, wrap, (ix, iy), (cw, ch, tol) = best
+    low, near = None, []
+    for r0 in range(r_top, r_max + 1, 2):
+        for c0 in range(c_min, c_max + 1, 2):
+            kx, ky = c0 + clear, r0 + clear
+            cost = 0.0
+            if sig:
+                dx = max(0, sig[0] - (kx + iw), kx - sig[2])
+                dy = max(0, sig[1] - (ky + ih), ky - sig[3])
+                cost = math.hypot(dx, dy) / cell_cm
+            hit = inked(kx, ky, kx + iw, ky + ih)
+            if hit > 2 + iw * ih // 1000:        # ทับตัวหนังสือ — ยิ่งทับมากยิ่งไม่เอา
+                cost += OVERLAP_CM + hit / INK_CELLS_PER_CM
+            elif inked(c0, r0, c0 + cw, r0 + ch) > tol:
+                cost += CROWD_CM               # ไม่ทับ แต่ชิดตัวหนังสือเกินไป
+            if low is None or cost < low:
+                low = cost
+                near = [f for f in near if f[0] <= low + NEAR_TIE_CM]
+            if cost <= low + NEAR_TIE_CM:
+                near.append((cost, c0, r0))
 
     def room(c0, r0, dc, dr, most):
         """ขยายรอบกล่องออกไปได้อีกกี่ช่องโดยไม่ทับหมึก (ไม่เกิน most) — dc/dr = ขยายแนวนอน/ตั้ง"""
@@ -957,7 +948,8 @@ def place_kasien(page_img, text, *, indent_pct=100, size_pct=100, wrap_pct=100, 
     side, extra = round(1.0 * cell_cm), round(0.3 * cell_cm)
     _, c0, r0 = min(near, key=lambda f: (-room(f[1], f[2], 1, 0, side),
                                          -room(f[1], f[2], 0, 1, extra), f[1], f[2]))
-    return (c0 + clear) * _CELL - ix, (r0 + clear) * _CELL - iy, size, wrap
+    return (c0 + clear) * _CELL - ink[0], (r0 + clear) * _CELL - ink[1], size, wrap
+
 
 # =====================================================================
 # ๕. ระบบ Render รูปภาพ
