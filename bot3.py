@@ -1369,7 +1369,8 @@ class SarabanApp(tk.Tk):
                 b['editor'].configure(font=("TH Sarabun New", self.editor_font_size.get()))
 
     def build_pages(self):
-        """จัดหน้าเอกสารเรียงลงมา: ทุกหน้าของ PDF (ไม่เกิน PREVIEW_MAX_PAGES) แล้วต่อท้ายด้วยหน้ากระดาษเปล่า
+        """จัดหน้าเอกสารเรียงลงมา: ทุกหน้าของ PDF (ไม่เกิน PREVIEW_MAX_PAGES) กับหน้ากระดาษเปล่า
+        ที่แทรกต่อจากหน้าที่มีลายเซ็นผู้ส่ง (ในไฟล์ที่บันทึกก็อยู่ตรงนั้น — core.page_order)
 
         หน้าแรกกับหน้าที่มีลายเซ็นผู้ส่ง ย่อ/เลื่อนเนื้อหาได้ (ปุ่มปรับขนาดเนื้อหาข่าว) จึงเก็บภาพเต็มไว้
         หน้าอื่นอ่านจากไฟล์ตอนจะวาดบนจอหรือตอนบันทึก ไม่ต้องกอดภาพเต็มของทุกหน้าไว้ในหน่วยความจำ
@@ -1409,8 +1410,13 @@ class SarabanApp(tk.Tk):
                     f"หน้า {to_thai_digits(n)}")
             layout.append({'n': n, 'y': y, 'w': w, 'h': h, 'name': name})
             y += h + self.gap
-        layout.append({'n': doc['total_pages'] + 1, 'y': y, 'w': self.W, 'h': int(self.W * 1.414),
-                       'name': "หน้ากระดาษเปล่า (ต่อท้าย)", 'blank': True})
+            if n == sig_page:
+                # หน้ากระดาษเปล่าไว้ลงเกษียณเมื่อหน้าลายเซ็นไม่มีที่ — ติดหน้าลายเซ็น ขนาดเท่ากัน
+                # (เดิมต่อท้ายเล่ม คำเกษียณไปอยู่หลังสิ่งที่ส่งมาด้วยทั้งหมด ห่างลายเซ็นหลายหน้า)
+                bw, bh = self.page_full[sig_page].size
+                layout.append({'n': doc['total_pages'] + 1, 'y': y, 'w': bw, 'h': bh, 'blank': True,
+                               'name': f"หน้ากระดาษเปล่า (แทรกต่อจากหน้า {to_thai_digits(sig_page)})"})
+                y += bh + self.gap
         self.page_layout = layout
         self.page_y = {p['n']: p['y'] for p in layout}
 
@@ -1421,14 +1427,24 @@ class SarabanApp(tk.Tk):
             sx, sy = find_stamp_pos(self.page_full[1], tmp_stamp.width, tmp_stamp.height)
             self.stamp_orig_x, self.stamp_orig_y = sx + 20, sy + self.page_y[1]
 
-            # คำเกษียณวางบนหน้าที่มีลายเซ็นผู้ส่ง (ไม่มีก็หน้าแรก) ตรงที่ว่างใต้เนื้อความ
-            target = self.page_full[sig_page]
-            tmp_kasien = render_transparent_kasien(self.kasien_boxes[0]['text'], int(self.W * 0.42), 100)
-            s_y = int(target.height * (0.40 if sig_page == 1 else 0.15))
-            e_y = int(target.height * 0.95)
-            kx, ky = find_kasien_pos(target, tmp_kasien.width, tmp_kasien.height, s_y, e_y,
-                                     int(self.W * 0.08))
-            self.kasien_boxes[0]['x'], self.kasien_boxes[0]['y'] = kx + 20, ky + self.page_y[sig_page]
+            # คำเกษียณ: ที่ว่างใกล้ลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น (ไม่มีก็หน้าแรก) ย่อได้ถ้าจำเป็น
+            # ทั้งหน้าไม่มีที่ว่างจริงๆ ค่อยวางบนกระดาษเปล่าที่แทรกต่อจากหน้านั้น (เหมือนหน้าเว็บ)
+            box = self.kasien_boxes[0]
+            spot = place_kasien(self.page_full[sig_page], box['text'], first_page=sig_page == 1,
+                                base_w=self.W, dpi=self.A4_DPI)
+            if spot:
+                kx, ky, size, wrap = spot
+                box['pct'].set(size)
+                box['wrap_pct'].set(wrap)
+                box['x'], box['y'] = kx + 20, ky + self.page_y[sig_page]
+                if size < 100:
+                    self.set_status(f"ย่อคำเกษียณเหลือ {to_thai_digits(size)}% "
+                                    "ให้พอดีที่ว่างใกล้ลายเซ็นผู้ส่ง")
+            else:
+                cm = self.A4_DPI / 2.54
+                box['x'], box['y'] = 20 + 2 * cm, self.page_y[doc['total_pages'] + 1] + 3 * cm
+                self.set_status("หน้าที่มีลายเซ็นไม่มีที่ว่างพอ — วางคำเกษียณไว้บนกระดาษเปล่า"
+                                "ที่แทรกต่อจากหน้านั้น")
 
     def update_render(self, rebuild_bg=False):
         if rebuild_bg:
@@ -1551,11 +1567,18 @@ class SarabanApp(tk.Tk):
     # ---------- เลือกหน้าที่ส่งเข้า LINE ----------
     # เริ่มต้น: หน้าแรกถึงหน้าที่ลงเกษียณไว้ (กติกาเดียวกับหน้าเว็บ — core.line_pages) และเปลี่ยนตาม
     # เวลาลากของไปหน้าอื่น จนกว่าจะกดเลือกเอง — กดแล้วยึดตามที่เลือก
+    def _page_order(self, used=None):
+        """ลำดับหน้าในไฟล์ที่บันทึก (core.page_order) — หน้ากระดาษเปล่าแทรกต่อจากหน้าลายเซ็น
+        ส่ง used มา = นับหน้ากระดาษเปล่าเฉพาะตอนมีของวางไว้ (ไม่มีก็ไม่อยู่ในไฟล์)"""
+        total = self.doc_info['total_pages']
+        with_blank = used is None or total + 1 in used
+        return page_order(total, self.doc_info['sig_page'] if with_blank else None)
+
     def _auto_line_pages(self):
         items = [(self.stamp_orig_y, getattr(self, 'stamp_h', 0))]
         items += [(b['y'], b.get('render_h', 0)) for b in self.kasien_boxes if b['text'].strip()]
         used = pages_with_items(items, [(p['y'], p['h'], p['n']) for p in self.page_layout])
-        return line_pages(max(used | {1}))
+        return auto_line_pages(used, self._page_order(used))
 
     def _line_pages(self):
         return self.line_pick if self.line_pick is not None else self._auto_line_pages()
@@ -1577,7 +1600,8 @@ class SarabanApp(tk.Tk):
             c.itemconfig(it['btn'], fill="#06C755" if on else "white",
                          outline="#06C755" if on else "#999999")
         total = self.doc_info['total_pages']
-        names = ["กระดาษเปล่า" if n > total else to_thai_digits(n) for n in sorted(chosen)]
+        names = ["กระดาษเปล่า" if n > total else to_thai_digits(n)
+                 for n in sorted(chosen, key=self._page_order().index)]
         self.line_summary.config(text=(
             "📤 ส่งเข้า LINE: หน้า " + ", ".join(names) if names else
             "📤 ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป"))
@@ -1599,7 +1623,7 @@ class SarabanApp(tk.Tk):
             return
         else:
             chosen.add(n)
-        self.line_pick = sorted(chosen)
+        self.line_pick = sorted(chosen, key=self._page_order().index)
         self._refresh_line_buttons()
 
     def on_drag_start(self, event):
@@ -1744,11 +1768,13 @@ class SarabanApp(tk.Tk):
                 if p['n'] in snapshot['line_pages']:
                     page_imgs[p['n']] = img          # เก็บไว้ส่ง LINE (ไม่เกิน ๔ หน้า)
 
+            # หน้ากระดาษเปล่า (ถ้ามีของวาง) แทรกต่อจากหน้าที่มีลายเซ็น ไม่ใช่ต่อท้ายเล่ม
+            order = page_order(total, sig_page if has_blank_page else None)
             merger = PdfMerger()
             try:
                 # หน้าที่วางของ = ฉบับใหม่ / หน้าอื่น = หน้าเดิมจาก PDF (ต่อกันเป็นช่วงทีเดียว)
                 run = None
-                for n in range(1, total + 1):
+                for n in order:
                     if n in page_pdfs:
                         if run:
                             merger.append(doc['pdf_path'], pages=run)
@@ -1758,8 +1784,6 @@ class SarabanApp(tk.Tk):
                         run = (run[0], n) if run else (n - 1, n)
                 if run:
                     merger.append(doc['pdf_path'], pages=run)
-                if has_blank_page:
-                    merger.append(page_pdfs[blank_no])
 
                 today_str = now_th().strftime("%Y-%m-%d")
                 save_folder = os.path.join(OUTPUT_ROOT, today_str)
@@ -1777,7 +1801,7 @@ class SarabanApp(tk.Tk):
             try:
                 # หน้าที่เลือกไว้บนจอ (เริ่มต้น = หน้าแรกถึงหน้าที่ลงเกษียณ กติกาเดียวกับหน้าเว็บ)
                 # หน้ากระดาษเปล่าส่งได้เฉพาะตอนมีของวางไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
-                pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page)
+                pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page, order)
                 pdf_stem = os.path.splitext(os.path.basename(final_pdf_path))[0]
                 img_urls = []
                 for n in pages_to_send:
@@ -1787,8 +1811,9 @@ class SarabanApp(tk.Tk):
                     elif img is None:          # หน้าเกินที่แสดงบนจอ (เอกสารหนามาก) ดึงจาก PDF
                         img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
                     # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน (Drive for Desktop
-                    # ซิงก์ขึ้นไดร์ฟให้) ชื่อตามไฟล์ PDF + เลขหน้า เหมือนหน้าเว็บ
-                    jpg = os.path.join(save_folder, f"{pdf_stem}_หน้า{to_thai_digits(n)}.jpg")
+                    # ซิงก์ขึ้นไดร์ฟให้) ชื่อตามไฟล์ PDF + เลขหน้าตามลำดับในไฟล์ เหมือนหน้าเว็บ
+                    jpg = os.path.join(save_folder,
+                                       f"{pdf_stem}_หน้า{to_thai_digits(order.index(n) + 1)}.jpg")
                     img.convert('RGB').save(jpg, "JPEG", quality=88)
                     url = upload_to_imgbb(jpg)
                     if url:

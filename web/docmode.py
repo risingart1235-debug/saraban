@@ -29,10 +29,10 @@ from web import signature as sigmod
 from core import (
     Image,
     render_transparent_stamp, render_transparent_kasien,
-    find_stamp_pos, find_kasien_pos,
+    find_stamp_pos, place_kasien, kasien_clear_at,
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
-    format_scraped_date, get_next_receipt_no, line_pages, chosen_line_pages,
+    format_scraped_date, get_next_receipt_no, page_order, auto_line_pages, chosen_line_pages,
     upload_to_imgbb, send_line_with_image, PdfMerger,
 )
 
@@ -869,13 +869,12 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     stamp = render_transparent_stamp(receipt_no, 100)
     sx, sy = find_stamp_pos(p1, stamp.width, stamp.height)
 
-    # ตำแหน่งคำเกษียณ — หาที่ว่างในหน้าที่มีลายเซ็น
+    # ตำแหน่งคำเกษียณ — ที่ว่างใกล้ลายเซ็นผู้ส่งบนหน้าที่มีลายเซ็น (ย่อตัวอักษรลงได้ถ้าจำเป็น)
+    # ทั้งหน้าไม่มีที่ว่างจริงๆ ค่อยไปหน้ากระดาษเปล่าที่แทรกต่อจากหน้าลายเซ็น (มุมซ้ายบน)
     target = psig if psig is not None else p1
-    kbox = render_transparent_kasien(ai_text, int(target.width * 0.42), 100)
-    s_y = int(target.height * (0.15 if psig is not None else 0.40))
-    e_y = int(target.height * 0.95)
-    kx, ky, fits = find_kasien_pos(target, kbox.width, kbox.height, s_y, e_y,
-                                   int(target.width * 0.08), return_fit=True)
+    spot = place_kasien(target, ai_text, first_page=psig is None, dpi=DPI)
+    kx, ky, ksize, kwrap = spot or (int(2.0 * CM), int(3.0 * CM), 100, 100)
+    kbox = render_transparent_kasien(ai_text, int(target.width * 0.42 * kwrap / 100.0), ksize)
 
     pages = [{"name": "หน้าแรก", "png": _png_uri(_render_pdf_page(pdf_path, 1, PREVIEW_DPI)[0]),
               "w": p1.width, "h": p1.height, "index": 1}]
@@ -916,15 +915,27 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
          stamp={"size_pct": 100, "page": 0,
                 "left_cm": round(sx / CM, 2), "top_cm": round(sy / CM, 2),
                 "png": _png_uri(stamp), "w": stamp.width, "h": stamp.height},
-         boxes=[{"id": "b1", "text": ai_text, "size_pct": 100, "wrap_pct": 100,
+         boxes=[{"id": "b1", "text": ai_text, "size_pct": ksize, "wrap_pct": kwrap,
                  "indent_pct": 100, "bg": False, "border": False,
-                 # หน้าเอกสารไม่มีที่ว่างพอ -> วางบนหน้ากระดาษเปล่าท้ายเล่มแทน
-                 # (index เท่ากับจำนวนหน้าที่ส่งไป = หน้าเปล่าที่หน้าจอสร้างต่อท้าย)
-                 "page": kpage if fits else len(pages),
-                 "left_cm": round(kx / CM, 2) if fits else 2.0,
-                 "top_cm": round(ky / CM, 2) if fits else 3.0,
-                 "fitted": fits,
+                 # หน้าลายเซ็นไม่มีที่ว่างพอแม้ย่อแล้ว -> วางบนหน้ากระดาษเปล่าแทน
+                 # (index เท่ากับจำนวนหน้าที่ส่งไป = หน้าเปล่าที่หน้าจอแทรกไว้ต่อจากหน้าลายเซ็น)
+                 "page": kpage if spot else len(pages),
+                 "left_cm": round(kx / CM, 2), "top_cm": round(ky / CM, 2),
+                 "fitted": spot is not None,
                  "png": _png_uri(kbox), "w": kbox.width, "h": kbox.height}])
+
+
+def _blank_size(job) -> tuple:
+    """ขนาดหน้ากระดาษเปล่า = ขนาดหน้าที่มีลายเซ็น ซึ่งหน้าเปล่าแทรกต่ออยู่
+    (เดิมหน้าจอใช้ขนาดหน้าสุดท้าย แต่ไฟล์ใช้หน้าแรก ถ้าสองหน้านั้นขนาดไม่เท่ากัน ตำแหน่งจะคลาด)"""
+    pg = next((p for p in job["pages"] if p["index"] == job.get("sig_page")), job["pages"][0])
+    return pg["w"], pg["h"]
+
+
+def _page_w(job, pi) -> int:
+    """ความกว้างหน้าลำดับที่ pi บนหน้าจอ (ลำดับเกินจำนวนหน้า = หน้ากระดาษเปล่า)"""
+    pi = int(pi or 0)
+    return job["pages"][pi]["w"] if 0 <= pi < len(job["pages"]) else _blank_size(job)[0]
 
 
 # ==========================================================
@@ -932,12 +943,77 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
 # ==========================================================
 def render_box(job, box: dict) -> dict:
     """วาดกล่องคำเกษียณใหม่ตามข้อความ/ขนาด/ความกว้างที่ผู้ใช้ปรับ"""
-    page_w = job["pages"][min(box.get("page", 0), len(job["pages"]) - 1)]["w"]
+    page_w = _page_w(job, box.get("page", 0))
     max_w = max(10, int(page_w * 0.42 * (box.get("wrap_pct", 100) / 100.0)))
     img = render_transparent_kasien(box.get("text", ""), max_w,
                                     box.get("size_pct", 100), box.get("indent_pct", 100),
                                     bool(box.get("bg")), bool(box.get("border")))
     return {"png": _png_uri(img), "w": img.width, "h": img.height}
+
+
+def _num(value, default, lo, hi):
+    try:
+        return max(lo, min(hi, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def fit_box(job, data: dict) -> dict:
+    """ปุ่ม 📍 ย้ายไปใกล้ลายเซ็น — หาที่ให้กล่องคำเกษียณใหม่บนหน้าที่มีลายเซ็นผู้ส่ง
+
+    ใช้หลังแก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ แทรกลายเซ็นแล้วไม่มีที่ หรือลากไปไว้ไกล
+    data: page = หน้าที่กล่องอยู่ตอนนี้ — ถ้าเป็นหน้าเอกสาร หาที่บนหน้านั้น (AI ชี้หน้าลายเซ็นผิด
+                 ผู้ใช้ลากไปหน้าที่ถูกแล้วกดได้) ถ้าอยู่บนกระดาษเปล่า กลับไปหน้าที่มีลายเซ็น
+          box = ข้อความ/ขนาด/ความกว้าง/ย่อหน้า/พื้น/กรอบ/ตำแหน่ง ของกล่องนี้
+          sig = {w, h} ลายเซ็นผู้ลงรับที่ย้ายตามไปไว้ใต้กล่อง (ไม่ส่งมา = ไม่ได้แทรก)
+          avoid = [{page, left_cm, top_cm, w, h}] ของอื่นที่วางไว้แล้ว ห้ามทับ
+          keep = ที่เดิมไม่ทับตัวหนังสือก็อยู่ที่เดิม (ตอนกดแทรกลายเซ็น — ทับเมื่อไหร่ค่อยย้ายทั้งคู่)
+    ไม่มีที่ว่างพอแม้ย่อแล้ว ก็ไปหน้ากระดาษเปล่าที่แทรกต่อจากหน้าลายเซ็น (มุมซ้ายบน)
+    """
+    box = data.get("box") or {}
+    n_pages = len(job["pages"])
+    cur = int(_num(data.get("page"), -1, -1, n_pages))
+    kpage = cur if 0 <= cur < n_pages else next(
+        (i for i, p in enumerate(job["pages"]) if p["index"] == job.get("sig_page")), 0)
+    size = int(_num(box.get("size_pct"), 100, 20, 300))
+    wrap = int(_num(box.get("wrap_pct"), 100, 30, 250))
+    indent = int(_num(box.get("indent_pct"), 100, 0, 400))
+    s = data.get("sig") if isinstance(data.get("sig"), dict) else None
+    below = (int(_num(s.get("w"), 1, 1, 4000)), int(_num(s.get("h"), 1, 1, 4000))) if s else None
+    others = []
+    for o in (data.get("avoid") or [])[:20]:
+        if isinstance(o, dict):
+            x, y = _num(o.get("left_cm"), 0, 0, 100) * CM, _num(o.get("top_cm"), 0, 0, 100) * CM
+            others.append((int(_num(o.get("page"), -1, -1, n_pages)),
+                           (x, y, x + _num(o.get("w"), 0, 0, 5000), y + _num(o.get("h"), 0, 0, 5000))))
+    text = str(box.get("text") or "")[:3000]       # คำเกษียณจริงไม่กี่บรรทัด กันวาดข้อความยาวผิดปกติ
+    style = dict(indent_pct=indent, bg=bool(box.get("bg")), border=bool(box.get("border")),
+                 below=below, dpi=DPI)
+
+    def answer(page, x, y, size, wrap, fitted):
+        out = render_box(job, dict(box, size_pct=size, wrap_pct=wrap, indent_pct=indent, page=page))
+        out.update(page=page, left_cm=round(x / CM, 2), top_cm=round(y / CM, 2),
+                   size_pct=size, wrap_pct=wrap, fitted=fitted)
+        return out
+
+    page_img = None
+    if data.get("keep") and 0 <= cur <= n_pages:
+        x, y = _num(box.get("left_cm"), 0, 0, 100) * CM, _num(box.get("top_cm"), 0, 0, 100) * CM
+        here = (Image.new("RGB", _blank_size(job), "white") if cur == n_pages else
+                _render_pdf_page(job["pdf_path"], job["pages"][cur]["index"], DPI)[0])
+        if kasien_clear_at(here, text, x, y, size_pct=size, wrap_pct=wrap, base_w=_page_w(job, cur),
+                           avoid=[r for p, r in others if p == cur], **style):
+            return answer(cur, x, y, size, wrap, cur < n_pages)
+        if cur == kpage:
+            page_img = here
+    page_no = job["pages"][kpage]["index"]
+    if page_img is None:
+        page_img = _render_pdf_page(job["pdf_path"], page_no, DPI)[0]
+    spot = place_kasien(page_img, text, size_pct=size, wrap_pct=wrap, first_page=page_no == 1,
+                        avoid=[r for p, r in others if p == kpage], **style)
+    if spot:
+        return answer(kpage, *spot, True)
+    return answer(n_pages, int(2.0 * CM), int(3.0 * CM), size, wrap, False)
 
 
 def render_stamp(job, size_pct: int, date_str: str, time_str: str) -> dict:
@@ -1061,13 +1137,12 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
             continue
         pi = int(b.get("page", 0))
         used.add(pdf_page(pi))
-        img_w = job["pages"][min(pi, len(job["pages"]) - 1)]["w"]
-        max_w = max(10, int(img_w * 0.42 * (b.get("wrap_pct", 100) / 100.0)))
+        max_w = max(10, int(_page_w(job, pi) * 0.42 * (b.get("wrap_pct", 100) / 100.0)))
         k = render_transparent_kasien(b.get("text", ""), max_w, b.get("size_pct", 100),
                                       b.get("indent_pct", 100), bool(b.get("bg")), bool(b.get("border")))
         x = int(float(b.get("left_cm", 1)) * CM)
         y = int(float(b.get("top_cm", 1)) * CM)
-        if pi >= len(job["pages"]):          # หน้ากระดาษเปล่าท้ายเล่ม
+        if pi >= len(job["pages"]):          # หน้ากระดาษเปล่า (แทรกต่อจากหน้าลายเซ็น)
             extra_pages.append((k, x, y))
             continue
         bgp = layer(pi)
@@ -1101,21 +1176,24 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
 
     blank_pdf = blank = None
     if extra_pages:
-        blank = Image.new("RGB", (job["pages"][0]["w"], job["pages"][0]["h"]), "white")
+        blank = Image.new("RGB", _blank_size(job), "white")
         for k, x, y in extra_pages:
             blank.paste(k, (max(0, min(x, blank.width - k.width)),
                             max(0, min(y, blank.height - k.height))), k)
         blank_pdf = os.path.join(d, "blank.pdf")
         blank.save(blank_pdf, "PDF", resolution=float(DPI))
 
+    # หน้ากระดาษเปล่าแทรกต่อจากหน้าที่มีลายเซ็น คำเกษียณจะได้อยู่ติดลายเซ็น
+    # (เดิมต่อท้ายเล่ม ไปอยู่หลังสิ่งที่ส่งมาด้วยทั้งหมด)
+    order = page_order(total, (job.get("sig_page") or 1) if blank_pdf else None)
     merger = PdfMerger()
-    for n in range(1, total + 1):
-        if n in made:
+    for n in order:
+        if n > total:
+            merger.append(blank_pdf)
+        elif n in made:
             merger.append(made[n])                       # หน้าที่วางของแล้ว
         else:
             merger.append(job["pdf_path"], pages=(n - 1, n))
-    if blank_pdf:
-        merger.append(blank_pdf)
 
     today = core.day_folder()          # "๒๕๖๙/๐๘ สิงหาคม/๒๘" — ซอยเป็น ปี/เดือน/วัน
     folder = os.path.join(core.OUTPUT_ROOT, today)
@@ -1146,21 +1224,21 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         pi_of = {p["index"]: i for i, p in enumerate(job["pages"])}
         chosen = payload.get("line_pages")
         if isinstance(chosen, list):            # เลือกเองบนหน้าจอ (ไม่เลือกสักหน้า = ข้อความอย่างเดียว)
-            pages = chosen_line_pages(chosen, total, blank is not None)
+            pages = chosen_line_pages(chosen, total, blank is not None, order)
         else:                                   # หน้าเว็บรุ่นเก่าไม่ได้ส่งมา ใช้กติกาเดิม
-            pages = line_pages(max(used))
+            pages = auto_line_pages(used, order)
         urls = []
         for n in pages:
-            if n > total:                       # หน้ากระดาษเปล่าท้ายเล่มที่ลงเกษียณไว้
+            if n > total:                       # หน้ากระดาษเปล่าที่ลงเกษียณไว้
                 img = blank
             elif n in pi_of:                    # หน้าที่เปิดให้วางของ (วางแล้วหรือยังก็ได้)
                 img = layer(pi_of[n])
             else:                               # หน้าที่อยู่ระหว่างกลาง ไม่มีอะไรวาง
                 img = _render_pdf_page(job["pdf_path"], n, DPI)[0]
             # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน ชื่อตามไฟล์ PDF + เลขหน้า
-            # (เลขหน้าตรงกับใน PDF ที่บันทึกแล้ว หน้ากระดาษเปล่าที่ต่อท้ายคือหน้าสุดท้าย)
+            # (เลขหน้าตามลำดับใน PDF ที่บันทึก หน้ากระดาษเปล่าอยู่ต่อจากหน้าลายเซ็น)
             p = os.path.join(folder, f"{os.path.splitext(os.path.basename(out))[0]}"
-                                     f"_หน้า{to_thai_digits(n)}.jpg")
+                                     f"_หน้า{to_thai_digits(order.index(n) + 1)}.jpg")
             img.convert("RGB").save(p, "JPEG", quality=88)
             # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
             url = publish_line_image(p, day=today) or upload_to_imgbb(p)

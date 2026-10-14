@@ -7,6 +7,7 @@
 import os
 import re
 import json
+import math
 import time
 import threading
 import importlib
@@ -469,12 +470,36 @@ def line_pages(last_page):
     return [1] + list(range(last_page - LINE_MAX_IMAGES + 2, last_page + 1))
 
 
-def chosen_line_pages(chosen, total, has_blank):
+def page_order(total, blank_after=None):
+    """ลำดับหน้าในไฟล์ PDF ที่บันทึก เป็นเลขหน้าเดิม 1..total (หน้ากระดาษเปล่า = total+1)
+
+    หน้ากระดาษเปล่าที่วางคำเกษียณ แทรกต่อจากหน้าที่มีลายเซ็นผู้ส่ง (blank_after) ไม่ใช่ต่อท้ายเล่ม
+    เดิมไปต่อหลังสิ่งที่ส่งมาด้วยทั้งหมด คำเกษียณเลยห่างลายเซ็นไปหลายหน้า
+    blank_after=None = ไม่มีหน้ากระดาษเปล่า (ใช้ทั้งหน้าเว็บและโปรแกรมบนคอม)
+    """
+    order = list(range(1, total + 1))
+    if blank_after is not None:
+        order.insert(max(1, min(int(blank_after), total)), total + 1)
+    return order
+
+
+def auto_line_pages(used, order):
+    """หน้าที่ส่ง LINE ถ้าไม่ได้เลือกเอง: หน้าแรกถึงหน้าสุดท้ายที่มีของวาง (line_pages)
+    นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น"""
+    last = max([order.index(n) + 1 for n in used if n in order] or [1])
+    return [order[i - 1] for i in line_pages(last)]
+
+
+def chosen_line_pages(chosen, total, has_blank, order=None):
     """หน้าที่ผู้ใช้เลือกส่งเข้า LINE บนหน้าจอ — เอาเฉพาะหน้าที่มีจริงในไฟล์ ไม่ซ้ำ เรียงตามหน้า
-    ไม่เกินเพดานของ LINE (หน้ากระดาษเปล่าท้ายเล่ม = total+1 มีเมื่อวางของไว้เท่านั้น)
+    ไม่เกินเพดานของ LINE (หน้ากระดาษเปล่า = total+1 มีเมื่อวางของไว้เท่านั้น)
+    order = ลำดับหน้าจริงในไฟล์ (page_order) ไม่ส่งมาก็เรียงตามเลขหน้า
     ใช้ทั้งหน้าเว็บและโปรแกรมบนคอม"""
     valid = set(range(1, total + 1)) | ({total + 1} if has_blank else set())
-    return sorted({int(n) for n in chosen if str(n).isdigit() and int(n) in valid})[:LINE_MAX_IMAGES]
+    pages = {int(n) for n in chosen if str(n).isdigit() and int(n) in valid}
+    order = order or sorted(valid)
+    return sorted(pages, key=lambda n: order.index(n) if n in order else len(order) + n
+                  )[:LINE_MAX_IMAGES]
 
 
 def pages_with_items(item_spans, page_spans):
@@ -718,44 +743,221 @@ def find_stamp_pos(pil_img, stamp_w, stamp_h):
             except: pass
     return W - stamp_w - RIGHT_MARGIN, 20
 
-def find_kasien_pos(pil_img, kasien_w, kasien_h, start_y, end_y, left_x, return_fit=False):
-    """หาช่องว่างที่พอวางคำเกษียณได้
+# --- ที่วางคำเกษียณ: ที่ว่างจริงที่ชิดลายเซ็นผู้ส่งที่สุด ---
+# เดิมดูแค่แถบซ้ายกว้าง ๔๒% ของหน้า ไม่มีช่องสูงพอเมื่อไหร่ หน้าเว็บโยนคำเกษียณไปหน้ากระดาษเปล่า
+# ท้ายเล่ม (หลังสิ่งที่ส่งมาด้วยทั้งหมด) ห่างลายเซ็นไปหลายหน้า แต่บางทีก็นับว่าว่างทั้งที่ทับ
+# "ขอแสดงความนับถือ" กับลายเซ็นอยู่ครึ่งตัว เพราะไม่นับตัวหนังสือที่ล้นเข้ามาไม่ถึง ๖ จุด
+# ตอนนี้หาได้ทั้งหน้าและห้ามทับหมึก ไม่พอค่อยย่อตัวอักษร/ปรับความกว้างกล่อง เลือกที่ใกล้ลายเซ็นสุด
+KASIEN_MIN_SIZE = 70                   # ย่อได้ถึง ๗๐% (ราว ๑๑.๕ pt พิมพ์แล้วยังอ่านสบาย)
+SHRINK_COST_CM = 1.5                   # ย่อตัวอักษร ๑๐% ยอมแลกกับได้ที่ใกล้ลายเซ็นขึ้น ๑.๕ ซม.
+NEAR_TIE_CM = 0.5                      # ใกล้พอๆ กัน (ต่างไม่ถึงครึ่งเซนต์) เอาที่ชิดซ้าย แล้วที่สูงกว่า
+_CELL = 8                              # ตารางหมึกช่องละ ๘ จุด (๑ มม. ที่ 200 DPI)
 
-    return_fit=True จะคืน (x, y, พอดีไหม) เพิ่มมาด้วย
-    ถ้าไม่พอดี ผู้เรียกจะได้ตัดสินใจเองว่าจะย้ายไปหน้ากระดาษเปล่าแทน
+
+def _ink_grid(pil_img):
+    """ตารางหมึกของหน้า ช่องละ _CELL จุด: 1 = มีหมึก (ตัวหนังสือ เส้น ลายเซ็น ตราประทับ)
+
+    เข้มกว่า 180 นับเป็นหมึก (ลายน้ำ/พื้นเทาอ่อนของงานสแกนไม่นับ) และต้องมีอย่างน้อย ๓ จุด
+    ใน ๖๔ จุดของช่อง จุดฝุ่นจุดเดียวจากเครื่องสแกนจะได้ไม่ทำให้ทั้งแถบใช้ไม่ได้
+    คืน (ตาราง 1/0 เรียงทีละแถว, จำนวนช่องตามกว้าง, ตามสูง)
     """
     gray = pil_img.convert('L')
-    px = gray.load()   # เข้าถึงพิกเซลโดยตรง เร็วกว่า getpixel มาก
-    W, H = gray.size
-    empty_streaks = []
-    current_start = -1
-    for y in range(start_y, end_y, 15):
-        dark = 0
-        for x in range(left_x, left_x + kasien_w, 5):
-            if 0 <= x < W and 0 <= y < H and px[x, y] < 180:
-                dark += 1
-                if dark > 5: break
-        if dark <= 5:
-            if current_start == -1: current_start = y
-        else:
-            if current_start != -1:
-                empty_streaks.append((current_start, y, y - current_start))
-                current_start = -1
-                
-    if current_start != -1: 
-        empty_streaks.append((current_start, end_y, end_y - current_start))
-    
-    # ไม่มีช่องไหนสูงพอ ก็เอาช่องที่ว่างมากที่สุดเท่าที่มี
-    # (เดิมถอยไปวางที่ start_y เฉยๆ ซึ่งมักไปทับตัวหนังสือพอดี)
-    if empty_streaks:
-        empty_streaks.sort(key=lambda x: x[2], reverse=True)
-        best = empty_streaks[0]
-        fit = best[2] >= kasien_h
-        y = best[0] + 30
-    else:
-        fit, y = False, start_y + 30
+    gw, gh = gray.width // _CELL, gray.height // _CELL
+    ink = gray.crop((0, 0, gw * _CELL, gh * _CELL)).point(lambda p: 255 if p < 180 else 0)
+    return [1 if v >= 12 else 0 for v in ink.reduce(_CELL).tobytes()], gw, gh
 
-    return (left_x, y, fit) if return_fit else (left_x, y)
+
+def _ink_counter(grid, gw, gh):
+    """ตารางผลรวมสะสม — คืนฟังก์ชันนับช่องหมึกในสี่เหลี่ยม (ซ้าย, บน, ขวา, ล่าง) ได้ในครั้งเดียว"""
+    w1 = gw + 1
+    s = [0] * (w1 * (gh + 1))
+    for r in range(gh):
+        acc, above, here = 0, r * w1, (r + 1) * w1
+        for c in range(gw):
+            acc += grid[r * gw + c]
+            s[here + c + 1] = s[above + c + 1] + acc
+    return lambda c0, r0, c1, r1: s[r1 * w1 + c1] - s[r0 * w1 + c1] - s[r1 * w1 + c0] + s[r0 * w1 + c0]
+
+
+def _text_lines(grid, gw, r_from, r_to):
+    """บรรทัดที่มีหมึกในแถว [r_from, r_to) — [(แถวบน, แถวล่าง, ซ้ายสุด, ขวาสุด)] หน่วยช่อง
+    (ล่าง/ขวาไม่นับรวม) ไม่ดูขอบกระดาษ ๔% เผื่อเงาขอบกระดาษจากเครื่องสแกน"""
+    edge = gw // 25
+    lines, cur = [], None
+    for r in range(r_from, r_to):
+        row = grid[r * gw + edge:(r + 1) * gw - edge]
+        if sum(row) >= 2:
+            x0, x1 = edge + row.index(1), edge + len(row) - row[::-1].index(1)
+            cur = [cur[0], r + 1, min(cur[2], x0), max(cur[3], x1)] if cur else [r, r + 1, x0, x1]
+        elif cur:
+            lines.append(tuple(cur))
+            cur = None
+    if cur:
+        lines.append(tuple(cur))
+    return lines
+
+
+def _signature_block(lines, gw, cell_cm):
+    """กรอบลายเซ็นผู้ส่ง (ซ้าย, บน, ขวา, ล่าง) หน่วยช่อง หรือ None ถ้าหาไม่เจอ
+
+    ตามระเบียบงานสารบรรณ คำลงท้าย ลายมือชื่อ และชื่อเต็มในวงเล็บ เริ่มราวกึ่งกลางหน้า ส่วนเนื้อความ
+    กับส่วนราชการเจ้าของเรื่องชิดซ้าย จึงเอากลุ่มบรรทัดที่เริ่มเลยกึ่งกลางกลุ่มล่างสุด (ช่องลายเซ็น
+    เว้นว่างได้ถึง ๒.๕ ซม.) แล้วต่อด้วยบรรทัดตำแหน่งที่จัดกึ่งกลางไว้ใต้ชื่อ
+    cell_cm = จำนวนช่องต่อ ๑ ซม.
+    """
+    shifted = [i for i, ln in enumerate(lines) if ln[2] >= gw * 0.40]
+    if not shifted:
+        return None
+    top = end = shifted[-1]
+    while (top > 0 and lines[top - 1][2] >= gw * 0.40
+           and lines[top][0] - lines[top - 1][1] <= 2.5 * cell_cm):
+        top -= 1
+    mid = (min(ln[2] for ln in lines[top:end + 1]) + max(ln[3] for ln in lines[top:end + 1])) / 2
+    while (end + 1 < len(lines) and lines[end + 1][0] - lines[end][1] <= 1.2 * cell_cm
+           and abs((lines[end + 1][2] + lines[end + 1][3]) / 2 - mid) <= 2.5 * cell_cm):
+        end += 1
+    block = lines[top:end + 1]
+    return (min(ln[2] for ln in block), block[0][0], max(ln[3] for ln in block), block[-1][1])
+
+
+def _page_ink(page_img, avoid=()):
+    """ตารางหมึกของหน้า + ตัวนับ — ของที่วางไว้แล้ว (avoid) ถือเป็นหมึกด้วย"""
+    if avoid:
+        page_img = page_img.convert('RGB')
+        draw = ImageDraw.Draw(page_img)
+        for box in avoid:
+            draw.rectangle([int(v) for v in box], fill="black")
+    grid, gw, gh = _ink_grid(page_img)
+    return grid, gw, gh, _ink_counter(grid, gw, gh)
+
+
+def _footprint(text, size, wrap, indent_pct, bg, border, below, base_w, dpi):
+    """ภาพคำเกษียณ, ขอบหมึก และขอบทั้งแผ่น (ซ้าย บน ขวา ล่าง) เทียบมุมซ้ายบนของภาพ
+
+    below = (กว้าง, สูง) ลายเซ็นผู้ลงรับกึ่งกลางใต้กล่อง ห่าง ๒ มม. แบบเดียวกับปุ่มแทรกลายเซ็น
+    นับรวมเป็นหมึกด้วย / ขอบหมึกเป็น None ถ้าไม่มีข้อความ"""
+    img = render_transparent_kasien(text, max(10, int(base_w * 0.42 * wrap / 100.0)),
+                                    size, indent_pct, bg, border)
+    ink = img.getchannel('A').getbbox()
+    if not ink:
+        return img, None, None
+    ink, whole = list(ink), [0, 0, img.width, img.height]   # ทั้งแผ่นรวมขอบใส ต้องอยู่ในกระดาษ
+    if below:
+        bw, bh = int(below[0]), int(below[1])
+        sx, sy = (img.width - bw) // 2, img.height + round(0.2 * dpi / 2.54)
+        ink = [min(ink[0], sx), ink[1], max(ink[2], sx + bw), sy + bh]
+        whole = [min(0, sx), 0, max(img.width, sx + bw), sy + bh]
+    return img, ink, whole
+
+
+def kasien_clear_at(page_img, text, x, y, *, indent_pct=100, size_pct=100, wrap_pct=100,
+                    bg=False, border=False, below=None, avoid=(), base_w=None,
+                    dpi=PDF_RENDER_DPI):
+    """คำเกษียณ (กับลายเซ็นใต้กล่อง ถ้ามี) ที่มุมซ้ายบน x, y ไม่ทับหมึกบนหน้าและของที่วางไว้แล้ว
+    และอยู่ในกระดาษทั้งหมด — ไว้ดูว่าที่เดิมใช้ต่อได้ไหม ก่อนจะย้ายไปหาที่ใหม่"""
+    W, H = page_img.size
+    x, y = int(x), int(y)
+    _, ink, whole = _footprint(text, size_pct, wrap_pct, indent_pct, bg, border, below,
+                               base_w or W, dpi)
+    if ink is None:
+        return True
+    if x + whole[0] < 0 or y + whole[1] < 0 or x + whole[2] > W or y + whole[3] > H:
+        return False
+    _, gw, gh, inked = _page_ink(page_img, avoid)
+    c0, r0 = max(0, (x + ink[0]) // _CELL), max(0, (y + ink[1]) // _CELL)
+    c1, r1 = min(gw, -(-(x + ink[2]) // _CELL)), min(gh, -(-(y + ink[3]) // _CELL))
+    return inked(c0, r0, c1, r1) <= 2 + (c1 - c0) * (r1 - r0) // 1000
+
+
+def place_kasien(page_img, text, *, indent_pct=100, size_pct=100, wrap_pct=100, bg=False,
+                 border=False, below=None, avoid=(), first_page=False, base_w=None,
+                 dpi=PDF_RENDER_DPI):
+    """หาที่วางคำเกษียณบนหน้าที่มีลายเซ็นผู้ส่ง: ที่ว่างจริง (ไม่ทับหมึก) ที่ชิดลายเซ็นที่สุด
+
+    ลองตัวอักษรตั้งแต่ขนาดที่ตั้งไว้ (size_pct) ลงไปทีละ ๑๐% ถึง ๗๐% กับความกว้างกล่อง ๓ แบบ
+    (ตามที่ตั้งไว้ / แคบลง แทรกข้างลายเซ็นได้ / กว้างขึ้น ลงแถบว่างเตี้ยๆ ได้) หาที่ว่างได้ทั้งหน้า
+    แล้วเอาแบบที่ห่างลายเซ็นน้อยสุด — ย่อทุก ๑๐% คิดเป็นห่างเพิ่ม ๑.๕ ซม. (ไม่ย่อถ้าไม่จำเป็น)
+    below = (กว้าง, สูง) ลายเซ็นผู้ลงรับที่วางกึ่งกลางใต้กล่อง ห่าง ๒ มม. ต้องมีที่ให้ด้วย
+    avoid = [(ซ้าย, บน, ขวา, ล่าง)] ของที่วางไว้แล้วบนหน้านี้ (ตรายาง กล่องอื่น) ห้ามทับ
+    first_page = หน้าแรก (ครึ่งบนเป็นหัวหนังสือกับตรายางเลขรับ ไม่วางตรงนั้น)
+    base_w = ความกว้างที่ใช้คิดความกว้างกล่อง (๔๒% แบบเดียวกับตอนวาดจริง) ไม่ส่งมา = กว้างของหน้านี้
+
+    คืน (x, y, ขนาด%, ความกว้าง%) — x, y = พิกเซลมุมซ้ายบนของภาพคำเกษียณบนหน้านี้
+    หรือ None ถ้าย่อสุดแล้วทั้งหน้าก็ยังไม่มีที่ว่าง (ผู้เรียกวางบนกระดาษเปล่าที่แทรกต่อจากหน้านี้)
+    """
+    W, H = page_img.size
+    base_w = base_w or W
+    cell_cm = dpi / 2.54 / _CELL
+    grid, gw, gh, inked = _page_ink(page_img, avoid)
+    r_top, r_bot = int(gh * (0.40 if first_page else 0.15)), int(gh * 0.96)
+    # ซ้ายเว้นที่เจาะรู/เย็บแฟ้ม ขวาเว้นขอบที่เครื่องพิมพ์พิมพ์ไม่ถึง (เท่าตรายาง)
+    c_left, c_right = int(gw * 0.08), (W - 70) // _CELL
+    # ต่ำกว่า ๙๓% เป็นท้ายกระดาษ (คำขวัญ ที่อยู่เว็บ) ไม่ใช่ลายเซ็น
+    lines = _text_lines(grid, gw, r_top, int(gh * 0.93))
+    sig = _signature_block(lines, gw, cell_cm)
+    if sig is None and lines:             # หาลายเซ็นไม่เจอ ก็ให้ชิดท้ายเนื้อความไว้
+        sig = (lines[-1][2], lines[-1][0], lines[-1][3], lines[-1][1])
+    clear = max(1, round(0.3 * cell_cm))  # ห่างหมึกบนหน้ารอบด้านราว ๓ มม.
+    # ไม่ขยายเกินที่ผู้ใช้ตั้งไว้ ย่อเฉพาะตอนจำเป็น (ตั้งไว้เล็กกว่า ๗๐% เองก็ใช้ขนาดนั้น)
+    top_size = max(20, min(300, int(size_pct)))
+    sizes = sorted({*range(top_size, KASIEN_MIN_SIZE, -10), min(top_size, KASIEN_MIN_SIZE)},
+                   reverse=True)
+    wrap0 = max(30, min(250, int(wrap_pct)))
+    wraps = dict.fromkeys((wrap0, max(30, round(wrap0 * 0.7)), min(250, round(wrap0 * 1.5))))
+
+    best = None      # (ห่างสุดของแบบนี้, ค่าย่อ, ที่ว่างที่ใกล้พอๆ กัน, ขนาด, กว้าง, ...)
+    for size in sizes:
+        for wrap in wraps:
+            penalty = SHRINK_COST_CM * (top_size - size) / 10 + (0 if wrap == wrap0 else 0.5)
+            if best is not None and penalty > best[0]:
+                continue                  # ต่อให้ชิดลายเซ็นพอดีก็ยังแพ้แบบที่เจอแล้ว
+            _, ink, whole = _footprint(text, size, wrap, indent_pct, bg, border, below, base_w, dpi)
+            if ink is None:               # ไม่มีข้อความ วางตรงไหนก็ได้
+                return c_left * _CELL, r_top * _CELL, top_size, wrap0
+            iw, ih = -(-(ink[2] - ink[0]) // _CELL), -(-(ink[3] - ink[1]) // _CELL)  # ปัดขึ้น
+            cw, ch = iw + 2 * clear, ih + 2 * clear
+            tol = 2 + cw * ch // 1000     # ยอมจุดเปื้อนไม่กี่ช่อง (งานสแกน)
+            # ภาพทั้งแผ่นต้องอยู่ในกระดาษ ไม่งั้นตอนวางจริงถูกดันเข้ามาจนคลาดจากที่หาไว้
+            c_min = max(c_left, -(-(ink[0] - whole[0]) // _CELL) - clear)
+            c_max = min(c_right - cw, (W - whole[2] + ink[0]) // _CELL - clear)
+            r_max = min(r_bot - ch, (H - whole[3] + ink[1]) // _CELL - clear)
+            low, near = None, []
+            for r0 in range(r_top, r_max + 1, 2):
+                for c0 in range(c_min, c_max + 1, 2):
+                    if inked(c0, r0, c0 + cw, r0 + ch) > tol:
+                        continue
+                    cost = penalty
+                    if sig:
+                        kx, ky = c0 + clear, r0 + clear
+                        dx = max(0, sig[0] - (kx + iw), kx - sig[2])
+                        dy = max(0, sig[1] - (ky + ih), ky - sig[3])
+                        cost += math.hypot(dx, dy) / cell_cm
+                    if low is None or cost < low:
+                        low = cost
+                        near = [f for f in near if f[0] <= low + NEAR_TIE_CM]
+                    if cost <= low + NEAR_TIE_CM:
+                        near.append((cost, c0, r0))
+            if low is not None and (best is None or (low, penalty) < best[:2]):
+                best = (low, penalty, near, size, wrap, ink[:2], (cw, ch, tol))
+    if best is None:
+        return None
+    _, _, near, size, wrap, (ix, iy), (cw, ch, tol) = best
+
+    def room(c0, r0, dc, dr, most):
+        """ขยายรอบกล่องออกไปได้อีกกี่ช่องโดยไม่ทับหมึก (ไม่เกิน most) — dc/dr = ขยายแนวนอน/ตั้ง"""
+        for i in range(1, most + 1):
+            if inked(max(0, c0 - dc * i), max(0, r0 - dr * i),
+                     min(gw, c0 + cw + dc * i), min(gh, r0 + ch + dr * i)) > tol:
+                return i - 1
+        return most
+
+    # ใกล้ลายเซ็นพอๆ กัน: เอาที่มีที่ว่างรอบตัวพอ (ข้างละ ๑ ซม. บน-ล่างเพิ่มอีก ๓ มม.) ก่อน
+    # ไม่งั้นคำเกษียณจะไปเบียดติดส่วนราชการเจ้าของเรื่อง อ่านเหมือนเป็นข้อความเดียวกัน
+    # แล้วค่อยเอาที่ชิดซ้าย (ที่ลงเกษียณตามธรรมเนียม) และที่สูงกว่า (ใกล้ลายเซ็นกว่า)
+    side, extra = round(1.0 * cell_cm), round(0.3 * cell_cm)
+    _, c0, r0 = min(near, key=lambda f: (-room(f[1], f[2], 1, 0, side),
+                                         -room(f[1], f[2], 0, 1, extra), f[1], f[2]))
+    return (c0 + clear) * _CELL - ix, (r0 + clear) * _CELL - iy, size, wrap
 
 # =====================================================================
 # ๕. ระบบ Render รูปภาพ

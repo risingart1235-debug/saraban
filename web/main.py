@@ -1243,6 +1243,13 @@ async def api_doc_box(job_id: str, request: Request, user: str = Depends(current
     return docmode.render_box(job, await request.json())
 
 
+@app.post("/api/doc/{job_id}/fit")
+async def api_doc_fit(job_id: str, request: Request, user: str = Depends(current_user)):
+    """ปุ่ม 📍 — หาที่วางกล่องคำเกษียณใหม่ใกล้ลายเซ็นผู้ส่ง (เรนเดอร์หน้า PDF ห้ามขวาง event loop)"""
+    job = _job_or_404(job_id, user)
+    return await asyncio.to_thread(docmode.fit_box, job, await request.json())
+
+
 @app.post("/api/doc/{job_id}/signature")
 async def api_doc_signature(job_id: str, request: Request, user: str = Depends(current_user)):
     """วาดลายเซ็นของคนที่กำลังลงรับ + วันที่ใต้ลายเซ็น ตามขนาดที่เลือก"""

@@ -103,6 +103,7 @@
       </div>
       <p class="tiny" id="meta" style="margin-top:6px; line-height:1.6"></p>
       <div id="warn" class="err hidden" style="margin-top:8px"></div>
+      <p class="tiny hidden" id="knote" style="margin-top:8px; line-height:1.6"></p>
     </div>
 
     <!-- ส่วนใหญ่ค่าที่เตรียมมาให้ใช้ได้เลย ไม่ต้องแก้ จึงพับเก็บไว้ก่อน
@@ -140,6 +141,10 @@
         <button id="bbd">ตีกรอบ</button>
         <button id="bdel" style="color:#b91c1c">ลบกล่องนี้</button>
       </div>
+      <!-- แก้ข้อความจนกล่องสูงขึ้นไปทับตัวหนังสือ / แทรกลายเซ็นแล้วไม่มีที่ / ลากไปไกล — กดทีเดียวจัดให้ใหม่ -->
+      <button class="btn small" id="bfit" style="margin-top:10px">📍 ย้ายไปใกล้ลายเซ็น</button>
+      <p class="tiny" style="margin:4px 0 0">หาที่ว่างข้างลายเซ็นผู้ส่งให้ใหม่ ไม่ทับตัวหนังสือ
+        (ลายเซ็นผู้ลงรับที่อยู่ใต้กล่องย้ายตามไปด้วย)</p>
       <button class="btn grey small" id="badd" style="margin-top:10px">➕ เพิ่มกล่องข้อความ</button>
     </div>
 
@@ -179,7 +184,10 @@
         <div class="prev"><img id="sigPrev" alt="ตัวอย่างลายเซ็น"></div>
         <p class="tiny" style="margin:0 0 4px">วันที่ใต้ลายเซ็น <span id="sigDateVal" style="color:var(--text);font-size:14px"></span>
           — ตามวันที่ลงรับบนตรายาง แก้ได้ที่ช่องวันที่ของตรายาง (✏️ แก้คำเกษียณ / วัน-เวลาตรายาง)</p>
-        <div class="chips"><button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button></div>
+        <div class="chips">
+          <button id="sigFit">📍 จัดที่ใหม่ ไม่ให้ทับตัวหนังสือ</button>
+          <button id="sigDel" style="color:#b91c1c">เอาลายเซ็นออก</button>
+        </div>
       </div>
       <div id="sigMsg" class="hidden" style="margin-top:10px"></div>
       <p class="tiny" style="margin-top:10px">เปลี่ยนหรือลบรูปลายเซ็นที่จำไว้ ได้ที่เมนู 👤 มุมขวาบนของหน้าแรก</p>
@@ -283,15 +291,21 @@ function build() {
   $('ssv').textContent = D.stamp.size_pct + '%';
   $('stampPrev').src = D.stamp.png;
 
-  // หน้าเอกสาร + หน้ากระดาษเปล่าท้ายเล่มไว้วางคำเกษียณ
+  // หน้าเอกสาร + หน้ากระดาษเปล่าไว้วางคำเกษียณ แทรกต่อจากหน้าที่มีลายเซ็น (ในไฟล์ก็อยู่ตรงนั้น)
+  // เดิมต่อท้ายเล่ม พอแสดงทุกหน้า คำเกษียณที่ไม่มีที่ลงไปโผล่หลังสิ่งที่ส่งมาด้วยทั้งหมด ห่างลายเซ็น
   const box = $('pages'); box.innerHTML = '';
-  D.pages.forEach((p, i) => box.appendChild(mkPage(i, p.name, p.png, p.w, p.h, p.index)));
-  const last = D.pages[D.pages.length - 1];
-  box.appendChild(mkPage(D.pages.length, 'หน้ากระดาษเปล่า (ต่อท้าย)', null, last.w, last.h,
-                         D.total_pages + 1));
+  const bs = blankSize();
+  const blank = mkPage(D.pages.length, `หน้ากระดาษเปล่า (แทรกต่อจากหน้า ${blankAfter()})`, null,
+                       bs.w, bs.h, D.total_pages + 1);
+  D.pages.forEach((p, i) => {
+    box.appendChild(mkPage(i, p.name, p.png, p.w, p.h, p.index));
+    if (p.index === blankAfter()) box.appendChild(blank);
+  });
+  if (!blank.parentNode) box.appendChild(blank);
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
+  kasienNote(D.boxes[0]);
   D.sig = null;                 // ลายเซ็นไม่แทรกเอง ต้องกดปุ่มแทรกก่อน
   loadSig();
   linePick = null; showLine();
@@ -303,9 +317,24 @@ function build() {
   // บันทึกไม่ผ่านเพราะเซิร์ฟเวอร์เพิ่งเริ่มใหม่ — ใส่สิ่งที่จัดไว้ก่อนหน้านั้นคืนให้
   const v = takeDraft();
   if (v) restoreDraft(v).then((ok) => {
-    if (ok) show('ok', '♻️ ใส่คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ก่อนเซิร์ฟเวอร์เริ่มใหม่คืนให้แล้ว ' +
-                       '— ตรวจดูแล้วกดบันทึกได้เลย');
+    if (ok) {
+      kasienNote(null);
+      show('ok', '♻️ ใส่คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ก่อนเซิร์ฟเวอร์เริ่มใหม่คืนให้แล้ว ' +
+                 '— ตรวจดูแล้วกดบันทึกได้เลย');
+    }
   }).catch(() => {});
+}
+
+// บอกเหตุผลเวลาคำเกษียณไม่ได้อยู่บนหน้าลายเซ็น หรือตัวเล็กกว่าปกติ ผู้ใช้จะได้ไม่งงว่าหายไปไหน
+function kasienNote(b) {
+  const n = $('knote');
+  n.textContent = !b ? '' : b.page >= D.pages.length
+    ? `ℹ️ หน้าที่มีลายเซ็น (หน้า ${thaiNum(blankAfter())}) ไม่มีที่ว่างพอ จึงวางคำเกษียณไว้บนกระดาษเปล่า` +
+      'ที่แทรกต่อจากหน้านั้น — จะลากไปวางบนหน้าลายเซ็นเองก็ได้'
+    : b.size_pct < 100
+      ? `ℹ️ ย่อคำเกษียณเหลือ ${thaiNum(b.size_pct)}% ให้พอดีที่ว่างใกล้ลายเซ็น — ขยายได้ที่ ✏️ แก้คำเกษียณ`
+      : '';
+  n.classList.toggle('hidden', !n.textContent);
 }
 
 function mkPage(i, name, png, w, h, pdfNo) {
@@ -319,7 +348,11 @@ function mkPage(i, name, png, w, h, pdfNo) {
 }
 
 function pageEl(i) { return $('pages').querySelector(`.page[data-index="${i}"]`); }
-function pageSize(i) { const p = D.pages[Math.min(i, D.pages.length - 1)]; return p; }
+// หน้ากระดาษเปล่า (ลำดับ = D.pages.length) แทรกต่อจากหน้าที่มีลายเซ็น ขนาดเท่าหน้านั้น
+// (กติกาเดียวกับเซิร์ฟเวอร์ core.page_order / docmode._blank_size)
+function blankAfter() { return Math.max(1, Math.min(D.sig_page || 1, D.total_pages)); }
+function blankSize() { return D.pages.find(p => p.index === D.sig_page) || D.pages[0]; }
+function pageSize(i) { return i < D.pages.length ? D.pages[i] : blankSize(); }
 
 function addOverlay(id, o) {
   const el = document.createElement('div');
@@ -511,6 +544,62 @@ $('badd').onclick = async () => {
   $('selBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 
+// ---------- 📍 ย้ายไปใกล้ลายเซ็น ----------
+// เซิร์ฟเวอร์หาที่ว่างข้างลายเซ็นผู้ส่งให้ใหม่ (ย่อตัวอักษรได้ถ้าจำเป็น) บนหน้าที่กล่องอยู่
+// ถ้าอยู่บนกระดาษเปล่าก็กลับไปหน้าที่มีลายเซ็น — ลายเซ็นผู้ลงรับที่วางไว้ใต้กล่องย้ายตามไปด้วย
+function sigUnder(b) {
+  const g = D.sig;
+  if (!g || g.page !== b.page) return false;
+  const gap = g.top_cm - (b.top_cm + b.h / D.cm);          // ซม. จากใต้กล่องถึงหัวลายเซ็น
+  return gap > -1 && gap < 3 &&
+         g.left_cm < b.left_cm + b.w / D.cm && g.left_cm + g.w / D.cm > b.left_cm;
+}
+// g = ลายเซ็นผู้ลงรับที่ต้องอยู่ใต้กล่อง (ย้ายตาม) / keep = ที่เดิมไม่ทับตัวหนังสือก็ไม่ต้องย้าย
+async function fitBox(b, g, keep) {
+  // ของอื่นที่วางไว้แล้ว (ตรายาง กล่องอื่น ลายเซ็นที่ไม่ได้อยู่ใต้กล่องนี้) ห้ามทับ
+  const avoid = [D.stamp, ...D.boxes.filter(x => x !== b), ...(D.sig && D.sig !== g ? [D.sig] : [])]
+    .map(o => ({ page: o.page, left_cm: o.left_cm, top_cm: o.top_cm, w: o.w, h: o.h }));
+  const r = await fetch(`/api/doc/${JOB}/fit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page: b.page, keep: !!keep, avoid, sig: g ? { w: g.w, h: g.h } : null,
+                           box: { text: b.text, size_pct: b.size_pct, wrap_pct: b.wrap_pct,
+                                  indent_pct: b.indent_pct, bg: b.bg, border: b.border,
+                                  left_cm: b.left_cm, top_cm: b.top_cm } }) });
+  const d = await readJSON(r);
+  if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'หาที่วางไม่สำเร็จ');
+  Object.assign(b, { page: d.page, left_cm: d.left_cm, top_cm: d.top_cm, size_pct: d.size_pct,
+                     wrap_pct: d.wrap_pct, png: d.png, w: d.w, h: d.h });
+  pageEl(b.page).appendChild(b._el);
+  b._el.querySelector('img').src = b.png;
+  clamp(b); posOverlay(b);
+  if (g) {                        // กึ่งกลางใต้กล่อง แบบเดียวกับตอนกดแทรกลายเซ็น
+    g.page = b.page;
+    g.left_cm = b.left_cm + (b.w - g.w) / 2 / D.cm;
+    g.top_cm = b.top_cm + b.h / D.cm + 0.2;
+    if (g._el) { pageEl(g.page).appendChild(g._el); clamp(g); posOverlay(g); }
+  }
+  if (b === D.boxes[0]) kasienNote(b);
+  if (sel === b.id) select(b.id);  // ขนาด/ความกว้างในแผงเปลี่ยนตาม
+  showLine();
+}
+async function fitClick(btn, b, g) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ กำลังหาที่ว่าง...';
+  try {
+    await fitBox(b, g, false);
+    b._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.textContent = label;
+    btn.disabled = btn === $('bfit') && !isBox(sel);
+  }
+}
+$('bfit').onclick = () => {
+  const b = objOf(sel); if (!b || !isBox(sel)) return;
+  fitClick($('bfit'), b, sigUnder(b) ? D.sig : null);
+};
+
 // ---------- ตรายาง ----------
 async function reStamp() {
   const r = await fetch(`/api/doc/${JOB}/stamp`, {
@@ -581,13 +670,24 @@ $('sigAdd').onclick = async () => {
   const b = $('sigAdd'); b.disabled = true;
   try { await renderSig(o); }
   catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
-  b.disabled = false;
+  // ใต้คำเกษียณไม่มีที่ (ลายเซ็นจะทับตัวหนังสือ) ก็ย้ายคำเกษียณพร้อมลายเซ็นไปที่ว่างใกล้ลายเซ็นผู้ส่ง
+  // ที่เดิมว่างพอก็อยู่ที่เดิม — หาที่ไม่สำเร็จก็วางใต้กล่องแบบเดิม ลากเองได้
+  const label = b.textContent;
+  b.textContent = '⏳ กำลังแทรกลายเซ็น...';
+  if (src) await fitBox(src, o, true).catch(() => {});
+  b.disabled = false; b.textContent = label;
   if (src) {                    // วางใต้กล่องคำเกษียณ กึ่งกลางกล่อง
+    o.page = src.page;
     o.left_cm = src.left_cm + (src.w - o.w) / 2 / D.cm;
     o.top_cm = src.top_cm + src.h / D.cm + 0.2;
   }
   placeSig(o); select('sig');
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+// ปรับขนาดลายเซ็นแล้วไปทับตัวหนังสือ ฯลฯ — จัดคำเกษียณพร้อมลายเซ็นไปที่ว่างใกล้ลายเซ็นผู้ส่งอีกรอบ
+$('sigFit').onclick = () => {
+  const b = D.sig && (D.boxes.find(sigUnder) || D.boxes[0]);
+  if (b) fitClick($('sigFit'), b, D.sig);
 };
 function placeSig(o) {
   D.sig = o; addOverlay('sig', o); clamp(o); posOverlay(o);
@@ -651,13 +751,22 @@ const LINE_MAX = 4;           // ข้อความ ๑ + รูป ๔ = เ
 let linePick = null;          // null = ยังไม่ได้เลือกเอง ใช้ค่าอัตโนมัติ
 const thaiNum = (n) => String(n).replace(/[0-9]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'[c]);
 function pdfPageOf(i) { return i >= D.pages.length ? D.total_pages + 1 : D.pages[i].index; }
+// ลำดับหน้าในไฟล์ที่บันทึก: เลขหน้าเดิม และหน้ากระดาษเปล่า (total+1) แทรกต่อจากหน้าลายเซ็น
+function pageOrder(withBlank) {
+  const ids = Array.from({ length: D.total_pages }, (_, k) => k + 1);
+  if (withBlank) ids.splice(blankAfter(), 0, D.total_pages + 1);
+  return ids;
+}
+const byOrder = (a, b) => { const o = pageOrder(true); return o.indexOf(a) - o.indexOf(b); };
 function autoLinePages() {
   const used = [pdfPageOf(D.stamp.page)];
   for (const b of D.boxes) if ((b.text || '').trim()) used.push(pdfPageOf(b.page));
   if (D.sig) used.push(pdfPageOf(D.sig.page));
-  const last = Math.max(1, ...used);
-  if (last <= LINE_MAX) return Array.from({ length: last }, (_, k) => k + 1);
-  return [1, last - 2, last - 1, last];
+  const order = pageOrder(used.includes(D.total_pages + 1));
+  const last = Math.max(1, ...used.map(n => order.indexOf(n) + 1));
+  const pos = last <= LINE_MAX ? Array.from({ length: last }, (_, k) => k + 1)
+                               : [1, last - 2, last - 1, last];
+  return pos.map(p => order[p - 1]);
 }
 function linePages() { return linePick || autoLinePages(); }
 function showLine() {
@@ -667,7 +776,7 @@ function showLine() {
     b.classList.toggle('on', on);
     b.textContent = on ? '✓ ส่ง LINE' : 'ไม่ส่ง LINE';
   }
-  const names = [...chosen].sort((a, b) => a - b)
+  const names = [...chosen].sort(byOrder)
     .map(n => n > D.total_pages ? 'กระดาษเปล่า' : thaiNum(n));
   $('lineSum').textContent = names.length
     ? 'ส่งเข้า LINE: หน้า ' + names.join(', ')
@@ -681,7 +790,7 @@ $('pages').addEventListener('click', (e) => {
     alert(`ส่งรูปเข้า LINE ได้ครั้งละไม่เกิน ${thaiNum(LINE_MAX)} หน้า — แตะเอาหน้าอื่นออกก่อน`);
     return;
   } else cur.add(n);
-  linePick = [...cur].sort((a, b) => a - b);
+  linePick = [...cur].sort(byOrder);
   showLine();
 });
 
