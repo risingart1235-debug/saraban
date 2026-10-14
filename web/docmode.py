@@ -38,7 +38,7 @@ from core import (
 
 DPI = 200                      # ความละเอียดที่ใช้ทำงานจริง (เท่ากับเวอร์ชันเดสก์ท็อป)
 PREVIEW_DPI = 100              # ความละเอียดภาพที่ส่งให้เบราว์เซอร์ (เล็กลงครึ่ง โหลดเร็วบนมือถือ)
-MAX_REVIEW_PAGES = 20          # เรื่องที่ต้องตรวจ แสดงได้ถึงหน้านี้ (กันเอกสารหนามากจนโหลดไม่ไหว)
+MAX_REVIEW_PAGES = 100         # แสดงได้ถึงหน้านี้ (ภาพหน้าโหลดตอนเลื่อนไปถึง เอกสารหนาก็เปิดเร็ว)
 CM = DPI / 2.54
 
 # ค่าเริ่มต้นสำหรับเรียงลำดับเมื่อไม่มีเวลาสร้าง — ต้องมีโซนเวลาเหมือน now_th()
@@ -127,19 +127,6 @@ def _png_uri(img) -> str:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-
-
-def _jpg_uri(img) -> str:
-    """รูปหน้าเอกสารแบบ JPEG — ใช้กับหน้าที่เอาไว้ "ดูเพื่อตรวจ" เท่านั้น
-
-    หน้าเอกสารสแกนถ้าเก็บเป็น PNG จะหนักราว ๕๘๐ KB ต่อหน้า (วัดจากของจริง)
-    เอกสาร ๖ หน้าก็ ๓.๔ MB แล้ว โหลดบนมือถือช้ามาก
-    JPEG คุณภาพ ๗๐ เหลือ ~๑๑๖ KB ต่อหน้า เล็กลง ๕ เท่า และยังอ่านชื่อโรงเรียน
-    ในบัญชีรายชื่อแนบท้ายออกสบาย ซึ่งเป็นเหตุผลเดียวที่ต้องดูหน้าพวกนี้
-    """
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, "JPEG", quality=70, optimize=True)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _render_pdf_page(pdf_path: str, page_no: int, dpi: int = DPI):
@@ -356,7 +343,8 @@ def _backup_to_drive(job: dict, pdf: str):
         try:
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
-                                            "sender", "emoji", "attach", "redo_no", "user")}
+                                            "sender", "emoji", "attach", "redo_no", "user",
+                                            "main_pages")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             fid = _dr.queue_put(pdf, meta)
@@ -440,6 +428,7 @@ def _restore_from_drive() -> int:
             job = _new_job_locked(meta.get("user") or "phone", jid=jid, source="phone",
                                   status="stored", step="รอเปิดอ่าน",
                                   book_id=bid, redo_no=meta.get("redo_no") or None,
+                                  main_pages=meta.get("main_pages") or None,
                                   drive_file_id=item["id"], **fields)
             try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
                 job["created"] = datetime.fromisoformat(meta["created"])
@@ -504,7 +493,8 @@ def _phone_prepare_work(job: dict):
             _prepare(job, pdf, doc_no=job["doc_no"], doc_title=job["doc_title"],
                      doc_date=job["doc_date"], sender=job["sender"],
                      emoji=job["emoji"], attach=job["attach"],
-                     book_id=job["book_id"], redo_no=job.get("redo_no"))
+                     book_id=job["book_id"], redo_no=job.get("redo_no"),
+                     main_pages=job.get("main_pages"))
         except Exception as e:
             _fail(job, e)
 
@@ -713,13 +703,16 @@ def start_from_spp(user: str, book_id: str, session_state=None, redo_no: str = N
 
             _set(job, step=f"กำลังดาวน์โหลดไฟล์ (แนบ {len(det['attachments'])} รายการ)...")
             pdf = os.path.join(job["dir"], "doc.pdf")
-            sppweb.download(sess, det["main_pdf"], pdf)
+            main = os.path.join(job["dir"], "main.pdf")
+            sppweb.download(sess, det["main_pdf"], main)
+            extras = sppweb.download_extras(sess, det, job["dir"])
 
             _prepare(job, pdf,
                      doc_no=meta["doc_no"], doc_title=meta["doc_title"],
                      doc_date=meta["doc_date"], sender=meta["sender"],
                      emoji=det["emoji"], attach=sppweb.attach_text(det["attachments"]),
-                     book_id=str(book_id), redo_no=redo_no)
+                     book_id=str(book_id), redo_no=redo_no,
+                     main_pages=_combine(main, extras, pdf))
         except Exception as e:
             _fail(job, e)
 
@@ -782,12 +775,13 @@ def start_from_upload_path(user: str, filename: str, source_path: str,
 
 
 def start_from_phone_path(user: str, source_path: str, meta: dict,
-                          retry_failed: bool = False):
+                          retry_failed: bool = False, extras=()):
     """โหมดที่ ๑ แต่คนไปดึงจาก สพป. คือ *มือถือ* (อุปกรณ์ที่เว็บอนุญาต)
 
     มือถือล็อกอิน/โหลด PDF เองจากเน็ตที่ผ่านด่านได้ แล้วส่งไฟล์ + ข้อมูล
     หนังสือมาที่นี่ เซิร์ฟเวอร์รับช่วงทำ AI เกษียณ + ตรายาง + LINE + ทะเบียน ต่อ
     โดยไม่ต้องแตะเว็บ สพป. เลย — ใช้ _prepare ตัวเดียวกับโหมด ๑ ปกติ
+    extras = ไฟล์แนบอื่นของเรื่องเดียวกัน (PDF/รูป) ต่อท้ายหนังสือนำเป็นเล่มเดียว (มือถือรวมเองไม่ได้)
     """
     job, created = claim_phone_job(user, meta, retry_failed=retry_failed)
     if not created:
@@ -795,7 +789,7 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
 
     pdf = os.path.join(job["dir"], "doc.pdf")
     try:
-        os.replace(source_path, pdf)
+        _set(job, main_pages=_combine(source_path, list(extras), pdf))
     except Exception as e:
         _fail(job, e)
         raise
@@ -838,14 +832,36 @@ def _fail(job, e):
 # ==========================================================
 # เตรียมข้อมูลให้หน้าจอแก้ไข
 # ==========================================================
-def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attach, book_id, redo_no=None):
+def _combine(main: str, extras: list, pdf: str):
+    """หนังสือนำ + ไฟล์แนบอื่นของเรื่องเดียวกัน -> pdf เล่มเดียว (หนังสือนำอยู่หน้าแรกๆ เสมอ)
+    คืนจำนวนหน้าของหนังสือนำ หรือ None ถ้าไม่มีไฟล์แนบต่อท้าย — รวมไม่สำเร็จก็ใช้แค่หนังสือนำเหมือนเดิม"""
+    if extras:
+        try:
+            return core.combine_attachments(main, extras, pdf)
+        except Exception as e:
+            print(f"รวมไฟล์แนบไม่สำเร็จ ใช้แค่หนังสือนำ: {type(e).__name__}: {e}")
+    os.replace(main, pdf)
+    return None
+
+
+def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attach, book_id, redo_no=None,
+             main_pages=None):
+    # มีไฟล์แนบต่อท้าย (main_pages = จำนวนหน้าหนังสือนำ) — AI อ่านแค่หนังสือนำเหมือนเดิม
+    # ไม่เปลืองโควตากับสิ่งที่ส่งมาด้วย และไม่หลงไปเอาลายเซ็นในไฟล์แนบเป็นหน้าลายเซ็นผู้ส่ง
+    ai_pdf = pdf_path
+    if main_pages:
+        try:
+            ai_pdf = core.pdf_head(pdf_path, main_pages, os.path.join(job["dir"], "ai.pdf"))
+        except Exception as e:
+            print(f"แยกหนังสือนำไม่สำเร็จ ให้ AI อ่านทั้งเล่ม: {type(e).__name__}: {e}")
+
     # คัดกรองผู้รับก่อน — ถ้าอ่านในเครื่องได้และไม่ใช่ของเรา จะได้ไม่เปลือง AI
     _set(job, step="กำลังตรวจบรรทัด 'เรียน' ในไฟล์...")
-    recipient = extract_recipient_line(pdf_path)
+    recipient = extract_recipient_line(ai_pdf)
     category = classify_recipient(recipient)
 
     _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
-    ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(pdf_path)
+    ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
 
     if category == "unknown":
         # ไฟล์สแกนอ่านเองไม่ได้ ใช้บรรทัด "เรียน" ที่ AI อ่านมาแทน (ไม่เปลือง API เพิ่ม)
@@ -859,7 +875,7 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
 
     _set(job, step="กำลังเตรียมภาพหน้าเอกสาร...")
     p1, total = _render_pdf_page(pdf_path, 1, DPI)
-    sig_page = max(1, min(sig_page, total))
+    sig_page = max(1, min(sig_page, main_pages or total, total))
     psig = _render_pdf_page(pdf_path, sig_page, DPI)[0] if sig_page > 1 else None
 
     # ลงรับใหม่ -> ใช้เลขเดิม / ลงรับครั้งแรก -> ดูเลขถัดไปเฉยๆ (จองจริงตอนกดบันทึก)
@@ -883,19 +899,20 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                       "png": _png_uri(_render_pdf_page(pdf_path, sig_page, PREVIEW_DPI)[0]),
                       "w": psig.width, "h": psig.height, "index": sig_page})
 
-    # แสดงทุกหน้าในเอกสาร (ไม่เกิน MAX_REVIEW_PAGES) — วางของได้ทุกหน้า เลือกได้ว่าจะส่งหน้าไหน
-    # เข้า LINE และเรื่องที่ขึ้นคำเตือน "อาจไม่ใช่หนังสือของโรงเรียนเรา" ก็ได้ตรวจบัญชีรายชื่อ
-    # ที่มักอยู่หน้าท้ายๆ ด้วย (เดิมแสดงครบเฉพาะเรื่องที่ขึ้นคำเตือน)
+    # แสดงทุกหน้าในเอกสาร (ไม่เกิน MAX_REVIEW_PAGES) รวมสิ่งที่ส่งมาด้วยที่ต่อท้ายไว้ — วางของได้ทุกหน้า
+    # เลือกได้ว่าจะส่งหน้าไหนเข้า LINE และเรื่องที่ขึ้นคำเตือน "อาจไม่ใช่หนังสือของโรงเรียนเรา"
+    # ก็ได้ตรวจบัญชีรายชื่อที่มักอยู่หน้าท้ายๆ ด้วย
+    # ภาพหน้าอื่นนอกจากหน้าแรก/หน้าลายเซ็น เบราว์เซอร์โหลดเองตอนเลื่อนไปถึง (preview_page)
+    # ไม่เรนเดอร์ทุกหน้ารอไว้ก่อน เอกสาร ๕๐ หน้าบนเครื่องฟรีของ Render จะช้ามาก
     all_pages = False
     if total > len(pages):
         shown = {pg["index"] for pg in pages}
-        scale = DPI // PREVIEW_DPI          # w/h ต้องเป็นขนาดที่ DPI เต็ม เพราะใช้คิดตำแหน่งเป็นซม.
+        sizes = core.page_sizes(pdf_path, DPI)  # w/h ที่ DPI เต็ม เพราะใช้คิดตำแหน่งเป็นซม.
         for n in range(1, min(total, MAX_REVIEW_PAGES) + 1):
             if n in shown:
                 continue
-            img = _render_pdf_page(pdf_path, n, PREVIEW_DPI)[0]
-            pages.append({"name": f"หน้า {n}", "png": _jpg_uri(img),
-                          "w": img.width * scale, "h": img.height * scale, "index": n})
+            pages.append({"name": f"หน้า {n}", "png": f"/api/doc/{job['id']}/page/{n}",
+                          "w": sizes[n][0], "h": sizes[n][1], "index": n})
         pages.sort(key=lambda pg: pg["index"])
         all_pages = True
 
@@ -914,7 +931,7 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
          redo_no=(str(redo_no) if redo_no else None),
          doc_no=doc_no, doc_title=doc_title, doc_date=doc_date, sender=sender,
          emoji=emoji, attach=attach, recipient=recipient, category=category,
-         all_pages=all_pages, marks=marks, scan_pages=scan_pages,
+         all_pages=all_pages, marks=marks, scan_pages=scan_pages, main_pages=main_pages,
          receipt_no=receipt_no, pages=pages,
          stamp={"size_pct": 100, "page": 0,
                 "left_cm": round(sx / CM, 2), "top_cm": round(sy / CM, 2),
@@ -938,6 +955,25 @@ def _find_marks(pdf_path: str, pages: list) -> tuple:
     marks = [{"page": i, "x": round(x0), "y": round(y0), "w": round(x1 - x0), "h": round(y1 - y0)}
              for i, pg in enumerate(pages) for x0, y0, x1, y1 in found.get(pg["index"], ())]
     return marks, sorted(scans)
+
+
+def preview_page(job, n: int) -> str:
+    """ภาพหน้าที่ n สำหรับหน้าจอ — เรนเดอร์ตอนเบราว์เซอร์เลื่อนไปถึงหน้านั้นจริง แล้วเก็บไว้ในโฟลเดอร์งาน
+    คืน "" ถ้าไม่ใช่หน้าที่แสดงอยู่ของเรื่องนี้ หรือเรื่องจบไปแล้ว (ไฟล์ถูกเก็บกวาด)
+
+    JPEG คุณภาพ ๗๐: หน้าสแกนเป็น PNG หนักราว ๕๘๐ KB (วัดจากของจริง) JPEG เหลือ ~๑๑๖ KB
+    เล็กลง ๕ เท่า และยังอ่านชื่อโรงเรียนในบัญชีรายชื่อแนบท้ายออกสบาย
+    """
+    pdf = job.get("pdf_path") or ""
+    if not any(pg["index"] == n for pg in job.get("pages") or ()) or not os.path.exists(pdf):
+        return ""
+    path = os.path.join(job["dir"], f"preview{n}.jpg")
+    if not os.path.exists(path):
+        img = _render_pdf_page(pdf, n, PREVIEW_DPI)[0]
+        part = f"{path}.{threading.get_ident()}.part"     # สองแท็บขอหน้าเดียวกันพร้อมกันได้
+        img.convert("RGB").save(part, "JPEG", quality=70, optimize=True)
+        os.replace(part, path)
+    return path
 
 
 def _blank_size(job) -> tuple:
@@ -1135,11 +1171,9 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         return out_pages[pi]
 
     # ไฮไลท์ชื่อโรงเรียนเฉพาะหน้าที่เปิดไว้บนจอ — ป้ายก่อนวางของอื่น ตรายาง/คำเกษียณที่ทับจะได้ไม่ติดสีเหลือง
-    marked = set()          # เลขหน้าจริงที่ป้ายสีไว้ (ส่ง LINE ให้เองถ้าไม่ได้เลือกหน้าเอง)
     for m in job.get("marks") or ():
         if 0 <= m["page"] < len(job["pages"]) and _highlighted(payload, job["pages"][m["page"]]["index"]):
             paint_marks(layer(m["page"]), [(m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"])])
-            marked.add(job["pages"][m["page"]]["index"])
 
     stamp_img = render_transparent_stamp(receipt_no, int(st.get("size_pct", 100)), date_str, time_str)
     pi = min(int(st.get("page", 0)), len(job["pages"]) - 1)
@@ -1245,7 +1279,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         if isinstance(chosen, list):            # เลือกเองบนหน้าจอ (ไม่เลือกสักหน้า = ข้อความอย่างเดียว)
             pages = chosen_line_pages(chosen, total, blank is not None, order)
         else:                                   # หน้าเว็บรุ่นเก่าไม่ได้ส่งมา ใช้กติกาเดิม
-            pages = auto_line_pages(used, order, marked)
+            pages = auto_line_pages(used, order)
         urls = []
         for n in pages:
             if n > total:                       # หน้ากระดาษเปล่าที่ลงเกษียณไว้

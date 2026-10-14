@@ -194,30 +194,6 @@ class PaintTests(unittest.TestCase):
         self.assertEqual(img.getpixel((25, 10)), core.MARK_RGB + (255,))
 
 
-class LineWithMarksTests(unittest.TestCase):
-    """highlighted pages are picked for LINE by themselves (the editor has the same rule)"""
-
-    def test_marked_page_is_added_after_the_stamped_pages(self):
-        order = core.page_order(6)
-        self.assertEqual(core.auto_line_pages({1, 2}, order, {5}), [1, 2, 5])
-        self.assertEqual(core.auto_line_pages({1}, order, {5, 3, 1}), [1, 3, 5])
-        self.assertEqual(core.auto_line_pages({1, 2}, order), [1, 2])
-
-    def test_goes_even_when_the_pages_up_to_the_endorsement_fill_line(self):
-        order = core.page_order(9)
-        # endorsement on page 5: pages 1,3,4,5 used to fill all four pictures
-        self.assertEqual(core.auto_line_pages({1, 5}, order), [1, 3, 4, 5])
-        # now the stamp page and the endorsement page stay, the highlighted page comes next,
-        # and only then the pages in between (nearest the endorsement first)
-        self.assertEqual(core.auto_line_pages({1, 5}, order, {7}), [1, 4, 5, 7])
-
-    def test_never_more_than_line_takes(self):
-        order = core.page_order(9)
-        self.assertEqual(core.auto_line_pages({1, 3}, order, {6, 8, 9}), [1, 3, 6, 8])
-        # endorsement on the blank page after page 5 (order 1..5, blank 10, 6..9)
-        self.assertEqual(core.auto_line_pages({1, 10}, core.page_order(9, 5), {2}), [1, 2, 5, 10])
-
-
 class FakeSheetsUsers:
     """values() of the users tab: get / clear / update from a row"""
 
@@ -365,12 +341,20 @@ class PrepareAndSaveTests(unittest.TestCase):
         self.assertEqual(pages, [2, 3, 5])
         self.assertEqual(self.job["scan_pages"], [4])
 
-    def test_saved_with_highlight_paints_the_pdf_and_sends_the_list_page_to_line(self):
+    def test_saved_with_highlight_paints_the_pdf_but_line_still_stops_at_the_signature_page(self):
         out, pictures = self.save(highlight=True)
         page2 = core.render_pdf_page(out, 2, 200)
         self.assertGreater(yellow_share(page2, self.list_mark()), 0.4)
-        self.assertIn("หน้า๒.jpg", pictures)               # the director sees the marked row
         self.assertEqual(yellow_share(core.render_pdf_page(out, 1, 200), (0, 0, 1654, 2339)), 0)
+        # pages after the signature page go to LINE only when ticked on screen
+        self.assertEqual(pictures, {"หน้า๑.jpg"})
+
+    def test_ticked_list_page_goes_to_line_with_the_mark(self):
+        out, pictures = self.save(highlight=True, line_pages=[1, 2])
+        self.assertEqual(pictures, {"หน้า๑.jpg", "หน้า๒.jpg"})
+        jpg = out[:-len(".pdf")] + "_หน้า๒.jpg"            # the picture kept next to the PDF
+        with Image.open(jpg) as picture:
+            self.assertGreater(yellow_share(picture, self.list_mark()), 0.4)
 
     def test_switched_off_for_this_document_leaves_the_pages_as_they_came(self):
         out, pictures = self.save(highlight=False)
@@ -384,12 +368,12 @@ class PrepareAndSaveTests(unittest.TestCase):
         _, pictures = self.save(highlight=True, line_pages=[1])
         self.assertEqual(pictures, {"หน้า๑.jpg"})
 
-    def test_only_pages_left_highlighted_on_screen_are_painted_and_sent(self):
+    def test_only_pages_left_highlighted_on_screen_are_painted(self):
         out, pictures = self.save(highlight=[2, "x", -1, True, "9"])      # page 3 and 5 switched off
         self.assertGreater(yellow_share(core.render_pdf_page(out, 2, 200), self.list_mark()), 0.4)
         self.assertEqual(yellow_share(core.render_pdf_page(out, 3, 200), (0, 0, 1654, 2339)), 0)
         self.assertEqual(yellow_share(core.render_pdf_page(out, 5, 200), (0, 0, 2339, 1654)), 0)
-        self.assertEqual(pictures, {"หน้า๑.jpg", "หน้า๒.jpg"})
+        self.assertEqual(pictures, {"หน้า๑.jpg"})
 
 
 if __name__ == "__main__":

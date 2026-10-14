@@ -1104,12 +1104,20 @@ def api_phone_history(request: Request):
 
 @app.post("/api/phone/submit")
 async def api_phone_submit(request: Request):
-    """รับ PDF ที่มือถือโหลดจาก สพป. มาแล้ว สร้างงานให้รอลงรับ (ทบทวนในเบราว์เซอร์)"""
+    """รับ PDF ที่มือถือโหลดจาก สพป. มาแล้ว สร้างงานให้รอลงรับ (ทบทวนในเบราว์เซอร์)
+
+    file  = หนังสือนำ (PDF ไฟล์แรกของเรื่อง)
+    extra = ไฟล์แนบอื่นของเรื่องเดียวกัน (PDF/JPG/PNG ส่งได้หลายไฟล์ เรียงตามบนเว็บ สพป.)
+            ต่อท้ายหนังสือนำเป็นเล่มเดียว — มือถือไม่มีเครื่องมือรวม PDF จึงส่งมาให้รวมที่นี่
+    """
     user = _check_phone_token(request)
     form = await request.form()
     upload = form.get("file")
     if upload is None or not callable(getattr(upload, "read", None)):
         raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์ PDF")
+    extras = [u for u in form.getlist("extra")
+              if callable(getattr(u, "read", None))][:sppweb.MAX_EXTRA_FILES]
+    extra_paths = []
     meta = {key: form.get(key, default) for key, default in (
         ("book_id", ""), ("doc_no", "-"), ("doc_title", "-"),
         ("doc_date", "-"), ("sender", "-"), ("emoji", "🔵"), ("attach", ""),
@@ -1117,9 +1125,22 @@ async def api_phone_submit(request: Request):
     retry_failed = str(form.get("retry_failed", "")).strip().lower() in ("1", "true", "yes")
     incoming = _new_incoming_path()
     try:
-        await _stream_upload(upload, incoming, "pdf")
+        total = await _stream_upload(upload, incoming, "pdf")
+        for extra in extras:
+            path = _new_incoming_path()
+            extra_paths.append(path)
+            try:
+                total += await _stream_upload(extra, path, "document")
+            except HTTPException as e:
+                if e.status_code != 400:
+                    raise
+                os.remove(path)                    # ไฟล์แนบเสีย/ไม่ใช่เอกสาร ข้ามไป เรื่องนี้ยังลงรับได้
+                extra_paths.pop()
+                continue
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="ไฟล์รวมกันใหญ่เกิน ๔๐ MB")
         job, created = docmode.start_from_phone_path(
-            user, incoming, meta, retry_failed=retry_failed)
+            user, incoming, meta, retry_failed=retry_failed, extras=extra_paths)
     except docmode.AlreadyHandledError as e:
         raise HTTPException(status_code=409, detail={
             "message": str(e), "status": e.status, "receipt_no": e.receipt_no})
@@ -1128,15 +1149,17 @@ async def api_phone_submit(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        try:
-            await upload.close()
-        except Exception:
-            pass
-        if os.path.exists(incoming):
+        for u in [upload] + extras:
             try:
-                os.remove(incoming)
-            except OSError:
+                await u.close()
+            except Exception:
                 pass
+        for path in [incoming] + extra_paths:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
     pub = (os.environ.get("SARABAN_PUBLIC_URL") or "").strip().rstrip("/")
     return {"ok": True, "created": created, "status": job.get("status"),
             "job_id": job["id"], "doc_no": job.get("doc_no", "-"),
@@ -1250,7 +1273,7 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     keys = ("status", "receipt_no", "doc_no", "doc_title", "doc_date", "sender",
             "emoji", "recipient", "category", "pages", "stamp", "boxes",
             "total_pages", "sig_page", "redo_no", "book_id", "source", "all_pages",
-            "marks", "scan_pages")
+            "marks", "scan_pages", "main_pages")
     out = {k: job.get(k) for k in keys}
     out["date"] = get_thai_date()
     out["time"] = get_thai_time_rounded()
@@ -1258,6 +1281,16 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     # ชื่อโรงเรียนที่หาเจอ (marks) หาไว้ทุกเรื่อง ป้ายสีให้เมื่อคนที่เปิดตั้งโหมดไฮไลท์ไว้ในบัญชี
     out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
     return out
+
+
+@app.get("/api/doc/{job_id}/page/{n}")
+def api_doc_page(job_id: str, n: int, user: str = Depends(current_user)):
+    """ภาพหน้าเอกสาร (นอกจากหน้าแรก/หน้าลายเซ็น) — เบราว์เซอร์ขอตอนเลื่อนไปถึงหน้านั้น"""
+    path = docmode.preview_page(_job_or_404(job_id, user), n)
+    if not path:
+        raise HTTPException(status_code=404, detail="ไม่พบหน้านี้")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/doc/{job_id}/box")

@@ -20,8 +20,11 @@
   ๒. วางไฟล์ ๓ ตัวไว้โฟลเดอร์เดียวกัน:  core.py, sppweb.py, phone_fetch.py
   ๓. สร้าง phone_config.json ข้างไฟล์นี้ (ดูตัวอย่างที่ phone_config.example.json)
 ใช้งานทุกครั้ง:  python phone_fetch.py   (หรือแตะไอคอนที่ทำไว้บนหน้าจอ)
+อัปเดต: คัดลอก core.py, sppweb.py, phone_fetch.py ชุดใหม่จาก GitHub ทับของเดิม (phone_config.json คงไว้)
 """
+import contextlib
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -204,17 +207,24 @@ def fetch_history():
             {str(x) for x in d.get("queued", [])})
 
 
-def submit(pdf_path, meta):
-    """ส่ง PDF + ข้อมูลหนังสือเข้า Render สร้างงานรอลงรับ"""
+def submit(pdf_path, meta, extras=()):
+    """ส่ง PDF + ข้อมูลหนังสือเข้า Render สร้างงานรอลงรับ
+    extras = ไฟล์แนบอื่นของเรื่องเดียวกัน (PDF/รูป) เซิร์ฟเวอร์ต่อท้ายหนังสือนำเป็นเล่มเดียวให้
+    (มือถือไม่มีเครื่องมือรวม PDF)"""
     fields = dict(meta)
     # เป็นคำสั่ง retry ที่ชัดเจน: ถ้า job เดิมล้มให้ใช้ job เดิมส่งใหม่;
     # แต่ถ้ายังทำอยู่ เซิร์ฟเวอร์จะคืน job เดิมและไม่เริ่มซ้ำ
     fields["retry_failed"] = "true"
+    types = {".pdf": "application/pdf", ".png": "image/png"}
 
     def send():
         # เปิดไฟล์ใหม่ทุกครั้งที่ยิง — ยิงซ้ำด้วยไฟล์ที่อ่านจบไปแล้วจะส่งไปแต่ไฟล์ว่าง
-        with open(pdf_path, "rb") as f:
-            files = {"file": ("doc.pdf", f, "application/pdf")}
+        with contextlib.ExitStack() as stack:
+            files = [("file", ("doc.pdf", stack.enter_context(open(pdf_path, "rb")), "application/pdf"))]
+            for path in extras:
+                ext = os.path.splitext(path)[1].lower()
+                files.append(("extra", (os.path.basename(path), stack.enter_context(open(path, "rb")),
+                                        types.get(ext, "image/jpeg"))))
             return requests.post(RENDER + "/api/phone/submit",
                                  headers=_headers(), files=files, data=fields, timeout=180)
 
@@ -279,7 +289,7 @@ def main():
         bid = d["book_id"]
         title = (d.get("doc_title") or "")[:40]
         print("[%d/%d] %s  %s ..." % (i, len(new), bid, title), end=" ")
-        tmp = ""
+        tmp, extra_dir = "", ""
         try:
             det = sppweb.fetch_detail(sess, bid)
             if not det["main_pdf"]:
@@ -291,6 +301,12 @@ def main():
             if os.path.getsize(tmp) > MAX_UPLOAD_BYTES:
                 print("ข้าม (ไฟล์ใหญ่เกิน ๔๐ MB)")
                 continue
+            # ไฟล์แนบอื่นของเรื่องนี้ (บัญชีรายชื่อ ฯลฯ) ส่งไปด้วย หน้าเว็บจะเห็นครบทุกหน้า
+            # เดิมส่งแค่ไฟล์แรก (หนังสือนำ) หน้าจอเลยเห็นแค่ถึงหน้าที่มีลายเซ็น
+            extra_dir = tempfile.mkdtemp(prefix="spp_extra_")
+            extras = sppweb.download_extras(
+                sess, det, extra_dir, budget=MAX_UPLOAD_BYTES - os.path.getsize(tmp),
+                log=lambda msg: print("\n   " + msg, end=" "))
             meta = {"book_id": bid,
                     "doc_no": d.get("doc_no", "-"),
                     "doc_title": d.get("doc_title", "-"),
@@ -298,7 +314,7 @@ def main():
                     "sender": d.get("sender", "-"),
                     "emoji": det.get("emoji", "🔵"),
                     "attach": sppweb.attach_text(det["attachments"])}
-            res = submit(tmp, meta)
+            res = submit(tmp, meta, extras)
             if res.get("already_handled"):
                 print("จัดการไปแล้วโดยอีกเครื่อง")
             elif not res.get("created", True):
@@ -306,7 +322,7 @@ def main():
                 print("อยู่ในคิวเดิม")
             else:
                 ok += 1
-                print("ส่งแล้ว")
+                print("ส่งแล้ว" + (" (พร้อมไฟล์แนบ %d ไฟล์)" % len(extras) if extras else ""))
             if res.get("job_id"):
                 links.append(res["job_id"])
         except ServerDown as e:
@@ -323,6 +339,8 @@ def main():
                     os.remove(tmp)
                 except OSError:
                     pass
+            if extra_dir:
+                shutil.rmtree(extra_dir, ignore_errors=True)
 
     # "อยู่ในคิวเดิม" ไม่นับว่าส่ง — ของเดิมนับรวม เลยขึ้น ๘/๘ ทั้งที่ไม่ได้ส่งอะไรใหม่เลย
     extra = " (อีก %d เรื่องอยู่ในคิวอยู่แล้ว ไม่ได้ส่งซ้ำ)" % again if again else ""

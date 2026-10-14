@@ -41,6 +41,9 @@ FILE_EXTENSIONS = {
     ".zip", ".rar", ".jpg", ".jpeg", ".png",
 }
 MAX_DOWNLOAD_BYTES = int(os.environ.get("SARABAN_MAX_DOWNLOAD_MB", "80")) * 1024 * 1024
+# ไฟล์แนบที่ต่อท้ายหนังสือนำเป็นหน้าในเล่มเดียวกันได้ — Word/Excel/zip ยังเป็นลิงก์ในข้อความ LINE
+PAGE_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png")
+MAX_EXTRA_FILES = 10
 
 # ==========================================================
 # เว้นจังหวะการยิง — กัน rate limit
@@ -872,7 +875,7 @@ def fetch_detail(sess, book_id: str) -> dict:
             continue
         seen.add(final_url)
         name = re.sub(r"^\d+\.\s*", "", tag.text.strip()) or "เอกสารแนบ"
-        attachments.append({"name": name, "url": final_url})
+        attachments.append({"name": name, "url": final_url, "ext": ext})
         if not main_pdf and ext == ".pdf":
             main_pdf = final_url
     return {
@@ -881,6 +884,44 @@ def fetch_detail(sess, book_id: str) -> dict:
         "attachments": attachments,
         "main_pdf": main_pdf,
     }
+
+
+def page_attachments(detail: dict) -> list:
+    """ไฟล์แนบอื่นของหนังสือเรื่องนี้ที่เป็นหน้าเอกสารได้ (PDF/รูป) ตามลำดับบนเว็บ ไม่รวมหนังสือนำ
+
+    หนังสือหนึ่งเรื่องมักแยกไฟล์ เช่น ๑. หนังสือนำ (จบที่หน้าลายเซ็น) ๒. บัญชีรายชื่อแนบท้าย
+    เดิมโหลดแค่ไฟล์แรก หน้าจอจึงเห็นแค่ถึงหน้าลายเซ็น
+    """
+    main = detail.get("main_pdf")
+    return [a for a in detail.get("attachments") or ()
+            if a.get("ext") in PAGE_EXTENSIONS and a.get("url") != main][:MAX_EXTRA_FILES]
+
+
+def download_extras(sess, detail: dict, folder: str, *, budget: int = MAX_DOWNLOAD_BYTES,
+                    log=print) -> list:
+    """โหลดไฟล์แนบที่ต่อเป็นหน้าเอกสารได้ (page_attachments) ลงโฟลเดอร์ คืนรายการไฟล์ตามลำดับ
+
+    ไฟล์ที่โหลดไม่ได้หรือทำให้ขนาดรวมเกิน budget ข้ามไป เรื่องนี้ยังลงรับได้ตามปกติ
+    (ทุกไฟล์ยังมีลิงก์อยู่ในข้อความ LINE) — แต่ session หมดอายุ/โดนบล็อก โยนต่อเหมือนไฟล์หลัก
+    """
+    paths, used = [], 0
+    for i, item in enumerate(page_attachments(detail), 1):
+        dest = os.path.join(folder, f"extra{i}{item['ext']}")
+        try:
+            download(sess, item["url"], dest, expected_type=item["ext"])
+        except LoginError:
+            raise
+        except SPPWebError as e:
+            log(f"ข้ามไฟล์แนบ {item['name']}: {e}")
+            continue
+        size = os.path.getsize(dest)
+        if used + size > budget:
+            os.remove(dest)
+            log(f"ข้ามไฟล์แนบ {item['name']}: ไฟล์แนบรวมกันใหญ่เกิน {budget // (1024 * 1024)} MB")
+            continue
+        used += size
+        paths.append(dest)
+    return paths
 
 
 def download(sess, url: str, dest: str, *, expected_type: str | None = None) -> str:

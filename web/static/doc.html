@@ -217,7 +217,7 @@
     </div>
 
     <p class="tiny" style="margin:0 0 8px">📤 <span id="lineSum"></span>
-      — แตะปุ่มบนแต่ละหน้าเพื่อเลือก (ไม่เกิน ๔ หน้า)</p>
+      — ตั้งต้นส่งถึงหน้าที่มีลายเซ็น หน้าอื่นแตะปุ่มบนหน้านั้นเพื่อเลือก (ไม่เกิน ๔ หน้า)</p>
     <div class="stage"><div id="pages"></div></div>
   </div>
 
@@ -301,7 +301,12 @@ function build() {
   $('back').href = backUrl();          // ปุ่มมุมซ้ายบนก็กลับที่เดิม
   $('rno').textContent = D.receipt_no;
   $('meta').innerHTML =
-    `${esc(D.emoji)} <b>${esc(D.doc_no)}</b><br>เรื่อง: ${esc(D.doc_title)}<br>ลงวันที่ ${esc(D.doc_date)} · จาก ${esc(D.sender)}`;
+    `${esc(D.emoji)} <b>${esc(D.doc_no)}</b><br>เรื่อง: ${esc(D.doc_title)}<br>ลงวันที่ ${esc(D.doc_date)} · จาก ${esc(D.sender)}` +
+    // ไฟล์แนบอื่นของเรื่องนี้ (บัญชีรายชื่อ ฯลฯ) ต่อท้ายหนังสือนำไว้แล้ว — บอกว่าเริ่มหน้าไหน
+    (D.main_pages && D.total_pages > D.main_pages
+      ? `<br>📎 สิ่งที่ส่งมาด้วยต่อท้ายไว้แล้ว ตั้งแต่หน้า ${thaiNum(D.main_pages + 1)} (ทั้งเรื่อง ${thaiNum(D.total_pages)} หน้า)` : '') +
+    (D.total_pages > D.pages.length
+      ? `<br>แสดง ${thaiNum(D.pages.length)} หน้าแรกจาก ${thaiNum(D.total_pages)} หน้า — ไฟล์ที่บันทึกยังมีครบทุกหน้า` : '');
   if (D.category && D.category !== 'auto') {
     $('warn').innerHTML = `⚠️ บรรทัด "เรียน" คือ <b>${esc(D.recipient || '(อ่านไม่ออก)')}</b> — ` +
       `อาจไม่ใช่หนังสือของโรงเรียนเรา ตรวจสอบก่อนลงรับ` +
@@ -379,7 +384,7 @@ function mkPage(i, name, png, w, h, pdfNo) {
   el.style.aspectRatio = `${w} / ${h}`;
   el.innerHTML = `<div class="phead"><span class="plabel">${name}</span>` +
     `<button class="lbtn" data-line="${pdfNo}"></button></div>` +
-    (png ? `<img class="bg" src="${png}">` : '');
+    (png ? `<img class="bg" src="${png}" loading="lazy" decoding="async">` : '');
   return el;
 }
 
@@ -781,18 +786,12 @@ $('sigFile').onchange = async () => {
 // ---------- ไฮไลท์ชื่อโรงเรียน ----------
 // เซิร์ฟเวอร์หาชื่อโรงเรียนจากตัวหนังสือในไฟล์ไว้ให้ทุกเรื่อง (D.marks) — เจอชื่อเมื่อไหร่ เปิด/ปิดไฮไลท์
 // ได้ทั้งเรื่องหรือทีละหน้า ตั้งต้นตามตั้งค่าบัญชี (D.highlight = ไฮไลท์ให้เองตั้งแต่เปิดเรื่อง)
-// หน้าที่ไฮไลท์เลือกส่ง LINE ให้เอง เลิกไฮไลท์ก็เอาออก — ไฟล์สแกนเป็นภาพไม่มีตัวหนังสือให้หา (D.scan_pages)
+// จะส่งหน้าไหนเข้า LINE ผู้ใช้ติ๊กเอง (ไม่ผูกกับไฮไลท์) — ไฟล์สแกนเป็นภาพไม่มีตัวหนังสือให้หา (D.scan_pages)
 let hlPages = new Set();      // เลขหน้าจริงที่ไฮไลท์อยู่
 function markPages() { return [...new Set((D.marks || []).map(m => D.pages[m.page].index))]; }
 function setHighlight(pages, on) {
   for (const n of pages) on ? hlPages.add(n) : hlPages.delete(n);
-  // เลือกหน้าส่ง LINE เองไว้แล้วก็ตามให้: หน้าที่เพิ่งไฮไลท์ใส่เข้า หน้าที่เลิกไฮไลท์เอาออก (ถ้าไม่มีของวางอยู่)
-  if (linePick) {
-    const items = itemPages();
-    const cur = linePick.filter(n => on || !pages.includes(n) || items.includes(n));
-    linePick = fitLine(on ? cur.concat(pages) : cur);
-  }
-  showMarks(); showLine();
+  showMarks();
 }
 function showMarks() {
   for (const el of document.querySelectorAll('.page .hl'))
@@ -814,10 +813,11 @@ function showMarks() {
     const links = found.map(n => `<a href="#" data-goto="${n}">หน้า ${thaiNum(n)}</a>`).join(', ');
     const on = found.filter(n => hlPages.has(n));
     html = `🖍️ พบชื่อโรงเรียนใน${links} — ` +
-      (on.length === found.length ? 'ไฮไลท์ให้แล้ว และเลือกส่ง LINE ให้เอง'
+      (on.length === found.length ? 'ไฮไลท์ให้แล้ว'
         : on.length ? 'ไฮไลท์อยู่ ' + on.map(n => 'หน้า ' + thaiNum(n)).join(', ')
         : 'ยังไม่ได้ไฮไลท์') +
-      '<br><span class="sub">เปิด/ปิดทีละหน้าได้ที่ปุ่มไฮไลท์บนหน้านั้น</span>' +
+      '<br><span class="sub">เปิด/ปิดทีละหน้าได้ที่ปุ่มไฮไลท์บนหน้านั้น · ' +
+      'จะส่งหน้าไหนเข้า LINE แตะปุ่มส่ง LINE บนหน้านั้น</span>' +
       (scans.length ? `<br>${scanText} เป็นภาพสแกน ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา` : '');
   } else if (scans.length >= D.pages.length) {
     html = '🖍️ ไฟล์นี้เป็นภาพสแกน ระบบหาชื่อโรงเรียนให้ไม่ได้ — ตรวจดูด้วยตา';
@@ -866,20 +866,7 @@ function autoLinePages() {
   const last = Math.max(1, ...used.map(n => order.indexOf(n) + 1));
   const pos = last <= LINE_MAX ? Array.from({ length: last }, (_, k) => k + 1)
                                : [1, last - 2, last - 1, last];
-  const pages = pos.map(p => order[p - 1]);
-  // หน้าที่ไฮไลท์ชื่อโรงเรียนส่งให้เองเสมอ ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม — เกินเพดานเก็บหน้าตรายาง
-  // กับหน้าที่ลงเกษียณไว้ก่อน แล้วหน้าที่ไฮไลท์ ที่เหลือค่อยเป็นหน้าระหว่างกลาง (กติกาเดียวกับ core.auto_line_pages)
-  const extra = [...hlPages].filter(n => order.includes(n) && !pages.includes(n)).sort(byOrder);
-  if (!extra.length) return pages;
-  const keep = [...new Set([pages[0], pages[pages.length - 1]])];
-  const between = pages.slice().reverse().filter(n => !keep.includes(n));
-  return keep.concat(extra, between).slice(0, LINE_MAX).sort(byOrder);
-}
-// เลือกเองเกินเพดาน LINE (เช่นเพิ่งไฮไลท์อีกหน้า): เก็บหน้าที่มีของวาง แล้วหน้าที่ไฮไลท์ไว้ก่อน หน้าอื่นค่อยตัดออก
-function fitLine(pages) {
-  const items = itemPages(), rank = (n) => items.includes(n) ? 0 : hlPages.has(n) ? 1 : 2;
-  return [...new Set(pages)].sort((a, b) => rank(a) - rank(b) || byOrder(a, b))
-    .slice(0, LINE_MAX).sort(byOrder);
+  return pos.map(p => order[p - 1]);
 }
 function linePages() { return linePick || autoLinePages(); }
 function showLine() {

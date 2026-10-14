@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,9 +53,12 @@ class FakePost:
     def __init__(self, *answers):
         self.answers = list(answers)
         self.sent = []
+        self.extras = []
 
     def __call__(self, url, headers=None, files=None, data=None, timeout=None):
-        self.sent.append(files["file"][1].read())
+        parts = list(files.items()) if isinstance(files, dict) else list(files)
+        self.sent.append(dict(parts)["file"][1].read())
+        self.extras.append([(f[0], f[1].read(), f[2]) for name, f in parts if name == "extra"])
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -75,9 +79,24 @@ class RetryTests(unittest.TestCase):
     def tearDown(self):
         os.remove(self.pdf)
 
-    def submit_with(self, post):
+    def submit_with(self, post, extras=()):
         with patch.object(phone_fetch.requests, "post", post):
-            return phone_fetch.submit(self.pdf, {"book_id": "186769"})
+            return phone_fetch.submit(self.pdf, {"book_id": "186769"}, extras)
+
+    def test_other_attachments_go_along_in_order_on_every_attempt(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        extras = []
+        for name, data in (("extra1.pdf", b"%PDF-1.4 list"), ("extra2.jpg", b"\xff\xd8\xff photo")):
+            extras.append(os.path.join(folder, name))
+            with open(extras[-1], "wb") as f:
+                f.write(data)
+        post = FakePost(requests.ConnectionError("reset"),
+                        response(200, {"ok": True, "created": True, "job_id": "j9"}))
+        self.assertEqual(self.submit_with(post, extras)["job_id"], "j9")
+        want = [("extra1.pdf", b"%PDF-1.4 list", "application/pdf"),
+                ("extra2.jpg", b"\xff\xd8\xff photo", "image/jpeg")]
+        self.assertEqual(post.extras, [want, want])     # the retry re-reads every file too
 
     def test_waits_through_a_render_restart_then_sends(self):
         post = FakePost(response(503, RENDER_PAGE), response(503, RENDER_PAGE),
@@ -153,16 +172,21 @@ class HistoryTests(unittest.TestCase):
 class RunTests(unittest.TestCase):
     """What a whole run pulls from SPP and sends, given what the server already has."""
 
-    def run_main(self, docs, done=(), queued=(), fail_from=None, created=True):
+    def run_main(self, docs, done=(), queued=(), fail_from=None, created=True, attachments=(),
+                 broken=()):
         sent = []
+        self.extras_sent = []
 
-        def submit(path, meta):
+        def submit(path, meta, extras=()):
             sent.append(meta["book_id"])
+            self.extras_sent.append([os.path.basename(p) for p in extras])
             if fail_from and len(sent) >= fail_from:
                 raise phone_fetch.ServerDown("เซิร์ฟเวอร์ไม่พร้อม (503)")
             return {"ok": True, "created": created, "job_id": "j" + meta["book_id"]}
 
-        def download(sess, url, dest):
+        def download(sess, url, dest, expected_type=None):
+            if url in broken:
+                raise phone_fetch.sppweb.DownloadError("เว็บส่งหน้า HTML/error กลับมาแทนไฟล์แนบ")
             with open(dest, "wb") as f:
                 f.write(PDF)
 
@@ -175,7 +199,9 @@ class RunTests(unittest.TestCase):
                 patch.object(sppweb, "login", return_value=object()), \
                 patch.object(sppweb, "list_documents", return_value=docs), \
                 patch.object(sppweb, "fetch_detail",
-                             return_value={"main_pdf": "x.pdf", "attachments": []}) as detail, \
+                             return_value={"main_pdf": "x.pdf", "attachments": [
+                                 {"name": "หนังสือนำ", "url": "x.pdf", "ext": ".pdf"}] + list(attachments)}
+                             ) as detail, \
                 patch.object(sppweb, "download", side_effect=download) as dl, \
                 patch.object(sppweb, "attach_text", return_value=""), \
                 patch("builtins.print") as out:
@@ -201,6 +227,18 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(summary), 1)
         self.assertIn("ส่งเข้าระบบ 0/8 เรื่อง", summary[0])
         self.assertIn("อีก 8 เรื่องอยู่ในคิวอยู่แล้ว", summary[0])
+
+    def test_other_attachments_are_sent_with_it_and_a_broken_one_is_skipped(self):
+        attachments = [{"name": "บัญชีรายชื่อ", "url": "list.pdf", "ext": ".pdf"},
+                       {"name": "แบบฟอร์ม", "url": "form.docx", "ext": ".docx"},     # stays a link
+                       {"name": "เสีย", "url": "bad.pdf", "ext": ".pdf"},
+                       {"name": "รูป", "url": "pic.jpg", "ext": ".jpg"}]
+        docs = [{"book_id": "186769", "doc_title": "เรื่อง"}]
+        sent, _, downloads = self.run_main(docs, attachments=attachments, broken={"bad.pdf"})
+        self.assertEqual(sent, ["186769"])
+        self.assertEqual(self.extras_sent, [["extra1.pdf", "extra3.jpg"]])
+        self.assertEqual(downloads, 4)                      # main + list + bad + picture
+        self.assertTrue(any("ส่งแล้ว (พร้อมไฟล์แนบ 2 ไฟล์)" in line for line in self.printed))
 
     def test_stops_downloading_after_the_server_stays_down(self):
         docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]

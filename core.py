@@ -484,20 +484,12 @@ def page_order(total, blank_after=None):
     return order
 
 
-def auto_line_pages(used, order, marked=()):
-    """หน้าที่ส่ง LINE ถ้าไม่ได้เลือกเอง: หน้าแรกถึงหน้าสุดท้ายที่มีของวาง (line_pages)
-    นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น
-    marked = หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ ส่งให้เองเสมอ ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม — เกินเพดาน
-    เก็บหน้าแรก (ตรายาง) กับหน้าที่ลงเกษียณไว้ก่อน แล้วหน้าที่ไฮไลท์ ที่เหลือค่อยเป็นหน้าระหว่างกลาง
-    (กติกาเดียวกับหน้าจัดเอกสาร autoLinePages)"""
+def auto_line_pages(used, order):
+    """หน้าที่ส่ง LINE ถ้าไม่ได้เลือกเอง: หน้าแรกถึงหน้าสุดท้ายที่มีของวาง (line_pages) — ปกติคือถึงหน้าที่มี
+    ลายเซ็นผู้ส่ง หน้าหลังจากนั้น (สิ่งที่ส่งมาด้วย หน้าที่ไฮไลท์ชื่อโรงเรียน) ผู้ใช้ติ๊กส่งเอง
+    นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น"""
     last = max([order.index(n) + 1 for n in used if n in order] or [1])
-    pages = [order[i - 1] for i in line_pages(last)]
-    extra = [n for n in sorted({n for n in marked if n in order}, key=order.index) if n not in pages]
-    if not extra:
-        return pages
-    keep = list(dict.fromkeys([pages[0], pages[-1]]))         # ตรายาง + คำเกษียณ
-    between = [n for n in reversed(pages) if n not in keep]    # ใกล้หน้าที่ลงเกษียณก่อน
-    return sorted((keep + extra + between)[:LINE_MAX_IMAGES], key=order.index)
+    return [order[i - 1] for i in line_pages(last)]
 
 
 def chosen_line_pages(chosen, total, has_blank, order=None):
@@ -719,6 +711,73 @@ def render_pdf_page(pdf_path, page_number=1, dpi=PDF_RENDER_DPI):
         finally:
             document.close()
             release_pdf_cache()
+
+
+def combine_attachments(main_pdf, extras, dest):
+    """รวมไฟล์แนบทุกไฟล์ของหนังสือเรื่องเดียวกันเป็นเล่มเดียว: หนังสือนำ (ไฟล์แรก) ตามด้วยไฟล์แนบ
+    ตามลำดับบนเว็บ สพป. — หน้าจอจะได้เห็นทุกหน้า และไฟล์ที่บันทึกมีสิ่งที่ส่งมาด้วยครบ
+
+    PDF ต่อหน้าเดิมทั้งหน้า (ตัวหนังสือในไฟล์ยังค้น/ไฮไลท์ได้) รูป JPG/PNG วางเป็นหน้า A4
+    ไฟล์ที่เปิดไม่ได้ (เสีย/ติดรหัส) ข้ามไป ยังมีลิงก์ในข้อความ LINE
+    คืนจำนวนหน้าของหนังสือนำ — AI อ่านแค่ส่วนนี้เหมือนเดิม (ดู pdf_head)
+    """
+    import pymupdf
+    part = dest + ".part"
+    with PDF_LOCK:
+        out = pymupdf.open(main_pdf)
+        try:
+            main_pages = out.page_count
+            for path in extras:
+                try:
+                    with pymupdf.open(path) as src:
+                        if src.needs_pass:
+                            raise ValueError("ไฟล์ติดรหัสผ่าน")
+                        if src.is_pdf:
+                            out.insert_pdf(src)
+                            continue
+                        size = src[0].rect                     # รูปภาพ: วางให้พอดีหน้า A4 แนวเดียวกับรูป
+                    w, h = (842, 595) if size.width > size.height else (595, 842)
+                    page = out.new_page(width=w, height=h)
+                    page.insert_image(page.rect + (18, 18, -18, -18), filename=path)
+                except Exception as e:
+                    print(f"รวมไฟล์แนบไม่ได้ ข้ามไป ({os.path.basename(path)}): {type(e).__name__}: {e}")
+            out.save(part, garbage=1, deflate=True)
+        finally:
+            out.close()
+            release_pdf_cache()
+    os.replace(part, dest)
+    return main_pages
+
+
+def page_sizes(pdf_path, dpi=PDF_RENDER_DPI):
+    """ขนาดภาพของทุกหน้า {เลขหน้า: (กว้าง, สูง)} ที่ dpi นี้ — ไม่ต้องเรนเดอร์ (หน้าที่ตั้งหมุนไว้ก็กลับด้านให้)"""
+    import pymupdf
+    zoom = dpi / 72.0
+    with PDF_LOCK:
+        doc = pymupdf.open(pdf_path)
+        try:
+            return {i + 1: (round(p.rect.width * zoom), round(p.rect.height * zoom))
+                    for i, p in enumerate(doc)}
+        finally:
+            doc.close()
+            release_pdf_cache()
+
+
+def pdf_head(pdf_path, pages, dest):
+    """สำเนาเฉพาะ pages หน้าแรก (หนังสือนำที่ไฟล์แนบต่อท้ายไว้) ไว้ให้ AI อ่าน — คืนที่อยู่ไฟล์
+    ไม่มีไฟล์แนบต่อท้าย (หรือไม่รู้จำนวนหน้า) คืนไฟล์เดิมเลย ไม่ต้องสำเนา"""
+    import pymupdf
+    with PDF_LOCK:
+        doc = pymupdf.open(pdf_path)
+        try:
+            if not pages or pages >= doc.page_count:
+                return pdf_path
+            doc.select(range(int(pages)))
+            doc.save(dest, garbage=1, deflate=True)
+        finally:
+            doc.close()
+            release_pdf_cache()
+    return dest
 
 
 def save_image_as_pdf(pil_image, output_path, dpi=PDF_RENDER_DPI):
@@ -965,7 +1024,6 @@ def place_kasien(page_img, text, *, indent_pct=100, size_pct=100, wrap_pct=100, 
 # ธุรการเอาปากกาเน้นข้อความป้ายชื่อโรงเรียนเราในบัญชีรายชื่อแนบท้าย ผอ. จะได้เห็นทันทีว่าเกี่ยวกับเรา
 # ระบบหาชื่อจากตัวหนังสือในไฟล์ PDF แล้วป้ายสีให้ — ไฟล์สแกนเป็นภาพล้วนไม่มีตัวหนังสือให้ค้น หาเองไม่ได้
 MARK_RGB = (255, 235, 59)      # สีปากกาเน้นข้อความ วาดแบบคูณสี พื้นขาวเป็นเหลือง ตัวหนังสือยังดำชัด
-SCAN_TEXT_MIN = 40             # หน้าที่มีตัวอักษรในไฟล์น้อยกว่านี้ = ภาพสแกน
 
 # ฟอนต์อย่าง TH SarabunPSK เก็บสระ/วรรณยุกต์ตัวที่ขยับที่ไว้ย่าน Private Use (U+F700–U+F71A)
 # PDF ที่ส่งออกจาก Word จึงให้ "บ\uf714าน" แทน "บ้าน" — ตัวที่เป็นพยัญชนะมีแค่ ฐ กับ ญ ไม่มีเชิง
@@ -1001,15 +1059,15 @@ def _name_pattern(name=SCHOOL):
 
 
 def _looks_scanned(page, nchars):
-    """หน้านี้เป็นภาพสแกนไหม — ตัวหนังสือในไฟล์แทบไม่มี หรือมีรูปเต็มหน้ากับตัวหนังสือนิดเดียว
-    (เช่นตราลงรับอิเล็กทรอนิกส์ที่ระบบสารบรรณพิมพ์ทับไฟล์สแกน) ไม่พบชื่อก็ยังบอกว่า "ไม่มี" ไม่ได้"""
-    if nchars < SCAN_TEXT_MIN:
-        return True
+    """หน้านี้เป็นภาพสแกนไหม (ไม่พบชื่อในหน้านี้ก็ยังบอกว่า "ไม่มี" ไม่ได้) — รูปกินพื้นที่เกินครึ่งหน้า
+    และตัวหนังสือในไฟล์มีไม่มาก (บางไฟล์มีตราลงรับอิเล็กทรอนิกส์พิมพ์ทับภาพสแกนไว้นิดหน่อย)
+    หน้าที่ตัวหนังสือน้อยแต่ไม่มีรูป เช่น หน้าลายเซ็น หน้าท้ายบัญชีรายชื่อ ไม่ใช่ภาพสแกน"""
     if nchars >= 400:
         return False
     area = page.rect.width * page.rect.height
-    return any((i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1]) >= 0.5 * area
-               for i in page.get_image_info())
+    covered = sum((i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1])
+                  for i in page.get_image_info())
+    return covered >= 0.5 * area
 
 
 def _mark_box(chars):

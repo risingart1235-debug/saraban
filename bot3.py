@@ -293,6 +293,17 @@ class SarabanApp(tk.Tk):
     def _job_path(self, job, name):
         return os.path.join(job["dir"], name)
 
+    def _page_file(self, n, doc=None):
+        """ภาพหน้าที่ n (JPEG ที่ A4_DPI) — หน้าที่ยังไม่ได้เตรียมไว้ (เกิน PRERENDER_PAGES) เรนเดอร์ตอนใช้ครั้งแรก
+        เรียกได้ทั้งจากหน้าจอ (เลื่อนไปถึง) และเธรดบันทึก — เขียนไฟล์ชั่วคราวแยกชื่อตามเธรดแล้วค่อยสลับเข้าที่"""
+        doc = doc or self.doc_info
+        path = doc['page_paths'][n]
+        if not os.path.exists(path):
+            part = f"{path}.{threading.get_ident()}.part"
+            render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI).save(part, "JPEG")
+            os.replace(part, path)
+        return path
+
     def _selenium_auto_login(self, driver, user, pwd):
         """พยายามล็อกอินอัตโนมัติด้วยรหัสที่บันทึกไว้
         คืนค่า True=สำเร็จ, False=ลองแล้วแต่ไม่สำเร็จ/หาช่องไม่เจอ
@@ -590,7 +601,8 @@ class SarabanApp(tk.Tk):
     A4_DPI = PDF_RENDER_DPI
     A4_W, A4_H = 1654, 2339
     # หน้าต่างจัดเอกสารแสดงได้ถึงหน้านี้ (เท่าหน้าเว็บ) กันเอกสารหนามากจนเปิดช้า
-    PREVIEW_MAX_PAGES = 20
+    PREVIEW_MAX_PAGES = 100       # แสดงได้ถึงหน้านี้ (รวมสิ่งที่ส่งมาด้วยที่ต่อท้ายหนังสือนำ)
+    PRERENDER_PAGES = 20          # เตรียมภาพไว้ก่อนเปิดหน้าต่างเท่านี้ หน้าที่เหลือเรนเดอร์ตอนเลื่อนไปถึง/ตอนบันทึก
 
     def start_stamp_only_mode(self):
         """เปิดกระดาษ A4 เปล่า → รันเลขรับต่อจาก Excel → ลากวางตรายาง → เซฟ PDF ไว้ปริ้นทับ"""
@@ -986,13 +998,17 @@ class SarabanApp(tk.Tk):
                 self.after(0, lambda n=len(detail["attachments"]):
                            self.set_status(f"กำลังดาวน์โหลด PDF (ไฟล์แนบ {n} รายการ)..."))
                 sppweb.download(sess, detail["main_pdf"], source_pdf, expected_type="pdf")
+                # ไฟล์แนบอื่นของเรื่องนี้ (บัญชีรายชื่อ ฯลฯ) ต่อท้ายหนังสือนำ — เห็นครบทุกหน้าเหมือนหน้าเว็บ
+                extras = sppweb.download_extras(
+                    sess, detail, job["dir"],
+                    log=lambda m: self.after(0, lambda m=m: self.log(f"⚠️ {m}")))
                 self.spp_session_state = sppweb.export_session(sess)
                 self.after(0, lambda: self.set_status("ดาวน์โหลดสำเร็จ กำลังส่งให้ AI..."))
                 handed_to_preview = self.process_file_thread(
                     source_pdf,
                     doc["doc_no"], doc["doc_title"], doc["doc_date"], doc["sender"],
                     detail["emoji"], sppweb.attach_text(detail["attachments"]),
-                    job=job, book_id=book_id,
+                    job=job, book_id=book_id, extras=extras,
                 )
                 return
 
@@ -1079,21 +1095,31 @@ class SarabanApp(tk.Tk):
         return result['choice']
 
     def process_file_thread(self, filepath, doc_no, doc_title, doc_date, sender, emoji, attach,
-                            *, job, book_id=None):
+                            *, job, book_id=None, extras=()):
         ext = filepath.lower().split('.')[-1]
         temp_pdf = self._job_path(job, "temp_work.pdf")
         if ext in ['jpg', 'jpeg', 'png']: Image.open(filepath).convert('RGB').save(temp_pdf)
         else: shutil.copy(filepath, temp_pdf)
+        # ไฟล์แนบอื่นของเรื่องเดียวกันต่อท้ายหนังสือนำเป็นเล่มเดียว (เห็นครบ ไฟล์ที่บันทึกก็ครบ)
+        # AI กับการคัดกรองบรรทัด "เรียน" ยังอ่านแค่หนังสือนำเหมือนเดิม
+        ai_pdf, whole_pdf, main_pages = temp_pdf, temp_pdf, None
+        if extras:
+            try:
+                whole_pdf = self._job_path(job, "whole.pdf")
+                main_pages = combine_attachments(temp_pdf, extras, whole_pdf)
+            except Exception as e:
+                whole_pdf = temp_pdf
+                self.after(0, lambda e=e: self.log(f"⚠️ รวมไฟล์แนบไม่สำเร็จ ใช้แค่หนังสือนำ: {e}"))
 
         # --- คัดกรองบรรทัด "เรียน" ในเครื่องก่อน (ฟรี ใช้ได้กับ PDF ที่มี text layer) ---
         self.after(0, lambda: self.set_status("กำลังตรวจบรรทัด 'เรียน' ในเครื่อง..."))
-        recipient_line = extract_recipient_line(temp_pdf)
+        recipient_line = extract_recipient_line(ai_pdf)
         category = classify_recipient(recipient_line)
         decided = False
         if category == 'check':
             # อ่านได้และเป็นกลุ่มเฉพาะ → ถาม "ก่อน" เพื่อไม่ให้เปลือง AI call
             self.after(0, lambda: self.set_status("เอกสารนี้ต้องตรวจสอบก่อนลงรับ — รอการยืนยัน..."))
-            if self._ask_register_decision(recipient_line, 'check', temp_pdf) != 'ai':
+            if self._ask_register_decision(recipient_line, 'check', whole_pdf) != 'ai':
                 saved = self._mark_history_skip(book_id)
                 msg = ("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"
                        if book_id and saved else "⏭ ไม่ลงรับเอกสารนี้")
@@ -1105,7 +1131,7 @@ class SarabanApp(tk.Tk):
         # category == 'unknown' (เอกสารสแกน อ่านในเครื่องไม่ได้) → ให้ AI ช่วยอ่านผู้รับแล้วค่อยตัดสิน
 
         self.after(0, lambda: self.set_status("กำลังส่งให้ AI วิเคราะห์..."))
-        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(temp_pdf)
+        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
 
         # --- เอกสารสแกน: ใช้บรรทัด "เรียน" ที่ AI อ่านมา มาจัดประเภท (ไม่เพิ่ม API call) ---
         if not decided:
@@ -1113,7 +1139,7 @@ class SarabanApp(tk.Tk):
             if classify_recipient(ai_rec) != 'auto':
                 self.after(0, lambda: self.set_status("เอกสารนี้อาจต้องตรวจก่อนลงรับ — รอการยืนยัน..."))
                 if self._ask_register_decision(
-                        ai_rec, classify_recipient(ai_rec), temp_pdf) != 'ai':
+                        ai_rec, classify_recipient(ai_rec), whole_pdf) != 'ai':
                     saved = self._mark_history_skip(book_id)
                     msg = ("⏭ ไม่ลงรับเอกสารนี้ (บันทึกไว้แล้ว จะไม่ดึงซ้ำ)"
                            if book_id and saved else "⏭ ไม่ลงรับเอกสารนี้")
@@ -1125,30 +1151,33 @@ class SarabanApp(tk.Tk):
         sender = sender if sender != "-" else ai_sender
         
         try:
-            reader = PdfReader(temp_pdf)
+            reader = PdfReader(whole_pdf)
             total_pages = len(reader.pages)
         except: total_pages = 1
-        sig_page = max(1, min(sig_page, total_pages))
+        sig_page = max(1, min(sig_page, main_pages or total_pages, total_pages))
 
         receipt_no_thai = get_next_receipt_no()
 
         # ทุกหน้าในเอกสาร (ไม่เกิน PREVIEW_MAX_PAGES และหน้าที่มีลายเซ็นผู้ส่งเสมอ) เหมือนหน้าเว็บ
         # เห็นครบก่อนลงรับ วางตรายาง/คำเกษียณได้ทุกหน้า และเลือกได้ว่าจะส่งหน้าไหนเข้า LINE
-        # (เดิมเห็นแค่หน้าแรกกับหน้าที่มีลายเซ็น)
+        # (เดิมเห็นแค่หน้าแรกกับหน้าที่มีลายเซ็น) — เตรียมภาพไว้ก่อนแค่ PRERENDER_PAGES หน้า
+        # ที่เหลือ (เอกสารหนา/ไฟล์แนบยาว) เรนเดอร์ตอนใช้จริง หน้าต่างจะได้ขึ้นเร็ว (_page_file)
         shown = sorted({1, sig_page} | set(range(1, min(total_pages, self.PREVIEW_MAX_PAGES) + 1)))
-        page_paths = {}
+        page_paths = {n: self._job_path(job, f"page{n}.jpg") for n in shown}
         for n in shown:
+            if n > self.PRERENDER_PAGES and n != sig_page:
+                continue
             self.after(0, lambda n=n: self.set_status(
                 f"กำลังเตรียมภาพหน้า {to_thai_digits(n)} จาก {to_thai_digits(total_pages)}..."))
-            page_paths[n] = self._job_path(job, f"page{n}.jpg")
-            render_pdf_page(temp_pdf, page_number=n, dpi=self.A4_DPI).save(page_paths[n], "JPEG")
+            render_pdf_page(whole_pdf, page_number=n, dpi=self.A4_DPI).save(page_paths[n], "JPEG")
 
         self.doc_info = {
-            'pdf_path': temp_pdf, 'ai_text': ai_text, 'sig_page': sig_page, 'total_pages': total_pages,
+            'pdf_path': whole_pdf, 'ai_text': ai_text, 'sig_page': sig_page, 'total_pages': total_pages,
             'doc_no': doc_no, 'doc_title': doc_title, 'doc_date': doc_date, 'sender': sender,
             'emoji': emoji, 'attach': attach, 'receipt_no': receipt_no_thai,
             'book_id': str(book_id) if book_id else None, 'job': job,
-            'page_paths': page_paths,
+            'page_paths': page_paths, 'page_sizes': page_sizes(whole_pdf, self.A4_DPI),
+            'main_pages': main_pages,
         }
 
         # ล้าง cache รูปต้นฉบับของเอกสารเดิม (เริ่มเอกสารใหม่)
@@ -1403,8 +1432,7 @@ class SarabanApp(tk.Tk):
             if n in self.page_full:
                 w, h = self.page_full[n].size
             else:
-                with Image.open(doc['page_paths'][n]) as im:   # อ่านแค่หัวไฟล์ ไม่ถอดรหัสภาพ
-                    w, h = im.size
+                w, h = doc['page_sizes'][n]                    # ขนาดจาก PDF ไม่ต้องรอเรนเดอร์
             name = ("หน้าแรก" if n == 1 else
                     f"หน้า {to_thai_digits(n)} (มีลายเซ็นผู้ส่ง)" if n == sig_page else
                     f"หน้า {to_thai_digits(n)}")
@@ -1548,7 +1576,7 @@ class SarabanApp(tk.Tk):
             size = (max(1, int(p['w'] * scale)), max(1, int(p['h'] * scale)))
             src = self.page_full.get(n)
             if src is None:
-                src = Image.open(self.doc_info['page_paths'][n])
+                src = Image.open(self._page_file(n))
                 src.draft('RGB', size)      # JPEG ถอดรหัสแบบย่อมาเลย เร็วกว่าถอดเต็มแล้วค่อยย่อ
             # ย่อใช้ LANCZOS ตัวหนังสือคม / ขยายเกิน ๑๐๐% ใช้ BILINEAR เร็วกว่าหลายเท่า ตาแทบไม่ต่าง
             how = Image.Resampling.LANCZOS if scale <= 1 else Image.Resampling.BILINEAR
@@ -1745,7 +1773,7 @@ class SarabanApp(tk.Tk):
                 elif p['n'] in snapshot['page_full']:
                     page = snapshot['page_full'][p['n']].copy()
                 else:
-                    page = Image.open(doc['page_paths'][p['n']]).convert('RGB')
+                    page = Image.open(self._page_file(p['n'], doc)).convert('RGB')
                 for img, x, y in items:
                     page.paste(img, (int(x) - 20, int(y) - p['y']), img)
                 return page
@@ -1799,7 +1827,7 @@ class SarabanApp(tk.Tk):
                 for n in pages_to_send:
                     img = page_imgs.get(n)
                     if img is None and n in doc['page_paths']:
-                        img = Image.open(doc['page_paths'][n])
+                        img = Image.open(self._page_file(n, doc))
                     elif img is None:          # หน้าเกินที่แสดงบนจอ (เอกสารหนามาก) ดึงจาก PDF
                         img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
                     # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน (Drive for Desktop
