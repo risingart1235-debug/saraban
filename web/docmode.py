@@ -15,6 +15,7 @@ import queue
 import secrets
 import shutil
 import threading
+import time
 import traceback
 import unicodedata
 import uuid
@@ -70,6 +71,13 @@ _work_queue = queue.Queue(maxsize=JOB_QUEUE_LIMIT)
 # ระหว่างนั้นเว็บตอบ 503 ทั้งเว็บ — มือถือที่กำลังส่งอยู่ก็พังรวดทุกเรื่องที่เหลือ
 _drive_tasks = queue.Queue()
 
+# ปุ่ม 🔎 สแกน — อ่านหน้าภาพสแกนด้วย Tesseract ทีละเรื่อง ทีละหน้า ด้วยเธรดเดียว
+# แยกจากคิวงานเปิดเรื่อง (AI) ไม่งั้นสแกนยาวๆ เรื่องหนึ่งจะขวางคนอื่นเปิดเรื่องใหม่ไม่ได้
+# และเครื่องฟรีของ Render แรงไม่พอให้อ่านภาพสองเรื่องพร้อมกัน
+_ocr_tasks = queue.Queue()
+OCR_MAX_PAGES = 30             # สแกนครั้งละไม่เกินนี้ (Render ฟรีหน้าละ ~๑๕ วินาที ๓๐ หน้า ~๗ นาที)
+_ocr_sec = [15.0]              # วินาทีต่อหน้าที่วัดได้ล่าสุด ไว้บอกเวลาโดยประมาณก่อนกดสแกน
+
 # กู้คิวจากไดร์ฟเสร็จหรือยัง — เซิร์ฟเวอร์เพิ่งตื่น/บูตใหม่ คิวในหน่วยความจำยังว่างอยู่
 # จนกว่า restore_queue จะทำเสร็จ ใครจะถามว่า "อะไรอยู่ในคิวแล้ว" ต้องรอตัวนี้ก่อน
 _queue_restored = threading.Event()
@@ -91,6 +99,10 @@ class AlreadyHandledError(RuntimeError):
 
 class DriveNotReadyError(RuntimeError):
     """อัปไฟล์ขึ้นไดร์ฟไม่ได้ — ต้องหยุดก่อนกินเลขรับ ไม่ใช่ปล่อยให้ลงทะเบียนแล้วไฟล์หาย"""
+
+
+class OcrUnavailable(RuntimeError):
+    """เครื่องนี้ไม่มีตัวอ่านภาพ (Tesseract ภาษาไทย) — สแกนหาชื่อในหน้าภาพไม่ได้"""
 
 
 class JobStateError(RuntimeError):
@@ -118,6 +130,8 @@ for _worker_no in range(JOB_WORKERS):
                      name=f"saraban-worker-{_worker_no + 1}", daemon=True).start()
 threading.Thread(target=_worker_loop, args=(_drive_tasks,),
                  name="saraban-drive", daemon=True).start()
+threading.Thread(target=_worker_loop, args=(_ocr_tasks,),
+                 name="saraban-ocr", daemon=True).start()
 
 
 # ==========================================================
@@ -974,6 +988,75 @@ def preview_page(job, n: int) -> str:
         img.convert("RGB").save(part, "JPEG", quality=70, optimize=True)
         os.replace(part, path)
     return path
+
+
+def ocr_state(job) -> dict:
+    """สถานะการสแกนหาชื่อของเรื่องนี้ ให้หน้าจอแสดงความคืบหน้า (ready = เครื่องนี้มีตัวอ่านภาพไหม)"""
+    state = dict(job.get("ocr") or {})
+    state.pop("stop", None)
+    state.update(ready=bool(core.tesseract_cmd()), sec_per_page=round(_ocr_sec[0], 1),
+                 max_pages=OCR_MAX_PAGES)
+    return state
+
+
+def start_ocr(job, first: int, last: int) -> dict:
+    """ปุ่ม 🔎 สแกน — อ่านหน้า first..last (เลขหน้าจริง) ด้วยตัวอ่านภาพ หาชื่อโรงเรียนในหน้าที่เป็นภาพสแกน
+
+    ผู้ใช้เลือกช่วงเอง (ปกติคือหน้าบัญชีรายชื่อ) เพราะอ่านช้า ทำเบื้องหลังทีละหน้า หน้าจอถามความคืบหน้าเอง
+    หน้าที่เจอชื่อแล้ว (จากตัวหนังสือในไฟล์) ไม่อ่านซ้ำ — เจอชื่อเพิ่มก็ต่อท้าย job["marks"] ให้ป้ายสีได้เหมือนกัน
+    """
+    if not core.tesseract_cmd():
+        raise OcrUnavailable("เครื่องนี้ยังไม่มีตัวอ่านภาพ (Tesseract ภาษาไทย) — สแกนหาชื่อในหน้าภาพไม่ได้")
+    if job.get("status") not in ("ready", "save_error"):
+        raise JobStateError("เรื่องนี้ไม่ได้อยู่ในหน้าจัดเอกสารแล้ว", status=job.get("status", ""))
+    first, last = min(first, last), max(first, last)
+    found = {job["pages"][m["page"]]["index"] for m in job.get("marks") or ()}
+    pages = [pg["index"] for pg in job["pages"] if first <= pg["index"] <= last and pg["index"] not in found]
+    if not any(first <= pg["index"] <= last for pg in job["pages"]):
+        raise ValueError("ช่วงหน้าที่จะสแกนไม่มีอยู่ในเรื่องนี้")
+    with _lock:
+        current = job.get("ocr") or {}
+        if current.get("status") in ("queued", "running"):
+            return ocr_state(job)             # กดซ้ำระหว่างสแกนอยู่ ไม่เริ่มใหม่
+        job["ocr"] = state = {"status": "queued", "first": first, "last": last,
+                              "pages": pages[:OCR_MAX_PAGES], "cut": len(pages) > OCR_MAX_PAGES,
+                              "done": 0, "current": None, "found": [], "error": "", "stop": False}
+    _ocr_tasks.put(lambda: _run_ocr(job, state))
+    return ocr_state(job)
+
+
+def stop_ocr(job) -> dict:
+    state = job.get("ocr")
+    if state:
+        state["stop"] = True
+    return ocr_state(job)
+
+
+def _run_ocr(job, state):
+    state["status"] = "running"
+    try:
+        for i, n in enumerate(state["pages"]):
+            # กดหยุด / เริ่มสแกนช่วงใหม่ / บันทึกหรือไม่รับเรื่องนี้ไปแล้ว — เลิกอ่านหน้าที่เหลือ
+            if state["stop"] or job.get("ocr") is not state or job.get("status") not in ("ready", "save_error"):
+                state["status"] = "stopped"
+                return
+            state["current"] = n
+            began = time.time()
+            boxes = core.ocr_name_marks(job["pdf_path"], n, DPI)
+            _ocr_sec[0] = (_ocr_sec[0] + time.time() - began) / 2
+            pi = next(k for k, pg in enumerate(job["pages"]) if pg["index"] == n)
+            new = [{"page": pi, "x": round(x0), "y": round(y0), "w": round(x1 - x0), "h": round(y1 - y0),
+                    "ocr": True} for x0, y0, x1, y1 in boxes]
+            with _lock:
+                if new:
+                    job["marks"] = list(job.get("marks") or []) + new
+                    state["found"].append(n)
+                state["done"] = i + 1
+        state["status"] = "done"
+    except Exception as e:
+        state.update(status="error", error=f"{type(e).__name__}: {e}"[:300])
+    finally:
+        state["current"] = None
 
 
 def _blank_size(job) -> tuple:

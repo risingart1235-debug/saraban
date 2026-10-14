@@ -1046,28 +1046,42 @@ def _name_key(ch):
     return ch
 
 
+def _key(text):
+    return "".join(map(_name_key, text))
+
+
+def _name_core(name=SCHOOL):
+    """ส่วนของชื่อที่ต้องมีเสมอ (เป็นตัวอักษรที่ใช้เทียบ) และมีคำว่า "บ้าน" นำหน้าได้ไหม
+    ตัด "โรงเรียน" กับ "บ้าน" ออก — แต่ถ้าที่เหลือสั้นเกินไป (ชนชื่อโรงเรียนอื่นง่าย) ให้ "บ้าน" เป็นส่วนที่ต้องมี"""
+    base = name[len("โรงเรียน"):] if name.startswith("โรงเรียน") else name
+    if base.startswith("บ้าน") and len(_key(base[len("บ้าน"):])) >= 6:
+        return _key(base[len("บ้าน"):]), True
+    return _key(base), False
+
+
 def _name_pattern(name=SCHOOL):
     """ชื่อโรงเรียนแบบที่เจอในบัญชีรายชื่อ: มี "โรงเรียน"/"รร." นำหน้าหรือไม่ก็ได้ "บ้าน"/"บ." ก็ได้
     ส่วนหลังคำว่าบ้าน (โพนทองประชาอุทิศ) ต้องมีเสมอ — แค่ "บ้านโพนทอง" คือโรงเรียนอื่น"""
-    key = lambda s: "".join(map(_name_key, s))
-    base = name[len("โรงเรียน"):] if name.startswith("โรงเรียน") else name
-    head = ""
-    if base.startswith("บ้าน") and len(key(base[len("บ้าน"):])) >= 6:
-        base, head = base[len("บ้าน"):], "(?:%s|%s)?" % (re.escape(key("บ้าน")), re.escape("บ."))
-    return re.compile("(?:%s|%s?)?" % (re.escape(key("โรงเรียน")), re.escape("รร."))
-                      + head + re.escape(key(base)))
+    core_key, baan = _name_core(name)
+    head = "(?:%s|%s)?" % (re.escape(_key("บ้าน")), re.escape("บ.")) if baan else ""
+    return re.compile("(?:%s|%s?)?" % (re.escape(_key("โรงเรียน")), re.escape("รร."))
+                      + head + re.escape(core_key))
 
 
 def _looks_scanned(page, nchars):
     """หน้านี้เป็นภาพสแกนไหม (ไม่พบชื่อในหน้านี้ก็ยังบอกว่า "ไม่มี" ไม่ได้) — รูปกินพื้นที่เกินครึ่งหน้า
     และตัวหนังสือในไฟล์มีไม่มาก (บางไฟล์มีตราลงรับอิเล็กทรอนิกส์พิมพ์ทับภาพสแกนไว้นิดหน่อย)
-    หน้าที่ตัวหนังสือน้อยแต่ไม่มีรูป เช่น หน้าลายเซ็น หน้าท้ายบัญชีรายชื่อ ไม่ใช่ภาพสแกน"""
-    if nchars >= 400:
-        return False
+    หน้าที่ตัวหนังสือน้อยแต่ไม่มีรูป เช่น หน้าลายเซ็น หน้าท้ายบัญชีรายชื่อ ไม่ใช่ภาพสแกน
+    เครื่องสแกนบางรุ่นอ่านภาพแล้วซ่อนตัวหนังสือไว้ใต้ภาพ (PDF ค้นหาได้) ส่วนมากอ่านภาษาไทยเพี้ยน
+    ตัวหนังสือที่มองไม่เห็นพวกนี้ไม่นับ หน้านั้นยังเป็นภาพสแกนที่ต้องกด 🔎 สแกน"""
     area = page.rect.width * page.rect.height
     covered = sum((i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1])
                   for i in page.get_image_info())
-    return covered >= 0.5 * area
+    if covered < 0.5 * area:
+        return False
+    if nchars >= 400:
+        nchars = sum(len(s["chars"]) for s in page.get_texttrace() if s["type"] != 3)   # 3 = ซ่อนไว้
+    return nchars < 400
 
 
 def _mark_box(chars):
@@ -1129,6 +1143,131 @@ def find_name_marks(pdf_path, page_numbers, dpi=PDF_RENDER_DPI, name=SCHOOL):
             doc.close()
             release_pdf_cache()
     return marks, scans
+
+
+# --- อ่านหน้าที่เป็นภาพสแกนด้วย Tesseract (ปุ่ม 🔎 สแกน ในหน้าจัดเอกสาร) ---
+# ไฟล์สแกนไม่มีตัวหนังสือในไฟล์ให้ค้น — Tesseract เป็นตัวอ่านภาพฟรี (โอเพนซอร์ส อ่านภาษาไทยได้) รันในเครื่องเราเอง
+# ไม่ใช้ AI ไม่กินโควตา แต่ช้า (เครื่องฟรีของ Render หน้าละราว ๑๕ วินาที) จึงอ่านเฉพาะหน้าที่ผู้ใช้เลือก
+# ลองกับหน้าสแกนบัญชีรายชื่อแล้ว: ๒๐๐ DPI + ปรับความคม + โหมดคอลัมน์เดียว (psm 4) เจอทุกแบบที่ลอง
+# รวมสแกนจาง ๑๕๐ DPI เอียง ๒ องศา (โหมดตารางทั้งก้อน psm 6 พลาดหน้าจาง และช้ากว่า)
+OCR_ERRORS = 2                 # อ่านผิดได้กี่ตัวในชื่อ (๑๔ ตัว) — "บ้านโพนทอง" (โรงเรียนอื่น) ยังไม่ผ่าน
+OCR_PAGE_SEC = 180             # อ่านหน้าเดียวนานเกินนี้ถือว่าค้าง
+_TESSERACT = None              # ที่อยู่ตัวอ่านที่หาเจอ ("" = เครื่องนี้ไม่มี)
+
+
+def tesseract_cmd():
+    """ที่อยู่โปรแกรม Tesseract ที่มีภาษาไทย หรือ "" ถ้าเครื่องนี้ไม่มี (หาครั้งเดียวแล้วจำไว้)
+    บนเซิร์ฟเวอร์ลงไว้ใน Dockerfile / เครื่อง Windows ลงตัวติดตั้งของ UB Mannheim แล้วติ๊กภาษาไทย
+    หรือบอกที่อยู่เองด้วยตัวแปร SARABAN_TESSERACT"""
+    global _TESSERACT
+    if _TESSERACT is None:
+        import shutil
+        import subprocess
+        found = ""
+        for cmd in (os.environ.get("SARABAN_TESSERACT", ""), shutil.which("tesseract") or "",
+                    r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+            if not cmd or not os.path.exists(cmd):
+                continue
+            try:
+                out = subprocess.run([cmd, "--list-langs"], capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if "tha" in (out.stdout + out.stderr).decode("utf-8", "replace").split():
+                found = cmd
+                break
+        _TESSERACT = found
+    return _TESSERACT
+
+
+def _ocr_page(img, dpi):
+    """อ่านภาพหน้าเดียว — คืน [(บรรทัด, ข้อความ, (x0, y0, x1, y1))] ตามลำดับที่อ่าน
+    Tesseract ภาษาไทยแยกออกมาเกือบทีละตัวอักษร พร้อมกรอบของแต่ละตัว แถบสีจึงวางตรงชื่อพอดี"""
+    import csv
+    import io
+    import subprocess
+    import tempfile
+    from PIL import ImageOps
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "page.png")
+        ImageOps.autocontrast(img.convert("L"), cutoff=1).save(src)
+        out = subprocess.run([tesseract_cmd(), src, "stdout", "-l", "tha", "--dpi", str(int(dpi)),
+                              "--psm", "4", "tsv"], capture_output=True, timeout=OCR_PAGE_SEC,
+                             env=dict(os.environ, OMP_THREAD_LIMIT="1"))   # เครื่องเล็ก หลายเธรดไม่ได้เร็วขึ้น
+    if out.returncode:
+        raise RuntimeError("Tesseract อ่านภาพไม่สำเร็จ: " + out.stderr.decode("utf-8", "replace")[-200:])
+    pieces = []
+    for r in csv.DictReader(io.StringIO(out.stdout.decode("utf-8", "replace")), delimiter="\t",
+                            quoting=csv.QUOTE_NONE):
+        text = (r.get("text") or "").strip()
+        if text and r.get("level") == "5":
+            x, y, w, h = (int(r[k]) for k in ("left", "top", "width", "height"))
+            pieces.append(((r["block_num"], r["par_num"], r["line_num"]), text, (x, y, x + w, y + h)))
+    return pieces
+
+
+def _fuzzy_find(text, pat, errors):
+    """ช่วง [ต้น, ปลาย) ใน text ที่ใกล้ pat ที่สุด ผิดได้ไม่เกิน errors ตัว (ขาด/เกิน/ผิดตัว) หรือ None
+    ตัวอ่านภาพอ่านพลาดได้บ้าง เทียบตรงเป๊ะแบบไฟล์ที่มีตัวหนังสือจะหลุดง่าย"""
+    m, n = len(pat), len(text)
+    if not m or n + errors < m:
+        return None
+    d = [[0] * (n + 1)]                        # แถวแรกเป็น ๐ = ชื่อเริ่มตรงไหนของบรรทัดก็ได้
+    for i in range(1, m + 1):
+        row = [i] + [0] * n
+        for j in range(1, n + 1):
+            row[j] = min(d[i - 1][j - 1] + (pat[i - 1] != text[j - 1]), d[i - 1][j] + 1, row[j - 1] + 1)
+        d.append(row)
+    end = min(range(n + 1), key=lambda j: d[m][j])
+    if d[m][end] > errors:
+        return None
+    i, j = m, end
+    while i:
+        if j and d[i][j] == d[i - 1][j - 1] + (pat[i - 1] != text[j - 1]):
+            i, j = i - 1, j - 1
+        elif d[i][j] == d[i - 1][j] + 1:
+            i -= 1
+        else:
+            j -= 1
+    return j, end
+
+
+def _ocr_marks(pieces, name=SCHOOL):
+    """กรอบแถบสีของชื่อโรงเรียนจากผลอ่านภาพ (ทีละบรรทัด) — คำว่า "บ้าน"/"โรงเรียน" หน้าชื่อที่อ่านได้ ป้ายด้วย"""
+    core_key, baan = _name_core(name)
+    prefixes = ((("บาน", "บ."),) if baan else ()) + (("โรงเรยน", "รร.", "รร"),)
+    lines = {}
+    for line, text, box in pieces:
+        lines.setdefault(line, []).append((text, box))
+    marks = []
+    for row in lines.values():
+        key, owner = "", []                    # ตัวอักษรที่ใช้เทียบ กับชิ้นที่ตัวนั้นมาจาก
+        for i, (text, _) in enumerate(row):
+            k = _key(text)
+            key += k
+            owner += [i] * len(k)
+        start = 0
+        while True:
+            hit = _fuzzy_find(key[start:], core_key, OCR_ERRORS)
+            if not hit:
+                break
+            s, e = hit[0] + start, hit[1] + start
+            for options in prefixes:
+                s -= len(next((p for p in options if key[:s].endswith(p)), ""))
+            boxes = [box for _, box in row[owner[s]:owner[e - 1] + 1]]
+            x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+            pad = 0.15 * (y1 - y0)
+            marks.append((x0 - pad, y0 - pad / 2, x1 + pad, y1 + pad / 2))
+            start = e
+    return marks
+
+
+def ocr_name_marks(pdf_path, page_no, dpi=PDF_RENDER_DPI, name=SCHOOL):
+    """อ่านหน้า page_no ด้วย Tesseract หาชื่อโรงเรียน — คืนกรอบแถบสี [(x0, y0, x1, y1)]
+    พิกัดบนภาพหน้าที่ dpi นี้ (แบบเดียวกับ find_name_marks) ชื่อที่ขึ้นบรรทัดใหม่กลางชื่อยังหาไม่เจอ"""
+    if not tesseract_cmd():
+        raise RuntimeError("เครื่องนี้ยังไม่มีตัวอ่านภาพ Tesseract (ภาษาไทย)")
+    return _ocr_marks(_ocr_page(render_pdf_page(pdf_path, page_no, dpi), dpi), name)
 
 
 def paint_marks(img, boxes, color=MARK_RGB):

@@ -3,8 +3,10 @@
 FROM python:3.12-slim
 
 # ไม่ต้องลง poppler แล้ว เพราะเปลี่ยนไปใช้ PyMuPDF ซึ่งมากับ pip
-# ลงแค่ fontconfig ให้ระบบรู้จักฟอนต์ไทยที่เราขนไปเอง
+# fontconfig ให้ระบบรู้จักฟอนต์ไทยที่เราขนไปเอง
+# tesseract-ocr-tha = ตัวอ่านภาพภาษาไทย สำหรับปุ่ม 🔎 สแกน หาชื่อโรงเรียนในหน้าที่เป็นภาพสแกน
 RUN apt-get update && apt-get install -y --no-install-recommends fontconfig \
+        tesseract-ocr tesseract-ocr-tha \
     && rm -rf /var/lib/apt/lists/*
 
 # Hugging Face Spaces รันคอนเทนเนอร์ด้วยผู้ใช้ uid 1000 ไม่ใช่ root

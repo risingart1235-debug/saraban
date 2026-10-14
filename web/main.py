@@ -1280,6 +1280,7 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     out["cm"] = docmode.CM
     # ชื่อโรงเรียนที่หาเจอ (marks) หาไว้ทุกเรื่อง ป้ายสีให้เมื่อคนที่เปิดตั้งโหมดไฮไลท์ไว้ในบัญชี
     out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
+    out["ocr"] = docmode.ocr_state(job)      # ปุ่ม 🔎 สแกน (อ่านหน้าภาพสแกน)
     return out
 
 
@@ -1291,6 +1292,37 @@ def api_doc_page(job_id: str, n: int, user: str = Depends(current_user)):
         raise HTTPException(status_code=404, detail="ไม่พบหน้านี้")
     return FileResponse(path, media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.post("/api/doc/{job_id}/ocr")
+async def api_doc_ocr(job_id: str, request: Request, user: str = Depends(current_user)):
+    """ปุ่ม 🔎 สแกน — อ่านหน้า first..last ที่เป็นภาพสแกนหาชื่อโรงเรียน (ทำเบื้องหลัง ถามความคืบหน้าที่ GET)"""
+    job = _job_or_404(job_id, user)
+    d = await request.json()
+    try:
+        first, last = int(d.get("first")), int(d.get("last"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="ระบุหน้าที่จะสแกนไม่ถูกต้อง")
+    try:
+        return docmode.start_ocr(job, first, last)
+    except docmode.OcrUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except docmode.JobStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/doc/{job_id}/ocr")
+def api_doc_ocr_status(job_id: str, user: str = Depends(current_user)):
+    """ความคืบหน้าการสแกน + ชื่อที่หาเจอทั้งหมด (รวมที่สแกนเจอใหม่) ให้หน้าจอป้ายสีตาม"""
+    job = _job_or_404(job_id, user)
+    return dict(docmode.ocr_state(job), marks=job.get("marks") or [])
+
+
+@app.post("/api/doc/{job_id}/ocr/stop")
+def api_doc_ocr_stop(job_id: str, user: str = Depends(current_user)):
+    return docmode.stop_ocr(_job_or_404(job_id, user))
 
 
 @app.post("/api/doc/{job_id}/box")

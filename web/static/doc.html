@@ -64,10 +64,23 @@
   .chips button { flex:1; min-width:88px; min-height:40px; border:1px solid #c9ced6;
                   background:#fff; border-radius:8px; font-size:13px; font-family:inherit; cursor:pointer }
   .chips button.on { background:#dbeafe; border-color:#60a5fa; font-weight:700 }
-  #savebar { position:sticky; bottom:0; background:rgba(240,242,245,.97);
+  #savebar { position:sticky; bottom:0; z-index:30; background:rgba(240,242,245,.97);
              border-top:1px solid var(--line); padding:10px 16px calc(10px + env(safe-area-inset-bottom));
              margin:0 -16px; display:flex; gap:8px }
   #savebar .btn { margin:0 }
+  #ocrBtn { flex:0 0 auto; width:auto; padding:12px 10px; white-space:nowrap }
+  /* แผงสแกนหาชื่อ — เด้งขึ้นเหนือแถบปุ่มล่างจอ */
+  #ocrPanel { position:absolute; left:0; right:0; bottom:100%; background:#fff; padding:12px 16px;
+              border-top:1px solid var(--line); box-shadow:0 -6px 16px rgba(0,0,0,.12); font-size:14px }
+  #ocrPanel .ohead { display:flex; justify-content:space-between; align-items:center; gap:8px }
+  #ocrPanel .ohead button { border:0; background:none; font-size:20px; cursor:pointer; padding:4px 8px }
+  #ocrPanel .orow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 0 }
+  #ocrPanel input { width:76px; min-height:42px; padding:6px 8px; border:1px solid #c9ced6;
+                    border-radius:8px; font-size:16px; font-family:inherit }
+  #ocrPanel .obtns { display:flex; gap:8px }
+  #ocrMsg { margin-top:8px; line-height:1.5; color:#374151 }
+  .obar { height:6px; background:#e5e7eb; border-radius:3px; overflow:hidden; margin-top:8px }
+  .obar > div { height:100%; width:0; background:#2563eb; transition:width .3s }
   /* ปุ่มพับ/กางชุดแก้ไข — หน้าตาเหมือนการ์ดใบหนึ่ง กดง่ายด้วยนิ้ว */
   #editToggle, #sigToggle {
     display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -222,7 +235,21 @@
   </div>
 
   <div id="savebar" class="hidden">
-    <button class="btn grey" id="skip" style="flex:0 0 38%">🚫 ไม่รับ</button>
+    <!-- สแกนหาชื่อโรงเรียนในหน้าที่เป็นภาพสแกน (อ่านภาพด้วย Tesseract บนเซิร์ฟเวอร์ เลือกช่วงหน้าเอง) -->
+    <div id="ocrPanel" class="hidden">
+      <div class="ohead"><b>🔎 สแกนหาชื่อโรงเรียนในหน้าที่เป็นภาพสแกน</b>
+        <button id="ocrClose" aria-label="ปิด">✕</button></div>
+      <div class="orow">หน้า <input id="ocrFrom" type="number" inputmode="numeric">
+        ถึง <input id="ocrTo" type="number" inputmode="numeric"> <span id="ocrEta" class="tiny"></span></div>
+      <div class="obtns">
+        <button class="btn small" id="ocrGo">▶ เริ่มสแกน</button>
+        <button class="btn grey small hidden" id="ocrStop">■ หยุด</button>
+      </div>
+      <div class="obar hidden" id="ocrBar"><div id="ocrFill"></div></div>
+      <div id="ocrMsg"></div>
+    </div>
+    <button class="btn grey" id="ocrBtn">🔎 สแกน</button>
+    <button class="btn grey" id="skip" style="flex:0 0 28%">🚫 ไม่รับ</button>
     <button class="btn" id="save" style="flex:1">✅ ยืนยัน &amp; สร้างไฟล์</button>
   </div>
 </div>
@@ -330,21 +357,12 @@ function build() {
   });
   if (!blank.parentNode) box.appendChild(blank);
 
-  // ไฮไลท์วางก่อนตรายาง/คำเกษียณ ของที่ลากมาทับจะได้อยู่บนแถบสี (ไฟล์จริงก็ป้ายก่อนวางของ)
-  for (const m of D.marks || []) {
-    const ps = D.pages[m.page], el = document.createElement('div');
-    el.className = 'hl'; el.dataset.page = m.page;
-    Object.assign(el.style, { left: m.x / ps.w * 100 + '%', top: m.y / ps.h * 100 + '%',
-                              width: m.w / ps.w * 100 + '%', height: m.h / ps.h * 100 + '%' });
-    pageEl(m.page).appendChild(el);
-  }
-  for (const n of markPages()) {
-    const b = document.createElement('button');
-    b.className = 'hbtn'; b.dataset.hl = n;
-    pageEl(D.pages.findIndex(p => p.index === n)).querySelector('.phead').appendChild(b);
-  }
+  drawMarks();
   hlPages = new Set(D.highlight ? markPages() : []);     // ตั้งค่าบัญชี = ไฮไลท์ให้เองตั้งแต่เปิดเรื่อง
   showMarks();
+  // ปุ่ม 🔎 สแกน มีเฉพาะเรื่องที่มีหน้าภาพสแกน — เรื่องที่เป็นตัวหนังสือทั้งหมดค้นชื่อไปแล้วตอนเปิดเรื่อง
+  $('ocrBtn').classList.toggle('hidden', !(D.scan_pages || []).length);
+  if (['queued', 'running'].includes(ocrOf().status)) ocrPoll();   // โหลดหน้าใหม่ระหว่างสแกนอยู่
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
@@ -793,6 +811,25 @@ function setHighlight(pages, on) {
   for (const n of pages) on ? hlPages.add(n) : hlPages.delete(n);
   showMarks();
 }
+// แถบสีบนหน้า (วางก่อนตรายาง/คำเกษียณ ของที่ลากมาทับจะได้อยู่บนแถบสี — ไฟล์จริงก็ป้ายก่อนวางของ)
+// กับปุ่มเปิด/ปิดไฮไลท์บนหัวหน้าที่พบชื่อ — วาดใหม่ได้ทุกเมื่อ (สแกนเจอชื่อเพิ่มระหว่างทาง)
+function drawMarks() {
+  for (const el of document.querySelectorAll('.page .hl')) el.remove();
+  for (const m of D.marks || []) {
+    const ps = D.pages[m.page], page = pageEl(m.page), el = document.createElement('div');
+    el.className = 'hl'; el.dataset.page = m.page;
+    Object.assign(el.style, { left: m.x / ps.w * 100 + '%', top: m.y / ps.h * 100 + '%',
+                              width: m.w / ps.w * 100 + '%', height: m.h / ps.h * 100 + '%' });
+    page.insertBefore(el, page.querySelector('.ov'));
+  }
+  for (const n of markPages()) {
+    const head = pageEl(D.pages.findIndex(p => p.index === n)).querySelector('.phead');
+    if (head.querySelector('.hbtn')) continue;
+    const b = document.createElement('button');
+    b.className = 'hbtn'; b.dataset.hl = n;
+    head.appendChild(b);
+  }
+}
 function showMarks() {
   for (const el of document.querySelectorAll('.page .hl'))
     el.classList.toggle('off', !hlPages.has(D.pages[+el.dataset.page].index));
@@ -806,8 +843,11 @@ function showMarks() {
   // ว่าอาจไม่ใช่ของเรา (ต้องตรวจบัญชีรายชื่อ) เรื่องที่ส่งถึงทุกโรงเรียนบอกทุกเรื่องก็รกจอเปล่าๆ
   box.classList.toggle('hidden', !found.length && (!D.highlight || !D.category || D.category === 'auto'));
   box.classList.toggle('none', !found.length);
-  const scans = (D.scan_pages || []).filter(n => !found.includes(n));
+  // หน้าภาพสแกนที่ยังไม่ได้กดสแกน — มีตัวอ่านภาพก็ชี้ไปที่ปุ่ม 🔎 สแกน ด้านล่าง
+  const read = ocrRead();
+  const scans = (D.scan_pages || []).filter(n => !found.includes(n) && !read.includes(n));
   const scanText = 'หน้า ' + scans.map(thaiNum).join(', ');
+  const scanHow = ocrOf().ready ? 'กด 🔎 สแกน ด้านล่างเพื่อหาชื่อ' : 'ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา';
   let html;
   if (found.length) {
     const links = found.map(n => `<a href="#" data-goto="${n}">หน้า ${thaiNum(n)}</a>`).join(', ');
@@ -818,11 +858,11 @@ function showMarks() {
         : 'ยังไม่ได้ไฮไลท์') +
       '<br><span class="sub">เปิด/ปิดทีละหน้าได้ที่ปุ่มไฮไลท์บนหน้านั้น · ' +
       'จะส่งหน้าไหนเข้า LINE แตะปุ่มส่ง LINE บนหน้านั้น</span>' +
-      (scans.length ? `<br>${scanText} เป็นภาพสแกน ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา` : '');
+      (scans.length ? `<br>${scanText} เป็นภาพสแกน — ${scanHow}` : '');
   } else if (scans.length >= D.pages.length) {
-    html = '🖍️ ไฟล์นี้เป็นภาพสแกน ระบบหาชื่อโรงเรียนให้ไม่ได้ — ตรวจดูด้วยตา';
+    html = `🖍️ ไฟล์นี้เป็นภาพสแกน — ${scanHow}`;
   } else if (scans.length) {
-    html = `🖍️ ไม่พบชื่อโรงเรียนในหน้าที่เป็นตัวหนังสือ — ${scanText} เป็นภาพสแกน ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา`;
+    html = `🖍️ ไม่พบชื่อโรงเรียนในหน้าที่เป็นตัวหนังสือ — ${scanText} เป็นภาพสแกน ${scanHow}`;
   } else {
     html = '🖍️ ไม่พบชื่อโรงเรียนในเอกสารนี้';
   }
@@ -838,6 +878,110 @@ $('hlbox').addEventListener('click', (e) => {
   const el = pageEl(i).querySelector('.hl') || pageEl(i);
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
+
+// ---------- 🔎 สแกนหาชื่อในหน้าภาพสแกน ----------
+// ไฟล์สแกนไม่มีตัวหนังสือให้ค้น เซิร์ฟเวอร์อ่านภาพด้วย Tesseract (ไม่ใช้ AI) แต่ช้า หน้าละหลายวินาที
+// จึงอ่านเฉพาะหน้าที่เลือก (ปกติคือหน้าบัญชีรายชื่อ) ทำเบื้องหลัง ระหว่างรอทำอย่างอื่นบนจอต่อได้
+// เจอชื่อแล้วไฮไลท์หน้านั้นให้เลย (จะส่งหน้านั้นเข้า LINE ติ๊กเองเหมือนหน้าอื่น)
+let ocrTimer = null;
+const ocrOf = () => (D && D.ocr) || {};
+const ocrBusy = () => ['queued', 'running'].includes(ocrOf().status);
+function ocrRead() { const o = ocrOf(); return (o.pages || []).slice(0, o.done || 0); }
+// ช่วงตั้งต้น: หน้าภาพสแกนหลังหน้าลายเซ็น (สิ่งที่ส่งมาด้วย) — ไม่มีก็หน้าภาพสแกนทั้งหมด / หน้าหลังลายเซ็น
+function ocrDefaults() {
+  const shown = D.pages.map(p => p.index), sig = D.sig_page || 1, found = markPages();
+  const scans = (D.scan_pages || []).filter(n => !found.includes(n));
+  const after = scans.filter(n => n > sig);
+  const pick = after.length ? after : scans.length ? scans : shown.filter(n => n > sig);
+  const list = pick.length ? pick : shown;
+  return [Math.min(...list), Math.max(...list)];
+}
+function ocrCount() {
+  const a = +$('ocrFrom').value, b = +$('ocrTo').value, found = markPages();
+  return D.pages.filter(p => p.index >= Math.min(a, b) && p.index <= Math.max(a, b) &&
+                             !found.includes(p.index)).length;
+}
+function durText(sec) {
+  sec = Math.max(1, Math.round(sec));
+  return sec < 90 ? `${thaiNum(sec)} วินาที` : `${thaiNum(Math.round(sec / 60))} นาที`;
+}
+function ocrEta() {
+  const o = ocrOf(), n = Math.min(ocrCount(), o.max_pages || 30);
+  $('ocrEta').textContent = n ? `${thaiNum(n)} หน้า ≈ ${durText(n * (o.sec_per_page || 15))}`
+                              : 'ไม่มีหน้าให้สแกน';
+  $('ocrGo').disabled = !n || !o.ready || ocrBusy();
+}
+function openOcr(open) {
+  $('ocrPanel').classList.toggle('hidden', !open);
+  if (!open) return;
+  const last = D.pages[D.pages.length - 1].index;
+  for (const f of ['ocrFrom', 'ocrTo']) { $(f).min = 1; $(f).max = last; }
+  if (!ocrBusy()) { const [a, b] = ocrDefaults(); $('ocrFrom').value = a; $('ocrTo').value = b; }
+  ocrShow();
+}
+$('ocrBtn').onclick = () => openOcr($('ocrPanel').classList.contains('hidden'));
+$('ocrClose').onclick = () => openOcr(false);
+for (const f of ['ocrFrom', 'ocrTo']) $(f).addEventListener('input', ocrEta);
+
+function ocrShow() {
+  const o = ocrOf(), busy = ocrBusy(), pages = o.pages || [], found = o.found || [];
+  const where = (list) => list.map(n => 'หน้า ' + thaiNum(n)).join(', ');
+  let msg;
+  if (!o.ready) msg = 'เซิร์ฟเวอร์นี้ยังไม่มีตัวอ่านภาพ (Tesseract ภาษาไทย) จึงสแกนไม่ได้ — ผู้ดูแลระบบต้องลงไว้ก่อน';
+  else if (busy) msg = o.current
+    ? `กำลังอ่านหน้า ${thaiNum(o.current)} (${thaiNum(o.done + 1)}/${thaiNum(pages.length)}) — ทำอย่างอื่นบนจอต่อได้`
+    : 'รอคิวสแกน...';
+  else if (o.status === 'done') msg = pages.length
+    ? (found.length ? `✅ พบชื่อโรงเรียนที่${where(found)} — ไฮไลท์ให้แล้ว`
+                    : `ไม่พบชื่อโรงเรียนในหน้า ${thaiNum(pages[0])}–${thaiNum(pages[pages.length - 1])} ` +
+                      '(ภาพไม่ชัดอาจอ่านไม่ออก ตรวจดูด้วยตาอีกครั้ง)') +
+      (o.cut ? ` · สแกนได้ครั้งละ ${thaiNum(o.max_pages)} หน้า ที่เหลือเลือกช่วงใหม่แล้วกดอีกครั้ง` : '')
+    : 'หน้าที่เลือกพบชื่อไปแล้ว ไม่ต้องสแกนซ้ำ';
+  else if (o.status === 'stopped') msg = `หยุดแล้ว — อ่านไป ${thaiNum(o.done)} จาก ${thaiNum(pages.length)} หน้า` +
+    (found.length ? ` พบชื่อที่${where(found)}` : '');
+  else if (o.status === 'error') msg = 'สแกนไม่สำเร็จ: ' + o.error;
+  else msg = `เลือกเฉพาะหน้าบัญชีรายชื่อ — อ่านหน้าละประมาณ ${durText(o.sec_per_page || 15)}`;
+  $('ocrMsg').textContent = msg;
+  $('ocrBar').classList.toggle('hidden', !busy);
+  $('ocrFill').style.width = busy && pages.length ? (o.done / pages.length * 100) + '%' : '0';
+  $('ocrGo').classList.toggle('hidden', busy);
+  $('ocrStop').classList.toggle('hidden', !busy);
+  $('ocrBtn').textContent = busy ? `🔎 ${thaiNum(o.done)}/${thaiNum(pages.length)}` : '🔎 สแกน';
+  ocrEta();
+}
+$('ocrGo').onclick = async () => {
+  $('ocrGo').disabled = true;
+  try {
+    const r = await fetch(`/api/doc/${JOB}/ocr`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ first: +$('ocrFrom').value, last: +$('ocrTo').value }) });
+    const d = await readJSON(r);
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'เริ่มสแกนไม่สำเร็จ');
+    D.ocr = d; ocrShow(); ocrPoll();
+  } catch (e) {
+    $('ocrMsg').textContent = e.message; $('ocrGo').disabled = false;
+  }
+};
+$('ocrStop').onclick = async () => {
+  const r = await fetch(`/api/doc/${JOB}/ocr/stop`, { method: 'POST' }).catch(() => null);
+  if (r && r.ok) { D.ocr = await readJSON(r); ocrShow(); }
+};
+// ถามความคืบหน้าทุก ๒ วินาทีจนกว่าจะเสร็จ — หน้าที่สแกนเจอชื่อ วาดแถบสีและไฮไลท์ให้ทันที
+async function ocrPoll() {
+  clearTimeout(ocrTimer);
+  let d;
+  try {
+    const r = await fetch(`/api/doc/${JOB}/ocr`);
+    if (!r.ok) return;
+    d = await readJSON(r);
+  } catch (e) { ocrTimer = setTimeout(ocrPoll, 4000); return; }
+  const before = markPages();
+  D.ocr = d; D.marks = d.marks;
+  const fresh = markPages().filter(n => !before.includes(n));
+  if (fresh.length) { drawMarks(); for (const n of fresh) hlPages.add(n); }
+  showMarks(); ocrShow();
+  if (ocrBusy()) ocrTimer = setTimeout(ocrPoll, 2000);
+}
 
 // ---------- เลือกหน้าที่จะส่งเข้า LINE ----------
 // เริ่มต้น: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้ (กติกาเดียวกับเซิร์ฟเวอร์ core.line_pages)
@@ -1023,7 +1167,7 @@ $('save').onclick = async () => {
     status = r.status;
     const d = await readJSON(r);
     if (!d.ok) throw new Error(d.detail || 'บันทึกไม่สำเร็จ');
-    dropDraft();
+    dropDraft(); clearTimeout(ocrTimer);
     $('app').classList.add('hidden'); $('savebar').classList.add('hidden');
     show('ok', `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>` +
       (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +

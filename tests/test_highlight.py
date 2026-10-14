@@ -160,6 +160,25 @@ class FindNameTests(unittest.TestCase):
         self.assertNotIn(4, self.marks)
         self.assertEqual(self.scans, {4})
 
+    def test_scan_with_a_hidden_text_layer_is_still_a_scan(self):
+        """"searchable PDF" scanners hide their own reading of the page under the picture -
+        for Thai mostly gibberish, so only text you can see counts against calling it a scan"""
+        path = os.path.join(self.work, "searchable.pdf")
+        picture = io.BytesIO()
+        Image.new("RGB", (1240, 1754), "white").save(picture, "PNG")
+        doc = pymupdf.open()
+        for hidden in (True, False):
+            p = doc.new_page(width=595, height=842)
+            p.insert_image(p.rect, stream=picture.getvalue())
+            for i in range(30):             # 30 lines x 40 = 1200 characters
+                p.insert_text((40, 40 + i * 25), "l1I ~rn^ ii,l lI1 rn~ 1l1 ,iI l1I~ ^rn ii",
+                              fontsize=10, render_mode=3 if hidden else 0)
+        doc.save(path)
+        doc.close()
+        marks, scans = core.find_name_marks(path, (1, 2))
+        self.assertEqual(scans, {1})       # page 2: the text is printed on the picture, plain to see
+        self.assertEqual(marks, {})
+
     def test_mark_lands_on_the_text_of_a_turned_page(self):
         (x0, y0, x1, y1), = self.marks[5]
         page = core.render_pdf_page(self.pdf, 5, 200)
