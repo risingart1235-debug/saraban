@@ -487,14 +487,17 @@ def page_order(total, blank_after=None):
 def auto_line_pages(used, order, marked=()):
     """หน้าที่ส่ง LINE ถ้าไม่ได้เลือกเอง: หน้าแรกถึงหน้าสุดท้ายที่มีของวาง (line_pages)
     นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น
-    marked = หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ ส่งด้วยถ้ายังไม่เต็มเพดาน ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม"""
+    marked = หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ ส่งให้เองเสมอ ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม — เกินเพดาน
+    เก็บหน้าแรก (ตรายาง) กับหน้าที่ลงเกษียณไว้ก่อน แล้วหน้าที่ไฮไลท์ ที่เหลือค่อยเป็นหน้าระหว่างกลาง
+    (กติกาเดียวกับหน้าจัดเอกสาร autoLinePages)"""
     last = max([order.index(n) + 1 for n in used if n in order] or [1])
     pages = [order[i - 1] for i in line_pages(last)]
-    for n in sorted({n for n in marked if n in order} - set(pages), key=order.index):
-        if len(pages) >= LINE_MAX_IMAGES:
-            break
-        pages.append(n)
-    return sorted(pages, key=order.index)
+    extra = [n for n in sorted({n for n in marked if n in order}, key=order.index) if n not in pages]
+    if not extra:
+        return pages
+    keep = list(dict.fromkeys([pages[0], pages[-1]]))         # ตรายาง + คำเกษียณ
+    between = [n for n in reversed(pages) if n not in keep]    # ใกล้หน้าที่ลงเกษียณก่อน
+    return sorted((keep + extra + between)[:LINE_MAX_IMAGES], key=order.index)
 
 
 def chosen_line_pages(chosen, total, has_blank, order=None):

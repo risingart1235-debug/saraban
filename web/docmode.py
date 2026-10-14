@@ -1102,6 +1102,15 @@ def finalize(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dic
     return result
 
 
+def _highlighted(payload: dict, page_no: int) -> bool:
+    """ป้ายสีชื่อโรงเรียนหน้านี้ไหม — highlight = เลขหน้าที่เปิดไฮไลท์ไว้บนจอ
+    (หน้าเว็บรุ่นก่อนส่ง true/false ทั้งเรื่อง ยังรับอยู่ เผื่อเปิดค้างไว้ตอนอัปเดตระบบ)"""
+    hl = payload.get("highlight")
+    if isinstance(hl, list):
+        return any(str(n).isdigit() and int(n) == page_no for n in hl)
+    return hl is True
+
+
 def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dict:
     """วางตรายาง+คำเกษียณ(+ลายเซ็น)ลงหน้าจริง รวมเป็น PDF ลงทะเบียน แล้วส่ง LINE"""
     date_str = normalize_typed_date(payload.get("date", "")) or get_thai_date()
@@ -1125,13 +1134,12 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
             out_pages[pi] = _render_pdf_page(job["pdf_path"], job["pages"][pi]["index"], DPI)[0].convert("RGBA")
         return out_pages[pi]
 
-    # ไฮไลท์ชื่อโรงเรียน (เปิดไว้บนจอ) — ป้ายก่อนวางของอื่น ตรายาง/คำเกษียณที่ทับจะได้ไม่ติดสีเหลือง
-    marked = set()          # เลขหน้าจริงที่ป้ายสีไว้ (ส่ง LINE ด้วยถ้าไม่ได้เลือกหน้าเอง)
-    if payload.get("highlight") is True:
-        for m in job.get("marks") or ():
-            if 0 <= m["page"] < len(job["pages"]):
-                paint_marks(layer(m["page"]), [(m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"])])
-                marked.add(job["pages"][m["page"]]["index"])
+    # ไฮไลท์ชื่อโรงเรียนเฉพาะหน้าที่เปิดไว้บนจอ — ป้ายก่อนวางของอื่น ตรายาง/คำเกษียณที่ทับจะได้ไม่ติดสีเหลือง
+    marked = set()          # เลขหน้าจริงที่ป้ายสีไว้ (ส่ง LINE ให้เองถ้าไม่ได้เลือกหน้าเอง)
+    for m in job.get("marks") or ():
+        if 0 <= m["page"] < len(job["pages"]) and _highlighted(payload, job["pages"][m["page"]]["index"]):
+            paint_marks(layer(m["page"]), [(m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"])])
+            marked.add(job["pages"][m["page"]]["index"])
 
     stamp_img = render_transparent_stamp(receipt_no, int(st.get("size_pct", 100)), date_str, time_str)
     pi = min(int(st.get("page", 0)), len(job["pages"]) - 1)
