@@ -33,6 +33,14 @@
   .ov img { width:100%; display:block; pointer-events:none }
   .ov.sel { outline:2px dashed #e91e63; outline-offset:2px }
   .ov.dragging { filter:drop-shadow(0 4px 10px rgba(0,0,0,.45)); z-index:20 }
+  /* ไฮไลท์ชื่อโรงเรียน — คูณสีแบบเดียวกับที่ป้ายลงไฟล์จริง ตัวหนังสือใต้แถบยังดำชัด */
+  .page .hl { position:absolute; background:#ffeb3b; mix-blend-mode:multiply; pointer-events:none }
+  #pages.nohl .hl { display:none }
+  #hlbox { margin-top:8px; padding:8px 10px; border-radius:8px; font-size:13px; line-height:1.6;
+           background:#fffde7; border:1px solid #fde68a; color:#713f12 }
+  #hlbox.none { background:#f8fafc; border-color:var(--line); color:var(--muted) }
+  #hlbox a { color:inherit; font-weight:700 }
+  #hlbox .btn { margin-top:6px }
 
   textarea {
     width:100%; min-height:110px; padding:10px; border:1px solid #c9ced6;
@@ -104,6 +112,11 @@
       <p class="tiny" id="meta" style="margin-top:6px; line-height:1.6"></p>
       <div id="warn" class="err hidden" style="margin-top:8px"></div>
       <p class="tiny hidden" id="knote" style="margin-top:8px; line-height:1.6"></p>
+      <!-- โหมดไฮไลท์ชื่อโรงเรียน (เปิดในตั้งค่าบัญชี) — บอกว่าเจอชื่อหน้าไหน ปิดเฉพาะเรื่องนี้ได้ -->
+      <div id="hlbox" class="hidden">
+        <div id="hlnote"></div>
+        <button class="btn grey small hidden" id="hlToggle"></button>
+      </div>
     </div>
 
     <!-- ส่วนใหญ่ค่าที่เตรียมมาให้ใช้ได้เลย ไม่ต้องแก้ จึงพับเก็บไว้ก่อน
@@ -303,6 +316,17 @@ function build() {
     if (p.index === blankAfter()) box.appendChild(blank);
   });
   if (!blank.parentNode) box.appendChild(blank);
+
+  // ไฮไลท์วางก่อนตรายาง/คำเกษียณ ของที่ลากมาทับจะได้อยู่บนแถบสี (ไฟล์จริงก็ป้ายก่อนวางของ)
+  for (const m of D.marks || []) {
+    const ps = D.pages[m.page], el = document.createElement('div');
+    el.className = 'hl'; el.dataset.page = m.page;
+    Object.assign(el.style, { left: m.x / ps.w * 100 + '%', top: m.y / ps.h * 100 + '%',
+                              width: m.w / ps.w * 100 + '%', height: m.h / ps.h * 100 + '%' });
+    pageEl(m.page).appendChild(el);
+  }
+  hlOn = !!D.highlight && markPages().length > 0;
+  showMarks();
 
   addOverlay('stamp', D.stamp);
   D.boxes.forEach(b => addOverlay(b.id, b));
@@ -741,6 +765,46 @@ $('sigFile').onchange = async () => {
   }
 };
 
+// ---------- ไฮไลท์ชื่อโรงเรียน ----------
+// เซิร์ฟเวอร์หาชื่อโรงเรียนจากตัวหนังสือในไฟล์ไว้ให้ทุกเรื่อง (D.marks) ป้ายสีเมื่อเปิดโหมดไฮไลท์
+// ในตั้งค่าบัญชี (D.highlight) — ปิดเฉพาะเรื่องนี้ได้ ไฟล์สแกนเป็นภาพไม่มีตัวหนังสือให้หา (D.scan_pages)
+let hlOn = false;
+function markPages() { return [...new Set((D.marks || []).map(m => D.pages[m.page].index))]; }
+function showMarks() {
+  $('pages').classList.toggle('nohl', !hlOn);
+  const box = $('hlbox'), found = markPages().sort((a, b) => a - b);
+  // ไม่พบชื่อ บอกเฉพาะเรื่องที่ขึ้นคำเตือนว่าอาจไม่ใช่ของเรา (ต้องตรวจบัญชีรายชื่อ)
+  // เรื่องที่ส่งถึงทุกโรงเรียนไม่มีชื่อเราอยู่แล้ว บอกทุกเรื่องก็รกจอเปล่าๆ
+  box.classList.toggle('hidden', !D.highlight || (!found.length && (!D.category || D.category === 'auto')));
+  box.classList.toggle('none', !found.length);
+  const scans = (D.scan_pages || []).filter(n => !found.includes(n));
+  const scanText = 'หน้า ' + scans.map(thaiNum).join(', ');
+  let html;
+  if (found.length) {
+    const links = found.map(n => `<a href="#" data-goto="${n}">หน้า ${thaiNum(n)}</a>`).join(', ');
+    html = `🖍️ พบชื่อโรงเรียนใน${links} — ` +
+      (hlOn ? 'ป้ายสีเหลืองให้แล้ว ติดไปในไฟล์ PDF และรูปที่ส่ง LINE' : 'เรื่องนี้ไม่ไฮไลท์') +
+      (scans.length ? `<br>${scanText} เป็นภาพสแกน ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา` : '');
+  } else if (scans.length >= D.pages.length) {
+    html = '🖍️ ไฟล์นี้เป็นภาพสแกน ระบบหาชื่อโรงเรียนให้ไม่ได้ — ตรวจดูด้วยตา';
+  } else if (scans.length) {
+    html = `🖍️ ไม่พบชื่อโรงเรียนในหน้าที่เป็นตัวหนังสือ — ${scanText} เป็นภาพสแกน ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา`;
+  } else {
+    html = '🖍️ ไม่พบชื่อโรงเรียนในเอกสารนี้';
+  }
+  $('hlnote').innerHTML = html;
+  $('hlToggle').classList.toggle('hidden', !found.length);
+  $('hlToggle').textContent = hlOn ? 'ไม่ต้องไฮไลท์เรื่องนี้' : '🖍️ ไฮไลท์ชื่อโรงเรียน';
+}
+$('hlToggle').onclick = () => { hlOn = !hlOn; showMarks(); showLine(); };
+$('hlbox').addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-goto]'); if (!a) return;
+  e.preventDefault();
+  const i = D.pages.findIndex(p => p.index === +a.dataset.goto);
+  const el = pageEl(i).querySelector('.hl') || pageEl(i);
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
 // ---------- เลือกหน้าที่จะส่งเข้า LINE ----------
 // เริ่มต้น: หน้าแรกถึงหน้าที่ลงเกษียณ/ลายเซ็นไว้ (กติกาเดียวกับเซิร์ฟเวอร์ core.line_pages)
 // และเปลี่ยนตามเวลาลากของไปหน้าอื่น จนกว่าจะแตะเลือกเอง — แตะแล้วยึดตามที่เลือก
@@ -763,7 +827,13 @@ function autoLinePages() {
   const last = Math.max(1, ...used.map(n => order.indexOf(n) + 1));
   const pos = last <= LINE_MAX ? Array.from({ length: last }, (_, k) => k + 1)
                                : [1, last - 2, last - 1, last];
-  return pos.map(p => order[p - 1]);
+  const pages = pos.map(p => order[p - 1]);
+  // หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ ส่งด้วยถ้ายังไม่เต็ม ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม LINE
+  if (hlOn) for (const n of markPages().sort(byOrder)) {
+    if (pages.length >= LINE_MAX) break;
+    if (!pages.includes(n)) pages.push(n);
+  }
+  return pages.sort(byOrder);
 }
 function linePages() { return linePick || autoLinePages(); }
 function showLine() {
@@ -797,7 +867,7 @@ function payload() {
                           size_pct: o.size_pct, wrap_pct: o.wrap_pct, indent_pct: o.indent_pct,
                           bg: o.bg, border: o.border, text: o.text });
   const g = D.sig;
-  return { date: $('d').value, time: $('t').value, line_pages: linePages(),
+  return { date: $('d').value, time: $('t').value, line_pages: linePages(), highlight: hlOn,
            stamp: strip(D.stamp), boxes: D.boxes.map(strip),
            signature: g ? { page: g.page, left_cm: g.left_cm, top_cm: g.top_cm,
                             size_pct: g.size_pct } : null };
@@ -855,6 +925,9 @@ async function restoreDraft(v) {
     const o = { page: pg(v.signature.page), left_cm: +v.signature.left_cm || 0,
                 top_cm: +v.signature.top_cm || 0, size_pct: +v.signature.size_pct || sigSize };
     try { await renderSig(o); placeSig(o); } catch (e) { /* ลบรูปลายเซ็นไปแล้ว ก็ข้าม */ }
+  }
+  if (D.highlight && typeof v.highlight === 'boolean') {
+    hlOn = v.highlight && markPages().length > 0; showMarks();
   }
   linePick = Array.isArray(v.pick) ? v.pick : null;
   showLine();

@@ -100,6 +100,7 @@ def _hide_console():
 # ==========================================
 NEWS_URL = 'https://office.sakonarea1.go.th/index.php?option=book&task=main/receive_mobile&saraban_index=19'
 PDF_RENDER_DPI = 200
+SCHOOL = "โรงเรียนบ้านโพนทองประชาอุทิศ"     # ทะเบียน (store) และโหมดไฮไลท์ชื่อโรงเรียนใช้ชื่อนี้
 
 # --- ค่าเริ่มต้นภายในโปรแกรม (ค่าสำรอง / fallback) ---
 # หมายเหตุ: ค่าจริงทั้งหมดย้ายไปเก็บที่ไฟล์ config.json แล้ว
@@ -483,11 +484,17 @@ def page_order(total, blank_after=None):
     return order
 
 
-def auto_line_pages(used, order):
+def auto_line_pages(used, order, marked=()):
     """หน้าที่ส่ง LINE ถ้าไม่ได้เลือกเอง: หน้าแรกถึงหน้าสุดท้ายที่มีของวาง (line_pages)
-    นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น"""
+    นับตามลำดับหน้าจริงในไฟล์ (page_order) — หน้ากระดาษเปล่าต่อจากหน้าลายเซ็นก็นับตรงนั้น
+    marked = หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ ส่งด้วยถ้ายังไม่เต็มเพดาน ผอ. จะได้เห็นชื่อที่ป้ายไว้ในกลุ่ม"""
     last = max([order.index(n) + 1 for n in used if n in order] or [1])
-    return [order[i - 1] for i in line_pages(last)]
+    pages = [order[i - 1] for i in line_pages(last)]
+    for n in sorted({n for n in marked if n in order} - set(pages), key=order.index):
+        if len(pages) >= LINE_MAX_IMAGES:
+            break
+        pages.append(n)
+    return sorted(pages, key=order.index)
 
 
 def chosen_line_pages(chosen, total, has_blank, order=None):
@@ -949,6 +956,133 @@ def place_kasien(page_img, text, *, indent_pct=100, size_pct=100, wrap_pct=100, 
     _, c0, r0 = min(near, key=lambda f: (-room(f[1], f[2], 1, 0, side),
                                          -room(f[1], f[2], 0, 1, extra), f[1], f[2]))
     return (c0 + clear) * _CELL - ink[0], (r0 + clear) * _CELL - ink[1], size, wrap
+
+
+# --- โหมดไฮไลท์ชื่อโรงเรียน (เปิด/ปิดได้ที่ตั้งค่าบัญชีบนหน้าเว็บ) ---
+# ธุรการเอาปากกาเน้นข้อความป้ายชื่อโรงเรียนเราในบัญชีรายชื่อแนบท้าย ผอ. จะได้เห็นทันทีว่าเกี่ยวกับเรา
+# ระบบหาชื่อจากตัวหนังสือในไฟล์ PDF แล้วป้ายสีให้ — ไฟล์สแกนเป็นภาพล้วนไม่มีตัวหนังสือให้ค้น หาเองไม่ได้
+MARK_RGB = (255, 235, 59)      # สีปากกาเน้นข้อความ วาดแบบคูณสี พื้นขาวเป็นเหลือง ตัวหนังสือยังดำชัด
+SCAN_TEXT_MIN = 40             # หน้าที่มีตัวอักษรในไฟล์น้อยกว่านี้ = ภาพสแกน
+
+# ฟอนต์อย่าง TH SarabunPSK เก็บสระ/วรรณยุกต์ตัวที่ขยับที่ไว้ย่าน Private Use (U+F700–U+F71A)
+# PDF ที่ส่งออกจาก Word จึงให้ "บ\uf714าน" แทน "บ้าน" — ตัวที่เป็นพยัญชนะมีแค่ ฐ กับ ญ ไม่มีเชิง
+# ที่เหลือเป็นสระบน/ล่างกับวรรณยุกต์ ซึ่งตัดทิ้งตอนเทียบอยู่แล้ว
+_THAI_PUA = {0xF700: "ฐ", 0xF70F: "ญ"}
+
+
+def _name_key(ch):
+    """ตัวอักษรที่ใช้เทียบชื่อ — ตัดสระบน/ล่าง วรรณยุกต์ และช่องว่างทิ้ง
+    (ใน PDF ตัวพวกนี้เพี้ยนบ่อย: เป็นตัว Private Use, สลับลำดับ, มีเว้นวรรคแทรกกลางคำ)"""
+    o = ord(ch)
+    if 0xF700 <= o <= 0xF71A:
+        return _THAI_PUA.get(o, "")
+    if ch == "ำ":
+        return "า"                     # บางไฟล์แยกเป็น นิคหิต + า
+    if o == 0x0E31 or 0x0E34 <= o <= 0x0E3A or 0x0E47 <= o <= 0x0E4E:
+        return ""
+    if ch.isspace() or o in (0x200B, 0x200C, 0x200D, 0xFEFF, 0x00AD):
+        return ""
+    return ch
+
+
+def _name_pattern(name=SCHOOL):
+    """ชื่อโรงเรียนแบบที่เจอในบัญชีรายชื่อ: มี "โรงเรียน"/"รร." นำหน้าหรือไม่ก็ได้ "บ้าน"/"บ." ก็ได้
+    ส่วนหลังคำว่าบ้าน (โพนทองประชาอุทิศ) ต้องมีเสมอ — แค่ "บ้านโพนทอง" คือโรงเรียนอื่น"""
+    key = lambda s: "".join(map(_name_key, s))
+    base = name[len("โรงเรียน"):] if name.startswith("โรงเรียน") else name
+    head = ""
+    if base.startswith("บ้าน") and len(key(base[len("บ้าน"):])) >= 6:
+        base, head = base[len("บ้าน"):], "(?:%s|%s)?" % (re.escape(key("บ้าน")), re.escape("บ."))
+    return re.compile("(?:%s|%s?)?" % (re.escape(key("โรงเรียน")), re.escape("รร."))
+                      + head + re.escape(key(base)))
+
+
+def _looks_scanned(page, nchars):
+    """หน้านี้เป็นภาพสแกนไหม — ตัวหนังสือในไฟล์แทบไม่มี หรือมีรูปเต็มหน้ากับตัวหนังสือนิดเดียว
+    (เช่นตราลงรับอิเล็กทรอนิกส์ที่ระบบสารบรรณพิมพ์ทับไฟล์สแกน) ไม่พบชื่อก็ยังบอกว่า "ไม่มี" ไม่ได้"""
+    if nchars < SCAN_TEXT_MIN:
+        return True
+    if nchars >= 400:
+        return False
+    area = page.rect.width * page.rect.height
+    return any((i["bbox"][2] - i["bbox"][0]) * (i["bbox"][3] - i["bbox"][1]) >= 0.5 * area
+               for i in page.get_image_info())
+
+
+def _mark_box(chars):
+    """กรอบป้ายสีของตัวอักษรชุดหนึ่งในบรรทัดเดียวกัน (หน่วยจุดของ PDF ก่อนหมุนหน้า)
+    เป็นแถบรอบตัวหนังสือ ไม่ใช่ความสูงบรรทัดเต็มของฟอนต์ ไม่งั้นแถวที่ชิดกันในตารางโดนป้ายไปด้วย"""
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for flat, c in chars:
+        x0, y0, x1, y1 = c["bbox"]
+        if flat:                       # แนวนอน: ตัดที่ว่างเหนือวรรณยุกต์/ใต้สระล่างที่ฟอนต์เผื่อไว้ออก
+            base = c["origin"][1]
+            y0, y1 = base - 0.85 * (base - y0), base + 0.55 * (y1 - base)
+        xs0.append(x0); ys0.append(y0); xs1.append(x1); ys1.append(y1)
+    pad = 0.12 * (max(ys1) - min(ys0))
+    return min(xs0) - pad, min(ys0), max(xs1) + pad, max(ys1)
+
+
+def find_name_marks(pdf_path, page_numbers, dpi=PDF_RENDER_DPI, name=SCHOOL):
+    """หาชื่อโรงเรียนจากตัวหนังสือในไฟล์ PDF สำหรับป้ายสีไฮไลท์
+
+    คืน (marks, scans)
+      marks = {เลขหน้า: [(x0, y0, x1, y1), ...]} พิกัดบนภาพหน้าที่เรนเดอร์ที่ dpi นี้
+              ชื่อที่ขึ้นบรรทัดใหม่กลางชื่อได้กรอบแยกบรรทัดละกรอบ
+      scans = เลขหน้าที่เป็นภาพสแกน หาชื่อไม่ได้ (ไม่พบชื่อในหน้าพวกนี้ไม่ได้แปลว่าไม่มี)
+    """
+    import pymupdf
+    pat = _name_pattern(name)
+    flags = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+    zoom = dpi / 72.0
+    marks, scans = {}, set()
+    with PDF_LOCK:
+        doc = pymupdf.open(pdf_path)
+        try:
+            for n in page_numbers:
+                if not 1 <= n <= doc.page_count:
+                    continue
+                page = doc[n - 1]
+                text, at = [], []      # ตัวอักษรที่ใช้เทียบ กับตัวอักษรจริงในไฟล์ (บรรทัดที่, แนวนอนไหม, ตัวอักษร)
+                lines = (l for b in page.get_text("rawdict", flags=flags)["blocks"]
+                         for l in b.get("lines", ()))
+                for li, line in enumerate(lines):
+                    flat = abs(line["dir"][1]) < 0.01
+                    for span in line["spans"]:
+                        for c in span["chars"]:
+                            k = _name_key(c["c"])
+                            if k:
+                                text.append(k)
+                                at.append((li, flat, c))
+                for m in pat.finditer("".join(text)):
+                    rows = {}
+                    for li, flat, c in at[m.start():m.end()]:
+                        rows.setdefault(li, []).append((flat, c))
+                    for row in rows.values():
+                        r = pymupdf.Rect(_mark_box(row)) * page.rotation_matrix   # หน้าที่ตั้งหมุนไว้
+                        marks.setdefault(n, []).append(
+                            (r.x0 * zoom, r.y0 * zoom, r.x1 * zoom, r.y1 * zoom))
+                if n not in marks and _looks_scanned(page, len(text)):
+                    scans.add(n)
+        finally:
+            doc.close()
+            release_pdf_cache()
+    return marks, scans
+
+
+def paint_marks(img, boxes, color=MARK_RGB):
+    """ป้ายสีปากกาเน้นข้อความลงภาพหน้าเอกสาร (แก้ภาพนี้เลย) — ต้องป้ายก่อนวางตรายาง/คำเกษียณ
+    ของที่วางทับจะได้ไม่ติดสีเหลืองไปด้วย"""
+    from PIL import ImageChops
+    for x0, y0, x1, y1 in boxes:
+        box = (max(0, int(x0)), max(0, int(y0)),
+               min(img.width, math.ceil(x1)), min(img.height, math.ceil(y1)))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        part = img.crop(box)
+        ink = Image.new(part.mode, part.size, tuple(color) + ((255,) if part.mode == "RGBA" else ()))
+        img.paste(ImageChops.multiply(part, ink), box[:2])
+    return img
 
 
 # =====================================================================

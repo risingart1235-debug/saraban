@@ -30,7 +30,7 @@ _mem_lock = threading.RLock()
 
 HEADERS = ['เลขทะเบียนรับ', 'ที่', 'ลงวันที่', 'จาก', 'ถึง', 'เรื่อง',
            'การปฏิบัติ', 'หมายเหตุ', 'วันที่ลงรับ']
-SCHOOL = "โรงเรียนบ้านโพนทองประชาอุทิศ"
+SCHOOL = core.SCHOOL
 # คอลัมน์ที่ถือว่าเป็นข้อมูลที่คนกรอกจริง (ใช้แยกแถวขยะที่มีแต่เลข)
 REG_DATA_COLS = (2, 3, 5)          # ลงวันที่ / จาก / เรื่อง
 REG_DATE_COLS = (8, 2)             # ดูวันที่ลงรับก่อน ไม่มีค่อยใช้ลงวันที่
@@ -185,7 +185,10 @@ def _send_row(no, doc_date, to, title, requester="", note=""):
 
 
 # คอลัมน์ของแท็บผู้ใช้ (เก็บเป็นคอลัมน์ ไม่ใช่ JSON ก้อนเดียว จะได้เปิดดูในชีตรู้เรื่อง)
-USER_COLS = ['username', 'salt', 'hash', 'display', 'role', 'status', 'created', 'must_change']
+# highlight = เปิดโหมดไฮไลท์ชื่อโรงเรียน (ตั้งค่าบัญชี) — เพิ่มทีหลัง ต่อท้ายเสมอ ห้ามแทรกกลาง
+USER_COLS = ['username', 'salt', 'hash', 'display', 'role', 'status', 'created', 'must_change',
+             'highlight']
+USER_FLAGS = ('must_change', 'highlight')      # คอลัมน์เปิด/ปิด เก็บในชีตเป็น TRUE / ว่าง
 
 
 class UsersMixin:
@@ -206,14 +209,15 @@ class UsersMixin:
             if not name:
                 continue
             u = {k: r[i] for i, k in enumerate(USER_COLS[1:], start=1)}
-            u["must_change"] = str(u.get("must_change", "")).lower() in ("true", "1", "yes")
+            for k in USER_FLAGS:
+                u[k] = str(u.get(k, "")).lower() in ("true", "1", "yes")
             out[name] = u
         return out
 
     @staticmethod
     def _rows_from_users(users: dict) -> list:
-        return [[name] + [("TRUE" if u.get("must_change") else "")
-                          if k == "must_change" else str(u.get(k, ""))
+        return [[name] + [("TRUE" if u.get(k) else "")
+                          if k in USER_FLAGS else str(u.get(k, ""))
                           for k in USER_COLS[1:]]
                 for name, u in users.items()]
 
@@ -1009,21 +1013,21 @@ class SheetsStore(StatusMixin, UsersMixin):
         c = getattr(self, "_users_cache", None)
         if c and now - c[0] < self.USERS_TTL:
             return c[1]
-        users = self._users_from_rows(self._get(self.TAB_USERS, "A:H")[1:])
+        users = self._users_from_rows(self._get(self.TAB_USERS, "A:I")[1:])
         self._users_cache = (now, users)
         return users
 
     def save_users(self, users: dict):
-        """เขียนทับทั้งแท็บ (ผู้ใช้มีไม่กี่คน เขียนทีเดียวจบง่ายกว่าไล่แก้ทีละแถว)"""
+        """เขียนทับทั้งแท็บ (ผู้ใช้มีไม่กี่คน เขียนทีเดียวจบง่ายกว่าไล่แก้ทีละแถว)
+        เขียนหัวตารางไปด้วยทุกครั้ง ชีตเก่าที่สร้างก่อนมีคอลัมน์ใหม่จะได้มีหัวคอลัมน์ครบ"""
         with _mem_lock:
             self._run(self._api.values().clear(
-                spreadsheetId=self.sheet_id, range=f"'{self.TAB_USERS}'!A2:H10000", body={}))
-            rows = self._rows_from_users(users)
-            if rows:
-                self._run(self._api.values().update(
-                    spreadsheetId=self.sheet_id,
-                    range=f"'{self.TAB_USERS}'!A2",
-                    valueInputOption="RAW", body={"values": rows}))
+                spreadsheetId=self.sheet_id, range=f"'{self.TAB_USERS}'!A2:I10000", body={}))
+            self._run(self._api.values().update(
+                spreadsheetId=self.sheet_id,
+                range=f"'{self.TAB_USERS}'!A1",
+                valueInputOption="RAW",
+                body={"values": [USER_COLS] + self._rows_from_users(users)}))
             self._users_cache = None
             self._drop_cache()
 

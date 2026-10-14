@@ -661,7 +661,28 @@ def api_me(user: str = Depends(current_user)):
             "is_admin": u.get("role") == "admin",
             "pending": pending if u.get("role") == "admin" else 0,
             "drive_url": core.load_config().get("drive_url", "").strip(),
-            "must_change": bool(u.get("must_change"))}
+            "must_change": bool(u.get("must_change")),
+            "highlight": bool(u.get("highlight"))}
+
+
+@app.post("/api/me/settings")
+async def api_my_settings(request: Request, user: str = Depends(current_user)):
+    """ตั้งค่าบัญชีของตัวเอง — ตอนนี้มีโหมดไฮไลท์ชื่อโรงเรียน (เก็บกับบัญชี ใช้ได้ทุกเครื่อง)"""
+    d = await request.json()
+    if not isinstance(d.get("highlight"), bool):
+        raise HTTPException(status_code=400, detail="ค่าตั้งค่าไม่ถูกต้อง")
+
+    def work():
+        users = load_users(raise_on_error=True)
+        if user not in users:
+            raise HTTPException(status_code=404, detail="ไม่พบบัญชีนี้")
+        users[user]["highlight"] = d["highlight"]
+        save_users(users)
+    try:
+        await asyncio.to_thread(work)            # อ่าน/เขียนชีต ห้ามขวาง event loop
+    except StoreDown:
+        raise HTTPException(status_code=503, detail="เชื่อมต่อฐานข้อมูลผู้ใช้ไม่ได้ชั่วคราว ลองใหม่อีกครั้ง")
+    return {"ok": True, "highlight": d["highlight"]}
 
 
 @app.post("/api/admin/drive")
@@ -1228,11 +1249,14 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
     keys = ("status", "receipt_no", "doc_no", "doc_title", "doc_date", "sender",
             "emoji", "recipient", "category", "pages", "stamp", "boxes",
-            "total_pages", "sig_page", "redo_no", "book_id", "source", "all_pages")
+            "total_pages", "sig_page", "redo_no", "book_id", "source", "all_pages",
+            "marks", "scan_pages")
     out = {k: job.get(k) for k in keys}
     out["date"] = get_thai_date()
     out["time"] = get_thai_time_rounded()
     out["cm"] = docmode.CM
+    # ชื่อโรงเรียนที่หาเจอ (marks) หาไว้ทุกเรื่อง ป้ายสีให้เมื่อคนที่เปิดตั้งโหมดไฮไลท์ไว้ในบัญชี
+    out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
     return out
 
 

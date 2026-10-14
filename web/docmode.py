@@ -29,7 +29,7 @@ from web import signature as sigmod
 from core import (
     Image,
     render_transparent_stamp, render_transparent_kasien,
-    find_stamp_pos, place_kasien, kasien_clear_at,
+    find_stamp_pos, place_kasien, kasien_clear_at, find_name_marks, paint_marks,
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
     format_scraped_date, get_next_receipt_no, page_order, auto_line_pages, chosen_line_pages,
@@ -904,13 +904,17 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     kpage = (next((i for i, pg in enumerate(pages) if pg["index"] == sig_page), 0)
              if psig is not None else 0)
 
+    # ชื่อโรงเรียนในเอกสาร — หาไว้ทุกเรื่อง (ไม่ถึงวินาที) ส่วนจะป้ายสีไหมขึ้นกับตั้งค่าบัญชีของคนที่เปิด
+    # (เรื่องจากมือถือเตรียมไว้ก่อนมีใครเปิด จึงยังไม่รู้ว่าใครจะเป็นคนลงรับ)
+    marks, scan_pages = _find_marks(pdf_path, pages)
+
     _set(job,
          status="ready", step="พร้อมแล้ว",
          pdf_path=pdf_path, book_id=book_id, total_pages=total, sig_page=sig_page,
          redo_no=(str(redo_no) if redo_no else None),
          doc_no=doc_no, doc_title=doc_title, doc_date=doc_date, sender=sender,
          emoji=emoji, attach=attach, recipient=recipient, category=category,
-         all_pages=all_pages,
+         all_pages=all_pages, marks=marks, scan_pages=scan_pages,
          receipt_no=receipt_no, pages=pages,
          stamp={"size_pct": 100, "page": 0,
                 "left_cm": round(sx / CM, 2), "top_cm": round(sy / CM, 2),
@@ -921,6 +925,19 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                  "left_cm": round(kx / CM, 2), "top_cm": round(ky / CM, 2),
                  "fitted": kclear,             # False = ทับตัวหนังสืออยู่ หน้าจอบอกให้ลากย้าย
                  "png": _png_uri(kbox), "w": kbox.width, "h": kbox.height}])
+
+
+def _find_marks(pdf_path: str, pages: list) -> tuple:
+    """ที่ป้ายสีชื่อโรงเรียนบนหน้าที่แสดง [{page: ลำดับหน้าบนจอ, x, y, w, h}] (จุดที่ DPI เต็ม)
+    กับเลขหน้าที่เป็นภาพสแกนซึ่งหาชื่อไม่ได้ — หาไม่สำเร็จ (ไฟล์แปลก) ถือว่าทุกหน้าต้องดูเอง"""
+    try:
+        found, scans = find_name_marks(pdf_path, [pg["index"] for pg in pages], DPI)
+    except Exception as e:
+        print(f"หาชื่อโรงเรียนในไฟล์ไม่สำเร็จ: {type(e).__name__}: {e}")
+        return [], sorted(pg["index"] for pg in pages)
+    marks = [{"page": i, "x": round(x0), "y": round(y0), "w": round(x1 - x0), "h": round(y1 - y0)}
+             for i, pg in enumerate(pages) for x0, y0, x1, y1 in found.get(pg["index"], ())]
+    return marks, sorted(scans)
 
 
 def _blank_size(job) -> tuple:
@@ -1108,6 +1125,14 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
             out_pages[pi] = _render_pdf_page(job["pdf_path"], job["pages"][pi]["index"], DPI)[0].convert("RGBA")
         return out_pages[pi]
 
+    # ไฮไลท์ชื่อโรงเรียน (เปิดไว้บนจอ) — ป้ายก่อนวางของอื่น ตรายาง/คำเกษียณที่ทับจะได้ไม่ติดสีเหลือง
+    marked = set()          # เลขหน้าจริงที่ป้ายสีไว้ (ส่ง LINE ด้วยถ้าไม่ได้เลือกหน้าเอง)
+    if payload.get("highlight") is True:
+        for m in job.get("marks") or ():
+            if 0 <= m["page"] < len(job["pages"]):
+                paint_marks(layer(m["page"]), [(m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"])])
+                marked.add(job["pages"][m["page"]]["index"])
+
     stamp_img = render_transparent_stamp(receipt_no, int(st.get("size_pct", 100)), date_str, time_str)
     pi = min(int(st.get("page", 0)), len(job["pages"]) - 1)
     used.add(pdf_page(pi))
@@ -1212,7 +1237,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         if isinstance(chosen, list):            # เลือกเองบนหน้าจอ (ไม่เลือกสักหน้า = ข้อความอย่างเดียว)
             pages = chosen_line_pages(chosen, total, blank is not None, order)
         else:                                   # หน้าเว็บรุ่นเก่าไม่ได้ส่งมา ใช้กติกาเดิม
-            pages = auto_line_pages(used, order)
+            pages = auto_line_pages(used, order, marked)
         urls = []
         for n in pages:
             if n > total:                       # หน้ากระดาษเปล่าที่ลงเกษียณไว้

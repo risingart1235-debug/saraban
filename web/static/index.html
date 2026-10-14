@@ -46,6 +46,11 @@
   #profMenu .sigbox { background:#fff; border:1px dashed #b6bcc6; border-radius:8px;
                       padding:8px; text-align:center; margin-bottom:8px }
   #profMenu .sigbox img { max-width:100%; max-height:90px }
+  /* สวิตช์เปิด/ปิดในตั้งค่าบัญชี — ทั้งแถวกดได้ นิ้วไม่ต้องเล็งช่องติ๊กเล็กๆ */
+  #profMenu label.tgl { display:flex; align-items:center; gap:10px; margin:0 0 6px; min-height:40px;
+                        font-size:15px; color:var(--text); cursor:pointer }
+  #profMenu label.tgl input { width:22px; height:22px; margin:0; flex:none; accent-color:var(--blue) }
+  .hlmark { background:#ffeb3b; padding:0 3px; border-radius:2px }
   #profMenu .pout {
     width:100%; min-height:50px; border:0; border-top:1px solid var(--line);
     background:#fff5f5; color:#b91c1c; font-family:inherit; font-size:15px;
@@ -102,6 +107,18 @@
     <button class="btn grey small" id="sigPick">📷 เลือกรูปลายเซ็น</button>
     <input id="sigFile" type="file" accept="image/*" class="hidden">
     <button class="btn grey small hidden" id="sigRemove" style="margin-top:8px;color:#b91c1c">ลบรูปลายเซ็น</button>
+  </div>
+
+  <!-- โหมดไฮไลท์ชื่อโรงเรียน — ป้ายสีชื่อโรงเรียนในเอกสาร (เช่น บัญชีรายชื่อแนบท้าย) ให้ ผอ. เห็นทันที -->
+  <div class="pbody" style="border-top:1px solid var(--line)">
+    <div class="psec">🖍️ ไฮไลท์ชื่อโรงเรียน</div>
+    <div id="hlMsg" class="hidden"></div>
+    <label class="tgl" for="hlOn"><input type="checkbox" id="hlOn" disabled>
+      ป้ายสีชื่อโรงเรียนในเอกสารให้เอง</label>
+    <p class="tiny" style="margin:0">ระบบหาชื่อ <span class="hlmark">โรงเรียนบ้านโพนทองประชาอุทิศ</span>
+      ในหนังสือที่ลงรับ (เช่น บัญชีรายชื่อแนบท้าย) แล้วป้ายสีเหลืองเหมือนปากกาเน้นข้อความ
+      ทั้งในไฟล์ PDF และรูปที่ส่ง LINE — ตรวจดูหรือปิดเฉพาะเรื่องได้ในหน้าจัดเอกสาร<br>
+      ใช้ได้กับไฟล์ที่มีตัวหนังสือ ไฟล์สแกนเป็นภาพระบบอ่านชื่อเองไม่ได้</p>
   </div>
 
   <button class="pout" id="out">🚪 ออกจากระบบ</button>
@@ -191,6 +208,8 @@ fetch('/api/me').then(r => r.json()).then(d => {
     $('dot').classList.remove('hidden');
     openMenu(true);                 // ยังใช้รหัสชั่วคราว -> เปิดเมนูให้เลย
   }
+  $('hlOn').checked = !!d.highlight;
+  $('hlOn').disabled = false;
   if (d.drive_url) {
     const b = $('driveBtn');
     b.href = d.drive_url;
@@ -273,6 +292,26 @@ $('sigRemove').onclick = async () => {
   const r = await fetch('/api/me/signature', { method: 'DELETE' });
   if (r.ok) { showSig(''); sigNote('ok', 'ลบรูปลายเซ็นแล้ว'); }
   else sigNote('err', 'ลบไม่สำเร็จ');
+};
+
+// ---------- โหมดไฮไลท์ชื่อโรงเรียน (เก็บกับบัญชี ใช้ได้ทุกเครื่อง) ----------
+$('hlOn').onchange = async () => {
+  const box = $('hlOn'), on = box.checked, m = $('hlMsg');
+  box.disabled = true;
+  try {
+    const r = await fetch('/api/me/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ highlight: on }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'บันทึกไม่สำเร็จ');
+    m.className = 'ok';
+    m.textContent = on ? 'เปิดโหมดไฮไลท์แล้ว — ใช้กับเรื่องที่เปิดจากนี้ไป' : 'ปิดโหมดไฮไลท์แล้ว';
+  } catch (e) {
+    box.checked = !on;                 // บันทึกไม่ได้ ให้สวิตช์กลับไปตรงกับของจริง
+    m.className = 'err'; m.textContent = e.message;
+  } finally {
+    box.disabled = false;
+  }
 };
 
 $('out').onclick = async () => {
