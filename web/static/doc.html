@@ -36,6 +36,18 @@
     cursor:pointer;
   }
   .page .hbtn.on { background:#ffeb3b; border-color:#eab308; color:#713f12; font-weight:700 }
+  /* หน้ากระดาษเปล่าไม่แสดงไว้ก่อน — ปุ่มแทรกอยู่ตรงที่หน้านั้นจะไปอยู่ (ต่อจากหน้าที่มีลายเซ็น) */
+  .addblank { display:block; width:100%; margin:0 0 14px; padding:10px; min-height:44px;
+              border:2px dashed rgba(255,255,255,.8); border-radius:10px; background:rgba(255,255,255,.14);
+              color:#fff; font-size:14px; font-family:inherit; cursor:pointer }
+  .addblank:last-child { margin-bottom:0 }
+  .page .xbtn {
+    pointer-events:auto; margin-top:4px; border:1px solid #fca5a5; background:rgba(255,255,255,.95);
+    color:#b91c1c; border-radius:999px; padding:3px 10px; font-size:12px; font-family:inherit;
+    cursor:pointer;
+  }
+  .page .bhint { position:absolute; left:6%; right:6%; top:40%; text-align:center; color:#9ca3af;
+                 font-size:13px; line-height:1.7; pointer-events:none }
   .ov { position:absolute; cursor:grab; touch-action:none; }
   .ov img { width:100%; display:block; pointer-events:none }
   .ov.sel { outline:2px dashed #e91e63; outline-offset:2px }
@@ -291,6 +303,7 @@ function backLabel() {
   return (D && D.book_id) ? '⬅️ ลงรับเรื่องต่อไป' : 'กลับหน้าแรก';
 }
 let D = null, sel = null;          // D = ข้อมูลงาน, sel = กล่องที่เลือกอยู่
+let blankOn = false;               // แทรกหน้ากระดาษเปล่าไว้หรือยัง (กดแทรกเอง)
 
 function show(kind, html) {
   const m = $('msg'); m.className = kind; m.innerHTML = html;
@@ -345,17 +358,17 @@ function build() {
   $('ssv').textContent = D.stamp.size_pct + '%';
   $('stampPrev').src = D.stamp.png;
 
-  // หน้าเอกสาร + หน้ากระดาษเปล่าไว้วางคำเกษียณ แทรกต่อจากหน้าที่มีลายเซ็น (ในไฟล์ก็อยู่ตรงนั้น)
-  // เดิมต่อท้ายเล่ม พอแสดงทุกหน้า คำเกษียณที่ไม่มีที่ลงไปโผล่หลังสิ่งที่ส่งมาด้วยทั้งหมด ห่างลายเซ็น
-  const box = $('pages'); box.innerHTML = '';
-  const bs = blankSize();
-  const blank = mkPage(D.pages.length, `หน้ากระดาษเปล่า (แทรกต่อจากหน้า ${blankAfter()})`, null,
-                       bs.w, bs.h, D.total_pages + 1);
+  // หน้าเอกสาร + ปุ่ม ➕ แทรกหน้ากระดาษเปล่า ตรงที่หน้านั้นจะไปอยู่ (ต่อจากหน้าที่มีลายเซ็น ในไฟล์ก็อยู่ตรงนั้น)
+  // เดิมแสดงหน้ากระดาษเปล่าไว้ทุกเรื่อง ขวางกลางเล่มระหว่างหนังสือนำกับสิ่งที่ส่งมาด้วย ทั้งที่ไม่ค่อยได้ใช้
+  const box = $('pages'); box.innerHTML = ''; blankOn = false;
+  const slot = document.createElement('button');
+  slot.id = 'addBlank'; slot.className = 'addblank';
+  slot.textContent = `➕ แทรกหน้ากระดาษเปล่าต่อจากหน้า ${blankAfter()}`;
   D.pages.forEach((p, i) => {
     box.appendChild(mkPage(i, p.name, p.png, p.w, p.h, p.index));
-    if (p.index === blankAfter()) box.appendChild(blank);
+    if (p.index === blankAfter()) box.appendChild(slot);
   });
-  if (!blank.parentNode) box.appendChild(blank);
+  if (!slot.parentNode) box.appendChild(slot);
 
   drawMarks();
   hlPages = new Set(D.highlight ? markPages() : []);     // ตั้งค่าบัญชี = ไฮไลท์ให้เองตั้งแต่เปิดเรื่อง
@@ -413,6 +426,50 @@ function blankAfter() { return Math.max(1, Math.min(D.sig_page || 1, D.total_pag
 function blankSize() { return D.pages.find(p => p.index === D.sig_page) || D.pages[0]; }
 function pageSize(i) { return i < D.pages.length ? D.pages[i] : blankSize(); }
 
+// ---------- หน้ากระดาษเปล่า (กดแทรกเอง) ----------
+// ไว้ลงคำเกษียณเมื่อข้างลายเซ็นผู้ส่งไม่มีที่ — แทรกแล้วอยู่ในไฟล์ด้วยเสมอตามที่เห็นบนจอ
+// (วางของหรือไม่ก็ตาม) ไม่ใช้ก็กด ✕ เอาออก
+function insertBlank(scroll) {
+  if (blankOn) return;
+  const bs = blankSize();
+  const el = mkPage(D.pages.length, `หน้ากระดาษเปล่า (แทรกต่อจากหน้า ${blankAfter()})`, null,
+                    bs.w, bs.h, D.total_pages + 1);
+  el.querySelector('.phead').insertAdjacentHTML('beforeend',
+    '<button class="xbtn" id="dropBlank">✕ เอาหน้านี้ออก</button>');
+  el.insertAdjacentHTML('beforeend', '<div class="bhint" id="blankHint">' +
+    'ลากคำเกษียณหรือลายเซ็นมาวางบนหน้านี้ได้<br>' +
+    `หน้านี้จะอยู่ในไฟล์ต่อจากหน้า ${blankAfter()}<br>ไม่ใช้ กด ✕ เอาหน้านี้ออก</div>`);
+  $('addBlank').after(el);
+  $('addBlank').classList.add('hidden');
+  blankOn = true;
+  showLine();
+  if (scroll) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+// เอาออก — ของที่วางไว้บนหน้านี้กลับไปหน้าที่มีลายเซ็น: คำเกษียณจัดชิดลายเซ็นผู้ส่งแบบปุ่ม 📍
+// (ลายเซ็นผู้ลงรับใต้กล่องย้ายตาม) ที่เหลือวางตำแหน่งเดิมบนหน้านั้น
+async function dropBlank() {
+  const bi = D.pages.length, btn = $('dropBlank');
+  const here = [D.stamp, ...D.boxes, D.sig].filter(o => o && o.page === bi);
+  if (here.length && !confirm('เอาหน้ากระดาษเปล่าออกใช่ไหม?\n\n' +
+                              'ของที่วางบนหน้านี้ (คำเกษียณ ลายเซ็น ตรายาง) จะย้ายกลับไปหน้าที่มีลายเซ็น')) return;
+  btn.disabled = true;
+  try {
+    for (const b of D.boxes.filter(x => x.page === bi)) await fitBox(b, sigUnder(b) ? D.sig : null);
+  } catch (e) {
+    alert(e.message); btn.disabled = false; return;
+  }
+  const sp = Math.max(0, D.pages.findIndex(p => p.index === blankAfter()));
+  for (const o of [D.stamp, D.sig]) {
+    if (!o || o.page !== bi) continue;
+    o.page = sp; pageEl(sp).appendChild(o._el); clamp(o); posOverlay(o);
+  }
+  pageEl(bi).remove();
+  $('addBlank').classList.remove('hidden');
+  blankOn = false;
+  if (linePick) linePick = linePick.filter(n => n <= D.total_pages);
+  showLine();
+}
+
 function addOverlay(id, o) {
   const el = document.createElement('div');
   el.className = 'ov'; el.dataset.id = id;
@@ -466,8 +523,8 @@ function onMove(e) {
   o.top_cm  += (e.clientY - drag.y) * cmPerPx;
   drag.x = e.clientX; drag.y = e.clientY;
 
-  // ลากข้ามไปหน้าอื่น — ดูว่าปลายนิ้วอยู่เหนือหน้าไหน
-  for (const p of $('pages').children) {
+  // ลากข้ามไปหน้าอื่น — ดูว่าปลายนิ้วอยู่เหนือหน้าไหน (ข้ามปุ่มแทรกหน้ากระดาษเปล่าที่คั่นอยู่)
+  for (const p of $('pages').querySelectorAll('.page')) {
     const r = p.getBoundingClientRect();
     if (e.clientY >= r.top && e.clientY <= r.bottom) {
       const ni = +p.dataset.index;
@@ -1006,7 +1063,7 @@ function itemPages() {
 }
 function autoLinePages() {
   const used = itemPages();
-  const order = pageOrder(used.includes(D.total_pages + 1));
+  const order = pageOrder(blankOn || used.includes(D.total_pages + 1));
   const last = Math.max(1, ...used.map(n => order.indexOf(n) + 1));
   const pos = last <= LINE_MAX ? Array.from({ length: last }, (_, k) => k + 1)
                                : [1, last - 2, last - 1, last];
@@ -1025,8 +1082,13 @@ function showLine() {
   $('lineSum').textContent = names.length
     ? 'ส่งเข้า LINE: หน้า ' + names.join(', ')
     : 'ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป';
+  // คำแนะนำกลางหน้ากระดาษเปล่า หายไปเมื่อวางของบนหน้านั้นแล้ว
+  const hint = $('blankHint');
+  if (hint) hint.classList.toggle('hidden', itemPages().includes(D.total_pages + 1));
 }
 $('pages').addEventListener('click', (e) => {
+  if (e.target.closest('#addBlank')) { insertBlank(true); return; }
+  if (e.target.closest('#dropBlank')) { dropBlank(); return; }
   const h = e.target.closest('.hbtn');
   if (h) { setHighlight([+h.dataset.hl], !hlPages.has(+h.dataset.hl)); return; }
   const b = e.target.closest('.lbtn'); if (!b) return;
@@ -1047,7 +1109,7 @@ function payload() {
                           bg: o.bg, border: o.border, text: o.text });
   const g = D.sig;
   return { date: $('d').value, time: $('t').value, line_pages: linePages(),
-           highlight: [...hlPages].sort((a, b) => a - b),
+           highlight: [...hlPages].sort((a, b) => a - b), blank: blankOn,
            stamp: strip(D.stamp), boxes: D.boxes.map(strip),
            signature: g ? { page: g.page, left_cm: g.left_cm, top_cm: g.top_cm,
                             size_pct: g.size_pct } : null };
@@ -1073,6 +1135,10 @@ function takeDraft() {
 
 async function restoreDraft(v) {
   const pg = (n) => Math.max(0, Math.min(Math.floor(+n) || 0, D.pages.length));  // ท้ายสุด = หน้ากระดาษเปล่า
+  // หน้ากระดาษเปล่าที่แทรกไว้ (หรือมีของวางอยู่ — ฉบับที่จัดจากหน้าจอรุ่นก่อน) แทรกคืนก่อนวางของ
+  const onBlank = (o) => !!o && pg(o.page) === D.pages.length;
+  if (v.blank === true || onBlank(v.stamp) || (v.boxes || []).some(onBlank) || onBlank(v.signature))
+    insertBlank(false);
   // วันที่/เวลาลงรับ ใส่คืนเฉพาะที่จัดไว้วันนี้ ข้ามวันแล้วใช้ของวันนี้ตามปกติ
   if (new Date(v.at).toDateString() === new Date().toDateString()) {
     if (v.date) $('d').value = v.date;

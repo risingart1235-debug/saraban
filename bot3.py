@@ -1228,6 +1228,8 @@ class SarabanApp(tk.Tk):
         self._page_tk = {}           # เลขหน้า -> (ซูม, ภาพที่ย่อแล้ว) ของหน้าที่วาดอยู่
         self._page_images_pending = False
         self.line_pick = None        # None = ยังไม่ได้เลือกหน้าที่ส่ง LINE เอง ใช้ค่าอัตโนมัติ
+        self.blank_on = False        # แทรกหน้ากระดาษเปล่าไว้ไหม (กดปุ่มแทรกบนหัวหน้าที่มีลายเซ็นเอง)
+        self._blank_btn = None       # ปุ่มแทรก/เอาออกหน้ากระดาษเปล่า (กรอบ, ข้อความ) บนผืน
         self._stamp_key = None       # หน้าต่างใหม่ ต้องวาดตรายางใหม่เสมอ (เลขรับอาจซ้ำเรื่องก่อนที่ไม่ได้รับ)
         vbar = tk.Scrollbar(left_frame, orient="vertical")
         hbar = tk.Scrollbar(left_frame, orient="horizontal")
@@ -1304,8 +1306,10 @@ class SarabanApp(tk.Tk):
         # ปล่อยเมาส์ = ของอาจย้ายไปอยู่หน้าอื่น หน้าที่ส่ง LINE (แบบอัตโนมัติ) เปลี่ยนตาม
         self.canvas.tag_bind("draggable", "<ButtonRelease-1>", lambda e: self._refresh_line_buttons())
         self.canvas.tag_bind("linebtn", "<ButtonPress-1>", self.on_line_toggle)
-        self.canvas.tag_bind("linebtn", "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
-        self.canvas.tag_bind("linebtn", "<Leave>", lambda e: self.canvas.config(cursor=""))
+        self.canvas.tag_bind("blankbtn", "<ButtonPress-1>", self.toggle_blank_page)
+        for tag in ("linebtn", "blankbtn"):
+            self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
+            self.canvas.tag_bind(tag, "<Leave>", lambda e: self.canvas.config(cursor=""))
 
         self.add_kasien_box(text=self.doc_info['ai_text'], render=False)
         self.is_first_load = True
@@ -1399,7 +1403,7 @@ class SarabanApp(tk.Tk):
 
     def build_pages(self):
         """จัดหน้าเอกสารเรียงลงมา: ทุกหน้าของ PDF (ไม่เกิน PREVIEW_MAX_PAGES) กับหน้ากระดาษเปล่า
-        ที่แทรกต่อจากหน้าที่มีลายเซ็นผู้ส่ง (ในไฟล์ที่บันทึกก็อยู่ตรงนั้น — core.page_order)
+        ถ้ากดแทรกไว้ — ต่อจากหน้าที่มีลายเซ็นผู้ส่ง (ในไฟล์ที่บันทึกก็อยู่ตรงนั้น — core.page_order)
 
         หน้าแรกกับหน้าที่มีลายเซ็นผู้ส่ง ย่อ/เลื่อนเนื้อหาได้ (ปุ่มปรับขนาดเนื้อหาข่าว) จึงเก็บภาพเต็มไว้
         หน้าอื่นอ่านจากไฟล์ตอนจะวาดบนจอหรือตอนบันทึก ไม่ต้องกอดภาพเต็มของทุกหน้าไว้ในหน่วยความจำ
@@ -1438,9 +1442,9 @@ class SarabanApp(tk.Tk):
                     f"หน้า {to_thai_digits(n)}")
             layout.append({'n': n, 'y': y, 'w': w, 'h': h, 'name': name})
             y += h + self.gap
-            if n == sig_page:
+            if n == sig_page and self.blank_on:
                 # หน้ากระดาษเปล่าไว้ลงเกษียณเมื่อหน้าลายเซ็นไม่มีที่ — ติดหน้าลายเซ็น ขนาดเท่ากัน
-                # (เดิมต่อท้ายเล่ม คำเกษียณไปอยู่หลังสิ่งที่ส่งมาด้วยทั้งหมด ห่างลายเซ็นหลายหน้า)
+                # มีเฉพาะตอนกดแทรกเอง (เดิมแสดงไว้ทุกเรื่อง ขวางกลางเล่มก่อนสิ่งที่ส่งมาด้วย)
                 bw, bh = self.page_full[sig_page].size
                 layout.append({'n': doc['total_pages'] + 1, 'y': y, 'w': bw, 'h': bh, 'blank': True,
                                'name': f"หน้ากระดาษเปล่า (แทรกต่อจากหน้า {to_thai_digits(sig_page)})"})
@@ -1589,9 +1593,9 @@ class SarabanApp(tk.Tk):
     # เวลาลากของไปหน้าอื่น จนกว่าจะกดเลือกเอง — กดแล้วยึดตามที่เลือก
     def _page_order(self, used=None):
         """ลำดับหน้าในไฟล์ที่บันทึก (core.page_order) — หน้ากระดาษเปล่าแทรกต่อจากหน้าลายเซ็น
-        ส่ง used มา = นับหน้ากระดาษเปล่าเฉพาะตอนมีของวางไว้ (ไม่มีก็ไม่อยู่ในไฟล์)"""
+        ส่ง used มา = ลำดับจริงในไฟล์ (หน้ากระดาษเปล่ามีเมื่อกดแทรกไว้) / ไม่ส่ง = ไว้เรียงลำดับเฉยๆ"""
         total = self.doc_info['total_pages']
-        with_blank = used is None or total + 1 in used
+        with_blank = used is None or self.blank_on or total + 1 in used
         return page_order(total, self.doc_info['sig_page'] if with_blank else None)
 
     def _auto_line_pages(self):
@@ -1625,6 +1629,69 @@ class SarabanApp(tk.Tk):
         self.line_summary.config(text=(
             "📤 ส่งเข้า LINE: หน้า " + ", ".join(names) if names else
             "📤 ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป"))
+        self._place_blank_button()
+
+    # ---------- หน้ากระดาษเปล่า (กดแทรกเอง) ----------
+    def _place_blank_button(self):
+        """ปุ่มข้างปุ่ม LINE: บนหัวหน้าที่มีลายเซ็น = ➕ แทรกหน้ากระดาษเปล่า / บนหัวหน้ากระดาษเปล่า = ✕ เอาออก"""
+        c = self.canvas
+        n = self.doc_info['total_pages'] + 1 if self.blank_on else self.doc_info['sig_page']
+        it = self._page_items.get(n)
+        if it is None:
+            return
+        if self._blank_btn is None:
+            self._blank_btn = (c.create_rectangle(0, 0, 1, 1, tags=('page', 'blankbtn')),
+                               c.create_text(0, 0, anchor='w', font=("Helvetica", 9, "bold"),
+                                             tags=('page', 'blankbtn')))
+        rect, text = self._blank_btn
+        red = self.blank_on
+        c.itemconfig(text, text="✕ เอาหน้านี้ออก" if red else "➕ แทรกหน้ากระดาษเปล่าต่อจากหน้านี้",
+                     fill="#c62828" if red else "#1565C0")
+        _, by0, bx1, by1 = c.bbox(it['btn'])               # ต่อจากขอบขวาของปุ่ม LINE
+        c.coords(text, bx1 + 16, (by0 + by1) / 2)
+        x0, y0, x1, y1 = c.bbox(text)
+        c.coords(rect, x0 - 8, y0 - 3, x1 + 8, y1 + 3)
+        c.itemconfig(rect, fill="white", outline="#e57373" if red else "#64B5F6")
+        c.tag_raise(rect, it['paper'])
+        c.tag_raise(text, rect)
+
+    def toggle_blank_page(self, event=None):
+        """แทรก / เอาออก หน้ากระดาษเปล่าต่อจากหน้าที่มีลายเซ็น (ไว้ลงคำเกษียณเมื่อข้างลายเซ็นไม่มีที่)
+        หน้าถัดลงไปเลื่อนตาม ของที่วางไว้บนหน้าพวกนั้นก็เลื่อนตาม (อยู่หน้าเดิม ตำแหน่งเดิมบนหน้า)
+        เอาออก: ของบนหน้ากระดาษเปล่าขึ้นไปอยู่หน้าที่มีลายเซ็น ตำแหน่งเดิมบนหน้า
+        แทรกแล้วอยู่ในไฟล์ด้วยเสมอตามที่เห็นบนจอ (วางของหรือไม่ก็ตาม)"""
+        sig_page = self.doc_info['sig_page']
+        sig = next(p for p in self.page_layout if p['n'] == sig_page)
+        cut = sig['y'] + sig['h'] + self.gap / 2           # ของที่บนสุดต่ำกว่านี้ = อยู่หน้าถัดจากหน้าลายเซ็น
+        shift = sig['h'] + self.gap                        # หน้ากระดาษเปล่าสูงเท่าหน้าลายเซ็น
+        boxes = self.kasien_boxes
+        if self.blank_on:
+            on_blank = (cut <= self.stamp_orig_y < cut + shift or
+                        any(cut <= b['y'] < cut + shift for b in boxes))
+            if on_blank and not messagebox.askyesno(
+                    "เอาหน้ากระดาษเปล่าออก",
+                    "เอาหน้ากระดาษเปล่าออกใช่ไหม?\n\nตรายาง/คำเกษียณที่วางบนหน้านี้จะย้ายขึ้นไปอยู่"
+                    "หน้าที่มีลายเซ็น ตำแหน่งเดิมบนหน้า (ลากย้ายต่อได้)", parent=self.preview_win):
+                return
+            shift = -shift
+            blank_no = self.doc_info['total_pages'] + 1
+            for item in self._page_items.pop(blank_no, {}).values():
+                self.canvas.delete(item)                   # กระดาษ/ชื่อหน้า/ปุ่ม LINE ของหน้าที่เอาออก
+            self._page_tk.pop(blank_no, None)
+            if self.line_pick is not None:
+                self.line_pick = [n for n in self.line_pick if n != blank_no]
+        if self.stamp_orig_y >= cut:
+            self.stamp_orig_y += shift
+        for b in boxes:
+            if b['y'] >= cut:
+                b['y'] += shift
+        self.blank_on = not self.blank_on
+        self.update_render(rebuild_bg=True)
+        if self.blank_on:                                  # เลื่อนจอไปให้เห็นหน้าที่เพิ่งแทรก
+            total_h = self.page_layout[-1]['y'] + self.page_layout[-1]['h'] + 20
+            self.canvas.yview_moveto(max(0.0, cut - 60) / total_h)
+            self.set_status(f"แทรกหน้ากระดาษเปล่าต่อจากหน้า {to_thai_digits(sig_page)} แล้ว — "
+                            "ลากคำเกษียณมาวางได้ หน้านี้จะอยู่ในไฟล์ด้วย ไม่ใช้กด ✕ เอาหน้านี้ออก")
 
     def on_line_toggle(self, event):
         current = self.canvas.find_withtag("current")
@@ -1711,6 +1778,7 @@ class SarabanApp(tk.Tk):
             'pages': [dict(p) for p in self.page_layout],
             'page_full': dict(self.page_full),     # หน้าแรก/หน้าลายเซ็นตามที่ย่อ/เลื่อนเนื้อหาไว้
             'line_pages': list(self._line_pages()),
+            'blank': self.blank_on,                # แทรกหน้ากระดาษเปล่าไว้ = อยู่ในไฟล์ด้วย วางของหรือไม่ก็ตาม
             'stamp_pct': self.stamp_pct.get(),
             'stamp_x': self.stamp_orig_x,
             'stamp_y': self.stamp_orig_y,
@@ -1763,8 +1831,8 @@ class SarabanApp(tk.Tk):
             blank_no = total + 1
             used = pages_with_items([(y, img.height) for img, x, y in items],
                                     [(p['y'], p['h'], p['n']) for p in pages])
-            redo = {1, sig_page} | used
-            has_blank_page = blank_no in used
+            has_blank_page = snapshot.get('blank', False) or blank_no in used
+            redo = {1, sig_page} | used | ({blank_no} if has_blank_page else set())
 
             def compose(p):
                 """หน้านี้ตามที่เห็นบนจอ: ภาพหน้า + ตรายาง/คำเกษียณส่วนที่ทับหน้านี้"""
@@ -1788,7 +1856,7 @@ class SarabanApp(tk.Tk):
                 if p['n'] in snapshot['line_pages']:
                     page_imgs[p['n']] = img          # เก็บไว้ส่ง LINE (ไม่เกิน ๔ หน้า)
 
-            # หน้ากระดาษเปล่า (ถ้ามีของวาง) แทรกต่อจากหน้าที่มีลายเซ็น ไม่ใช่ต่อท้ายเล่ม
+            # หน้ากระดาษเปล่า (ถ้ากดแทรกไว้) แทรกต่อจากหน้าที่มีลายเซ็น ไม่ใช่ต่อท้ายเล่ม
             order = page_order(total, sig_page if has_blank_page else None)
             merger = PdfMerger()
             try:
@@ -1820,7 +1888,7 @@ class SarabanApp(tk.Tk):
             # LINE เป็นงานเสริม ความล้มเหลวตรงนี้ต้องไม่ย้อนสถานะทะเบียน/ไฟล์
             try:
                 # หน้าที่เลือกไว้บนจอ (เริ่มต้น = หน้าแรกถึงหน้าที่ลงเกษียณ กติกาเดียวกับหน้าเว็บ)
-                # หน้ากระดาษเปล่าส่งได้เฉพาะตอนมีของวางไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
+                # หน้ากระดาษเปล่าส่งได้เฉพาะตอนแทรกไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
                 pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page, order)
                 pdf_stem = os.path.splitext(os.path.basename(final_pdf_path))[0]
                 img_urls = []

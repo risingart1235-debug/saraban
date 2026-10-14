@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 import core
 
@@ -285,11 +285,11 @@ class WebPrepareAndSaveTests(unittest.TestCase):
         self.assertEqual(job["status"], "ready")
         return job
 
-    def saved(self, job, line_pages=None):
+    def saved(self, job, line_pages=None, **extra):
         sent = MagicMock(return_value=True)
         drive = MagicMock()
         drive.upload.return_value = {}
-        payload = {"stamp": job["stamp"], "boxes": job["boxes"], "date": "", "time": ""}
+        payload = {"stamp": job["stamp"], "boxes": job["boxes"], "date": "", "time": "", **extra}
         if line_pages is not None:
             payload["line_pages"] = line_pages
         with patch.dict(sys.modules, {"drive": drive}), \
@@ -343,6 +343,38 @@ class WebPrepareAndSaveTests(unittest.TestCase):
         job = self.on_blank_page(self.prepared(full_page()))
         _, sent = self.saved(job, line_pages=[5, 3, 1])
         self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๓.jpg", "หน้า๔.jpg"])
+
+    def test_blank_page_is_only_there_when_the_user_inserts_it(self):
+        job = self.prepared(signature_page(14)[0])
+        out, _ = self.saved(job, blank=False)
+        self.assertEqual(len(core.PdfReader(out).pages), 4)
+
+    def test_inserted_blank_page_is_filed_even_with_nothing_on_it(self):
+        """➕ แทรกหน้ากระดาษเปล่า then left empty: the file is what the screen showed
+        (room to write an order by hand) - LINE still stops at the signature page"""
+        job = self.prepared(signature_page(14)[0])
+        out, sent = self.saved(job, blank=True)
+        pages = self.pages_of(out)
+        self.assertEqual(len(pages), 5)
+        self.assertEqual([tint_of(p) for p in pages], [None, None, None, 3, 4])
+        self.assertEqual(pages[2].convert("L").getextrema(), (255, 255))   # plain white paper
+        self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๒.jpg"])
+        _, sent = self.saved(self.prepared(signature_page(14)[0]), line_pages=[1, 5], blank=True)
+        self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๓.jpg"])   # ticked by hand
+
+    def test_stamp_dragged_onto_the_blank_page_is_stamped_there(self):
+        """it used to land on the last page shown instead"""
+        job = self.prepared(signature_page(14)[0])
+        job["stamp"].update(page=len(job["pages"]), left_cm=3.0, top_cm=3.0)
+        out, sent = self.saved(job, blank=True)
+        pages = self.pages_of(out)
+        self.assertEqual(len(pages), 5)
+        colours = [c for _, c in pages[2].convert("RGB").getcolors(1 << 16)]
+        self.assertTrue(any(b > r + 60 for r, g, b in colours))           # the blue stamp
+        untouched = core.render_pdf_page(job["pdf_path"], 1, 50).convert("RGB")
+        self.assertIsNone(ImageChops.difference(untouched, pages[0].convert("RGB")).getbbox())
+        # LINE: up to the last page with something on it, in file order - 1, 2 and the blank page
+        self.assertEqual([s.rsplit("_", 1)[1] for s in sent], ["หน้า๑.jpg", "หน้า๒.jpg", "หน้า๓.jpg"])
 
     def test_pin_button_brings_a_moved_box_back_next_to_the_signature(self):
         sig, block = signature_page(14)

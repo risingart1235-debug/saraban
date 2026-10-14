@@ -1244,6 +1244,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     out_pages = {}          # index หน้าใน PDF -> รูปที่วางของเสร็จแล้ว
     total = job["total_pages"]
     used = set()            # เลขหน้าจริงที่มีตรายาง/คำเกษียณ/ลายเซ็น (total+1 = หน้ากระดาษเปล่า)
+    on_blank = []           # ของที่ลากไปวางบนหน้ากระดาษเปล่า (ลำดับหน้าบนจอ = จำนวนหน้า)
 
     def pdf_page(pi):
         return total + 1 if pi >= len(job["pages"]) else job["pages"][pi]["index"]
@@ -1253,37 +1254,32 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
             out_pages[pi] = _render_pdf_page(job["pdf_path"], job["pages"][pi]["index"], DPI)[0].convert("RGBA")
         return out_pages[pi]
 
+    def put(page, img, x, y):
+        """วางของลงหน้าลำดับ page บนจอ — เกินจำนวนหน้า = หน้ากระดาษเปล่าที่ผู้ใช้กดแทรก"""
+        pi = max(0, min(int(page or 0), len(job["pages"])))
+        used.add(pdf_page(pi))
+        if pi == len(job["pages"]):
+            on_blank.append((img, x, y))
+            return
+        bg = layer(pi)
+        bg.paste(img, (max(0, min(x, bg.width - img.width)), max(0, min(y, bg.height - img.height))), img)
+
     # ไฮไลท์ชื่อโรงเรียนเฉพาะหน้าที่เปิดไว้บนจอ — ป้ายก่อนวางของอื่น ตรายาง/คำเกษียณที่ทับจะได้ไม่ติดสีเหลือง
     for m in job.get("marks") or ():
         if 0 <= m["page"] < len(job["pages"]) and _highlighted(payload, job["pages"][m["page"]]["index"]):
             paint_marks(layer(m["page"]), [(m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"])])
 
     stamp_img = render_transparent_stamp(receipt_no, int(st.get("size_pct", 100)), date_str, time_str)
-    pi = min(int(st.get("page", 0)), len(job["pages"]) - 1)
-    used.add(pdf_page(pi))
-    bg = layer(pi)
-    bg.paste(stamp_img,
-             (max(0, min(int(float(st.get("left_cm", 1)) * CM), bg.width - stamp_img.width)),
-              max(0, min(int(float(st.get("top_cm", 1)) * CM), bg.height - stamp_img.height))),
-             stamp_img)
+    put(st.get("page", 0), stamp_img,
+        int(float(st.get("left_cm", 1)) * CM), int(float(st.get("top_cm", 1)) * CM))
 
-    extra_pages = []        # กล่องที่ลากไปหน้ากระดาษเปล่า
     for b in boxes:
         if not (b.get("text") or "").strip():
             continue
-        pi = int(b.get("page", 0))
-        used.add(pdf_page(pi))
-        max_w = max(10, int(_page_w(job, pi) * 0.42 * (b.get("wrap_pct", 100) / 100.0)))
+        max_w = max(10, int(_page_w(job, b.get("page", 0)) * 0.42 * (b.get("wrap_pct", 100) / 100.0)))
         k = render_transparent_kasien(b.get("text", ""), max_w, b.get("size_pct", 100),
                                       b.get("indent_pct", 100), bool(b.get("bg")), bool(b.get("border")))
-        x = int(float(b.get("left_cm", 1)) * CM)
-        y = int(float(b.get("top_cm", 1)) * CM)
-        if pi >= len(job["pages"]):          # หน้ากระดาษเปล่า (แทรกต่อจากหน้าลายเซ็น)
-            extra_pages.append((k, x, y))
-            continue
-        bgp = layer(pi)
-        bgp.paste(k, (max(0, min(x, bgp.width - k.width)),
-                      max(0, min(y, bgp.height - k.height))), k)
+        put(b.get("page", 0), k, int(float(b.get("left_cm", 1)) * CM), int(float(b.get("top_cm", 1)) * CM))
 
     # ลายเซ็น + วันที่ใต้ลายเซ็น (แทรกเฉพาะตอนผู้ใช้กดแทรก) — วางอิสระจากกล่องคำเกษียณ
     sig = payload.get("signature")
@@ -1291,16 +1287,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         # วันที่ใต้ลายเซ็นใช้วันที่ลงรับ (ตัวเดียวกับที่ประทับบนตรายาง) เสมอ
         k = sigmod.render_block(signature_png, sigmod.short_date_of(date_str),
                                 sig.get("size_pct", 100), CM)
-        pi = int(sig.get("page", 0))
-        used.add(pdf_page(pi))
-        x = int(float(sig.get("left_cm", 1)) * CM)
-        y = int(float(sig.get("top_cm", 1)) * CM)
-        if pi >= len(job["pages"]):
-            extra_pages.append((k, x, y))
-        else:
-            bgp = layer(pi)
-            bgp.paste(k, (max(0, min(x, bgp.width - k.width)),
-                          max(0, min(y, bgp.height - k.height))), k)
+        put(sig.get("page", 0), k, int(float(sig.get("left_cm", 1)) * CM), int(float(sig.get("top_cm", 1)) * CM))
 
     # ---- ประกอบเป็น PDF ----
     d = job["dir"]
@@ -1310,10 +1297,12 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         img.convert("RGB").save(p, "PDF", resolution=float(DPI))
         made[job["pages"][pi]["index"]] = p
 
+    # หน้ากระดาษเปล่ามีเฉพาะตอนผู้ใช้กดแทรกบนจอ (blank) — แทรกไว้แล้วไม่ได้วางอะไรก็ยังอยู่ในไฟล์
+    # ตามที่เห็นบนจอ (เผื่อเว้นไว้เขียนสั่งการด้วยมือ) / หน้าเว็บรุ่นก่อนไม่ส่ง blank มา ดูจากของที่วางแทน
     blank_pdf = blank = None
-    if extra_pages:
+    if on_blank or payload.get("blank") is True:
         blank = Image.new("RGB", _blank_size(job), "white")
-        for k, x, y in extra_pages:
+        for k, x, y in on_blank:
             blank.paste(k, (max(0, min(x, blank.width - k.width)),
                             max(0, min(y, blank.height - k.height))), k)
         blank_pdf = os.path.join(d, "blank.pdf")
