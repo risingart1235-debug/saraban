@@ -280,6 +280,21 @@ class ServerFlowTests(unittest.TestCase):
         sent_pages = sorted(u.rsplit("_", 1)[1] for u in sent.call_args.args[1])
         self.assertEqual(sent_pages, ["หน้า๑.jpg", "หน้า๒.jpg"])
 
+    def test_line_message_still_links_every_attachment(self):
+        """only PDF files go behind the letter, but the LINE message keeps a link to every
+        attachment as before - the letter, the list, the Word form and the picture"""
+        job = self.opened_from_the_news_list()
+        sent = MagicMock(return_value=True)
+        payload = {"stamp": job["stamp"], "boxes": job["boxes"], "date": "", "time": ""}
+        with patch.object(docmode, "publish_line_image",
+                          side_effect=lambda p, day=None: "https://x/" + os.path.basename(p)), \
+                patch.object(docmode, "send_line_with_image", sent):
+            docmode._finalize_claimed(job, payload, lambda **kw: "๕๗")
+        text = sent.call_args.args[0]
+        for n, (name, url) in enumerate((("หนังสือนำ", "u/letter.pdf"), ("บัญชีรายชื่อ", "u/list.pdf"),
+                                         ("แบบฟอร์ม", "u/form.docx"), ("รูป", "u/pic.jpg")), 1):
+            self.assertIn(f"📥 {core.to_thai_digits(n)}. {name}\n👉 {url}", text)
+
     @unittest.skipIf(webmain is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน")
     def test_page_pictures_load_on_demand_for_the_owner_only(self):
         job = self.opened_from_the_news_list()
