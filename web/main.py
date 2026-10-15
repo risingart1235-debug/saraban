@@ -836,7 +836,7 @@ def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
 
 
 # ==========================================================
-# ๖. โหมดที่ ๑ (เว็บ สพป.) และโหมดที่ ๓ (อัปโหลดไฟล์)
+# ๖. โหมดที่ ๑ (เว็บ สพป.) และโหมดที่ ๒ (อัปโหลดไฟล์)
 # ==========================================================
 import sppweb
 from web import docmode
@@ -1197,7 +1197,7 @@ def api_doc_prepare(job_id: str, user: str = Depends(current_user)):
 
 @app.get("/api/phone/queue")
 def api_phone_queue(request: Request, session: str = Cookie(default=None)):
-    """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (โหมด ๒)
+    """รายการเรื่องที่มือถือดึงเข้ามา รอลงรับ (แสดงรวมในโหมด ๑)
 
     รับได้ทั้งคุกกี้ล็อกอิน (หน้าเว็บเรียก) และโทเคนมือถือ (สคริปต์เรียกเช็กเอง
     ว่างานที่ส่งไปสถานะอะไร — จำเป็นตอนหาสาเหตุเวลางานไม่โผล่)
@@ -1396,7 +1396,7 @@ async def api_doc_save(job_id: str, request: Request, user: str = Depends(curren
                                        signature_png=signature_png)
     except docmode.AlreadyHandledError as e:
         # เรื่องนี้ถูกลงรับ/ข้ามจากที่อื่นไปแล้วระหว่างที่เปิดหน้านี้ค้างไว้
-        # (เช่นเปิดค้างในโหมด ๒ แล้วไปกดลงรับเรื่องเดียวกันในโหมด ๑)
+        # (เช่นเปิดเรื่องจากมือถือค้างไว้ แล้วไปกดลงรับเรื่องเดียวกันจากเว็บ สพป.)
         raise HTTPException(status_code=409, detail=str(e))
     except docmode.DriveNotReadyError as e:
         # ๕๐๓ = ยังไม่ได้ทำอะไรเลย เลขรับไม่ถูกกิน กดใหม่ได้เมื่อไดร์ฟกลับมา
