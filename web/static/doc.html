@@ -904,7 +904,8 @@ function showMarks() {
   const read = ocrRead();
   const scans = (D.scan_pages || []).filter(n => !found.includes(n) && !read.includes(n));
   const scanText = 'หน้า ' + scans.map(thaiNum).join(', ');
-  const scanHow = ocrOf().ready ? 'กด 🔎 สแกน ด้านล่างเพื่อหาชื่อ' : 'ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา';
+  const scanHow = ocrBusy() ? 'กำลังสแกนหาชื่ออยู่ ดูความคืบหน้าที่ปุ่ม 🔎 ด้านล่าง'
+    : ocrOf().ready ? 'กด 🔎 สแกน ด้านล่างเพื่อหาชื่อ' : 'ระบบอ่านเองไม่ได้ ตรวจดูด้วยตา';
   let html;
   if (found.length) {
     const links = found.map(n => `<a href="#" data-goto="${n}">หน้า ${thaiNum(n)}</a>`).join(', ');
@@ -921,7 +922,8 @@ function showMarks() {
   } else if (scans.length) {
     html = `🖍️ ไม่พบชื่อโรงเรียนในหน้าที่เป็นตัวหนังสือ — ${scanText} เป็นภาพสแกน ${scanHow}`;
   } else {
-    html = '🖍️ ไม่พบชื่อโรงเรียนในเอกสารนี้';
+    html = read.length ? '🖍️ ไม่พบชื่อโรงเรียน — หน้าภาพสแกนอ่านด้วยตัวอ่านภาพแล้ว ภาพไม่ชัดอาจพลาด ตรวจดูด้วยตา'
+                       : '🖍️ ไม่พบชื่อโรงเรียนในเอกสารนี้';
   }
   $('hlnote').innerHTML = html;
   $('hlToggle').classList.toggle('hidden', !found.length);
@@ -1035,7 +1037,8 @@ async function ocrPoll() {
   const before = markPages();
   D.ocr = d; D.marks = d.marks;
   const fresh = markPages().filter(n => !before.includes(n));
-  if (fresh.length) { drawMarks(); for (const n of fresh) hlPages.add(n); }
+  // กดสแกนเอง = ไฮไลท์หน้าที่เจอให้เลย / ระบบสแกนเองตอนเปิดเรื่อง (เปิดเว็บบนคอม) = ตามตั้งค่าบัญชี
+  if (fresh.length) { drawMarks(); if (!d.auto || D.highlight) for (const n of fresh) hlPages.add(n); }
   showMarks(); ocrShow();
   if (ocrBusy()) ocrTimer = setTimeout(ocrPoll, 2000);
 }

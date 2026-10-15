@@ -1152,30 +1152,42 @@ def find_name_marks(pdf_path, page_numbers, dpi=PDF_RENDER_DPI, name=SCHOOL):
 # รวมสแกนจาง ๑๕๐ DPI เอียง ๒ องศา (โหมดตารางทั้งก้อน psm 6 พลาดหน้าจาง และช้ากว่า)
 OCR_ERRORS = 2                 # อ่านผิดได้กี่ตัวในชื่อ (๑๔ ตัว) — "บ้านโพนทอง" (โรงเรียนอื่น) ยังไม่ผ่าน
 OCR_PAGE_SEC = 180             # อ่านหน้าเดียวนานเกินนี้ถือว่าค้าง
-_TESSERACT = None              # ที่อยู่ตัวอ่านที่หาเจอ ("" = เครื่องนี้ไม่มี)
+_TESSERACT = None              # ที่อยู่ตัวอ่านที่หาเจอ ("" = เครื่องนี้ยังไม่มี)
+_TESSERACT_AT = 0.0            # หาล่าสุดเมื่อไหร่ — ยังไม่เจอ หาใหม่ทุกนาที (เพิ่งลงโปรแกรม ไม่ต้องปิดเปิดใหม่)
+
+
+def _no_window():
+    """Windows: เรียก Tesseract (โปรแกรมจอดำ) จากโปรแกรมบนคอมที่ไม่มีจอดำ (bot3.pyw)
+    ไม่งั้นจอดำเด้งขึ้นมาแวบหนึ่งทุกหน้าที่สแกน — เครื่องอื่นไม่มีค่านี้ (= 0)"""
+    import subprocess
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def tesseract_cmd():
-    """ที่อยู่โปรแกรม Tesseract ที่มีภาษาไทย หรือ "" ถ้าเครื่องนี้ไม่มี (หาครั้งเดียวแล้วจำไว้)
+    """ที่อยู่โปรแกรม Tesseract ที่มีภาษาไทย หรือ "" ถ้าเครื่องนี้ไม่มี (เจอแล้วจำไว้)
     บนเซิร์ฟเวอร์ลงไว้ใน Dockerfile / เครื่อง Windows ลงตัวติดตั้งของ UB Mannheim แล้วติ๊กภาษาไทย
-    หรือบอกที่อยู่เองด้วยตัวแปร SARABAN_TESSERACT"""
-    global _TESSERACT
-    if _TESSERACT is None:
+    (ลงให้ทุกคนหรือเฉพาะผู้ใช้นี้ก็หาเจอ) หรือบอกที่อยู่เองด้วยตัวแปร SARABAN_TESSERACT"""
+    global _TESSERACT, _TESSERACT_AT
+    if _TESSERACT is None or (not _TESSERACT and time.time() - _TESSERACT_AT > 60):
         import shutil
         import subprocess
         found = ""
         for cmd in (os.environ.get("SARABAN_TESSERACT", ""), shutil.which("tesseract") or "",
-                    r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+                    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Tesseract-OCR",
+                                 "tesseract.exe") if os.environ.get("LOCALAPPDATA") else ""):
             if not cmd or not os.path.exists(cmd):
                 continue
             try:
-                out = subprocess.run([cmd, "--list-langs"], capture_output=True, timeout=30)
+                out = subprocess.run([cmd, "--list-langs"], capture_output=True, timeout=30,
+                                     creationflags=_no_window())
             except (OSError, subprocess.SubprocessError):
                 continue
             if "tha" in (out.stdout + out.stderr).decode("utf-8", "replace").split():
                 found = cmd
                 break
-        _TESSERACT = found
+        _TESSERACT, _TESSERACT_AT = found, time.time()
     return _TESSERACT
 
 
@@ -1192,7 +1204,8 @@ def _ocr_page(img, dpi):
         ImageOps.autocontrast(img.convert("L"), cutoff=1).save(src)
         out = subprocess.run([tesseract_cmd(), src, "stdout", "-l", "tha", "--dpi", str(int(dpi)),
                               "--psm", "4", "tsv"], capture_output=True, timeout=OCR_PAGE_SEC,
-                             env=dict(os.environ, OMP_THREAD_LIMIT="1"))   # เครื่องเล็ก หลายเธรดไม่ได้เร็วขึ้น
+                             env=dict(os.environ, OMP_THREAD_LIMIT="1"),   # เครื่องเล็ก หลายเธรดไม่ได้เร็วขึ้น
+                             creationflags=_no_window())
     if out.returncode:
         raise RuntimeError("Tesseract อ่านภาพไม่สำเร็จ: " + out.stderr.decode("utf-8", "replace")[-200:])
     pieces = []
@@ -1268,6 +1281,43 @@ def ocr_name_marks(pdf_path, page_no, dpi=PDF_RENDER_DPI, name=SCHOOL):
     if not tesseract_cmd():
         raise RuntimeError("เครื่องนี้ยังไม่มีตัวอ่านภาพ Tesseract (ภาษาไทย)")
     return _ocr_marks(_ocr_page(render_pdf_page(pdf_path, page_no, dpi), dpi), name)
+
+
+def scan_name_pages(pdf_path, pages, dpi=PDF_RENDER_DPI, *, on_page, stop=lambda: False,
+                    workers=None, name=SCHOOL):
+    """อ่านหน้าภาพสแกนทีละหลายหน้าพร้อมกันหาชื่อโรงเรียน (โปรแกรมบนคอมสแกนทั้งเรื่องเองตอนเปิดเรื่อง)
+
+    Tesseract หนึ่งหน้าใช้คอร์เดียว คอมหลายคอร์จึงอ่านพร้อมกันได้หลายหน้า เร็วขึ้นเกือบเท่าตัวต่อคอร์
+    (ใช้ครึ่งหนึ่งของคอร์ที่มี ไม่เกิน ๔ — เหลือแรงให้หน้าจอลื่น)
+    on_page(n, boxes, error) ทีละหน้าที่อ่านเสร็จ ตามลำดับที่เสร็จ — เรียกจากเธรดที่อ่าน ส่งต่อเข้าหน้าจอเอง
+    stop() เป็นจริงเมื่อไหร่ เลิกอ่านหน้าที่เหลือ (ปิดหน้าต่าง/บันทึกไปแล้ว) — คืนเมื่ออ่านครบหรือหยุด
+    """
+    import queue
+    todo = queue.Queue()
+    for n in pages:
+        todo.put(n)
+    if workers is None:
+        workers = max(1, min(4, (os.cpu_count() or 2) // 2))
+
+    def work():
+        while not stop():
+            try:
+                n = todo.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                boxes, error = ocr_name_marks(pdf_path, n, dpi, name), None
+            except Exception as e:
+                boxes, error = [], e
+            if not stop():
+                on_page(n, boxes, error)
+
+    threads = [threading.Thread(target=work, name="saraban-scan", daemon=True)
+               for _ in range(min(workers, len(pages)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def paint_marks(img, boxes, color=MARK_RGB):

@@ -603,6 +603,7 @@ class SarabanApp(tk.Tk):
     # หน้าต่างจัดเอกสารแสดงได้ถึงหน้านี้ (เท่าหน้าเว็บ) กันเอกสารหนามากจนเปิดช้า
     PREVIEW_MAX_PAGES = 100       # แสดงได้ถึงหน้านี้ (รวมสิ่งที่ส่งมาด้วยที่ต่อท้ายหนังสือนำ)
     PRERENDER_PAGES = 20          # เตรียมภาพไว้ก่อนเปิดหน้าต่างเท่านี้ หน้าที่เหลือเรนเดอร์ตอนเลื่อนไปถึง/ตอนบันทึก
+    DRAG_HINT = "✨ ลากตรายาง/คำเกษียณบนภาพได้อิสระ\nและลากข้ามหน้ากระดาษได้เลย!"
 
     def start_stamp_only_mode(self):
         """เปิดกระดาษ A4 เปล่า → รันเลขรับต่อจาก Excel → ลากวางตรายาง → เซฟ PDF ไว้ปริ้นทับ"""
@@ -1171,6 +1172,15 @@ class SarabanApp(tk.Tk):
                 f"กำลังเตรียมภาพหน้า {to_thai_digits(n)} จาก {to_thai_digits(total_pages)}..."))
             render_pdf_page(whole_pdf, page_number=n, dpi=self.A4_DPI).save(page_paths[n], "JPEG")
 
+        # ชื่อโรงเรียน (ไฮไลท์) — ค้นจากตัวหนังสือในไฟล์ทุกหน้าที่แสดง ไม่ถึงวินาที เหมือนหน้าเว็บ
+        # หน้าที่เป็นภาพสแกนอ่านด้วย Tesseract ทุกหน้าหลังเปิดหน้าต่าง (_start_scan) — คอมเร็วพอสแกนทั้งเรื่อง
+        self.after(0, lambda: self.set_status("กำลังหาชื่อโรงเรียนในเอกสาร..."))
+        try:
+            marks, scans = find_name_marks(whole_pdf, shown, self.A4_DPI)
+        except Exception as e:
+            marks, scans = {}, set(shown)          # ไฟล์แปลก ค้นตัวหนังสือไม่ได้ ให้ตัวอ่านภาพลองทุกหน้า
+            self.after(0, lambda e=e: self.log(f"⚠️ หาชื่อโรงเรียนจากตัวหนังสือในไฟล์ไม่สำเร็จ: {e}"))
+
         self.doc_info = {
             'pdf_path': whole_pdf, 'ai_text': ai_text, 'sig_page': sig_page, 'total_pages': total_pages,
             'doc_no': doc_no, 'doc_title': doc_title, 'doc_date': doc_date, 'sender': sender,
@@ -1178,6 +1188,8 @@ class SarabanApp(tk.Tk):
             'book_id': str(book_id) if book_id else None, 'job': job,
             'page_paths': page_paths, 'page_sizes': page_sizes(whole_pdf, self.A4_DPI),
             'main_pages': main_pages,
+            'marks': marks,                        # {หน้า: [กรอบชื่อโรงเรียน]} พิกัดบนภาพหน้าที่ A4_DPI
+            'scan_pages': sorted(scans),           # หน้าภาพสแกน ไม่มีตัวหนังสือให้ค้น
         }
 
         # ล้าง cache รูปต้นฉบับของเอกสารเดิม (เริ่มเอกสารใหม่)
@@ -1230,6 +1242,13 @@ class SarabanApp(tk.Tk):
         self.line_pick = None        # None = ยังไม่ได้เลือกหน้าที่ส่ง LINE เอง ใช้ค่าอัตโนมัติ
         self.blank_on = False        # แทรกหน้ากระดาษเปล่าไว้ไหม (กดปุ่มแทรกบนหัวหน้าที่มีลายเซ็นเอง)
         self._blank_btn = None       # ปุ่มแทรก/เอาออกหน้ากระดาษเปล่า (กรอบ, ข้อความ) บนผืน
+        # ไฮไลท์ชื่อโรงเรียน: หน้าที่พบชื่อป้ายสีให้เลย เปิด/ปิดทีละหน้าได้ที่ปุ่มบนหัวหน้านั้น
+        self.doc_info.setdefault('marks', {})
+        self.doc_info.setdefault('scan_pages', [])
+        self.hl_pages = set(self.doc_info['marks'])
+        self._hl_items = {}          # เลขหน้า -> ปุ่มไฮไลท์ (กรอบ, ข้อความ) บนผืน
+        self._scan = {}              # ความคืบหน้าการสแกนหน้าภาพ (_start_scan)
+        self._scan_token = None      # ตัวระบุรอบสแกน — ปิดหน้าต่างแล้วผลที่ค้างอยู่ทิ้งได้
         self._stamp_key = None       # หน้าต่างใหม่ ต้องวาดตรายางใหม่เสมอ (เลขรับอาจซ้ำเรื่องก่อนที่ไม่ได้รับ)
         vbar = tk.Scrollbar(left_frame, orient="vertical")
         hbar = tk.Scrollbar(left_frame, orient="horizontal")
@@ -1291,7 +1310,11 @@ class SarabanApp(tk.Tk):
         create_adjuster(right_frame, "ซูมเข้า/ออก (Zoom) %:", self.zoom_pct, step=10, command=self.update_render)
         create_adjuster(right_frame, "Aa ขนาดฟอนต์ช่องพิมพ์:", self.editor_font_size, step=2, command=self.update_editor_font)
 
-        tk.Label(right_frame, text="✨ ลากตรายาง/คำเกษียณบนภาพได้อิสระ\nและลากข้ามหน้ากระดาษได้เลย!", fg="#e91e63", bg="#f9f9f9", font=("Helvetica", 9)).pack(pady=3)
+        # คำแนะนำการลาก — เรื่องที่พบชื่อโรงเรียน/มีหน้าภาพสแกน บรรทัดนี้บอกผลการหาชื่อแทน (_show_hl_status)
+        # ใช้ที่เดิม แผงด้านขวาไม่สูงขึ้น ปุ่มยืนยันไม่ตกขอบจอโน้ตบุ๊ก
+        self.hl_status = tk.Label(right_frame, text=self.DRAG_HINT, fg="#e91e63", bg="#f9f9f9",
+                                  font=("Helvetica", 9), wraplength=320, justify="center")
+        self.hl_status.pack(pady=3)
         # สรุปหน้าที่จะส่งเข้า LINE — เลือกเองได้ที่ปุ่มข้างชื่อแต่ละหน้าบนภาพ
         # (บรรทัดเดียวแทนบรรทัดว่างเดิม แผงด้านขวาสูงเท่าเดิม ปุ่มยืนยันไม่ตกขอบจอโน้ตบุ๊ก)
         self.line_summary = tk.Label(right_frame, text="", fg="#06A64C", bg="#f9f9f9",
@@ -1307,13 +1330,15 @@ class SarabanApp(tk.Tk):
         self.canvas.tag_bind("draggable", "<ButtonRelease-1>", lambda e: self._refresh_line_buttons())
         self.canvas.tag_bind("linebtn", "<ButtonPress-1>", self.on_line_toggle)
         self.canvas.tag_bind("blankbtn", "<ButtonPress-1>", self.toggle_blank_page)
-        for tag in ("linebtn", "blankbtn"):
+        self.canvas.tag_bind("hlbtn", "<ButtonPress-1>", self.on_hl_toggle)
+        for tag in ("linebtn", "blankbtn", "hlbtn"):
             self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
             self.canvas.tag_bind(tag, "<Leave>", lambda e: self.canvas.config(cursor=""))
 
         self.add_kasien_box(text=self.doc_info['ai_text'], render=False)
         self.is_first_load = True
         self.update_render(rebuild_bg=True)
+        self._start_scan()
 
     def _box_adjuster(self, parent, label, var, step, command, lo=10, hi=300):
         frm = tk.Frame(parent, bg="#f9f9f9")
@@ -1422,6 +1447,9 @@ class SarabanApp(tk.Tk):
                 orig = self._orig_cache[n] = Image.open(doc['page_paths'][n]).convert('RGB')
             cw = max(1, int(orig.width * scale_w))
             ch = max(1, int(orig.height * scale_h))
+            boxes = self._hl_boxes(n)
+            if boxes:                                          # ไฮไลท์ก่อนย่อ/เลื่อนเนื้อหา แถบสีจะตามตัวหนังสือไป
+                orig = paint_marks(orig.copy(), boxes)
             page = Image.new('RGB', orig.size, 'white')       # กระดาษคงขนาดเดิม ย่อเฉพาะเนื้อหา
             page.paste(orig.resize((cw, ch), Image.Resampling.LANCZOS),
                        (int(orig.width * off_x_pct), int(orig.height * off_y_pct)))
@@ -1582,6 +1610,11 @@ class SarabanApp(tk.Tk):
             if src is None:
                 src = Image.open(self._page_file(n))
                 src.draft('RGB', size)      # JPEG ถอดรหัสแบบย่อมาเลย เร็วกว่าถอดเต็มแล้วค่อยย่อ
+                boxes = self._hl_boxes(n)
+                if boxes:                   # ไฮไลท์บนภาพที่ถอดย่อมาแล้ว — ย่อพิกัดตาม
+                    src = src.convert('RGB')
+                    f = src.width / p['w']
+                    paint_marks(src, [(x0 * f, y0 * f, x1 * f, y1 * f) for x0, y0, x1, y1 in boxes])
             # ย่อใช้ LANCZOS ตัวหนังสือคม / ขยายเกิน ๑๐๐% ใช้ BILINEAR เร็วกว่าหลายเท่า ตาแทบไม่ต่าง
             how = Image.Resampling.LANCZOS if scale <= 1 else Image.Resampling.BILINEAR
             photo = ImageTk.PhotoImage(src.convert('RGB').resize(size, how))
@@ -1623,6 +1656,8 @@ class SarabanApp(tk.Tk):
             c.coords(it['btn'], x0 - 8, y0 - 3, x1 + 8, y1 + 3)
             c.itemconfig(it['btn'], fill="#06C755" if on else "white",
                          outline="#06C755" if on else "#999999")
+            if p['n'] in self.doc_info['marks']:
+                self._place_hl_button(p['n'], it)
         total = self.doc_info['total_pages']
         names = ["กระดาษเปล่า" if n > total else to_thai_digits(n)
                  for n in sorted(chosen, key=self._page_order().index)]
@@ -1630,6 +1665,113 @@ class SarabanApp(tk.Tk):
             "📤 ส่งเข้า LINE: หน้า " + ", ".join(names) if names else
             "📤 ส่งเข้า LINE: ข้อความอย่างเดียว ไม่แนบรูป"))
         self._place_blank_button()
+
+    def _header_right(self, n, it):
+        """ขอบขวาของปุ่มสุดท้ายบนหัวหน้า n (ปุ่ม LINE หรือปุ่มไฮไลท์) — ปุ่มถัดไปวางต่อจากตรงนี้"""
+        right = self._hl_items.get(n, (it['btn'],))[0]
+        return self.canvas.bbox(right)
+
+    # ---------- ไฮไลท์ชื่อโรงเรียน ----------
+    def _hl_boxes(self, n):
+        """กรอบชื่อโรงเรียนที่ต้องป้ายสีบนหน้า n (หน้าที่ปิดไฮไลท์ไว้/ไม่พบชื่อ = None)"""
+        if n in getattr(self, 'hl_pages', ()):
+            return self.doc_info.get('marks', {}).get(n)
+        return None
+
+    def _place_hl_button(self, n, it):
+        """ปุ่มเปิด/ปิดไฮไลท์ ต่อจากปุ่ม LINE บนหัวหน้าที่พบชื่อโรงเรียน — เหลือง = ไฮไลท์อยู่"""
+        c = self.canvas
+        if n not in self._hl_items:
+            tag = f"hl{n}"
+            self._hl_items[n] = (c.create_rectangle(0, 0, 1, 1, tags=('page', 'hlbtn', tag)),
+                                 c.create_text(0, 0, anchor='w', font=("Helvetica", 9, "bold"),
+                                               tags=('page', 'hlbtn', tag)))
+        rect, text = self._hl_items[n]
+        on = n in self.hl_pages
+        c.itemconfig(text, text="✓ ไฮไลท์" if on else "ไม่ไฮไลท์", fill="#713f12" if on else "#555555")
+        _, by0, bx1, by1 = c.bbox(it['btn'])
+        c.coords(text, bx1 + 16, (by0 + by1) / 2)
+        x0, y0, x1, y1 = c.bbox(text)
+        c.coords(rect, x0 - 8, y0 - 3, x1 + 8, y1 + 3)
+        c.itemconfig(rect, fill="#FFEB3B" if on else "white", outline="#EAB308" if on else "#999999")
+        c.tag_raise(rect, it['paper'])
+        c.tag_raise(text, rect)
+
+    def on_hl_toggle(self, event):
+        current = self.canvas.find_withtag("current")
+        tags = self.canvas.gettags(current[0]) if current else ()
+        n = next((int(t[2:]) for t in tags if t.startswith("hl") and t[2:].isdigit()), None)
+        if n is None:
+            return
+        self.hl_pages ^= {n}
+        self._page_tk.pop(n, None)                     # วาดภาพหน้านี้ใหม่ (มี/ไม่มีแถบสี)
+        self.update_render(rebuild_bg=n in self.page_full)
+        self._show_hl_status()
+
+    def _start_scan(self):
+        """หน้าที่เป็นภาพสแกน (ไม่มีตัวหนังสือในไฟล์ให้ค้น) อ่านด้วย Tesseract ทุกหน้าเบื้องหลังตอนเปิดเรื่อง
+        คอมอ่านเร็ว (หน้าละ ~๑–๒ วินาที อ่านพร้อมกันหลายหน้า) จึงสแกนทั้งเรื่องเลย ไม่ต้องเลือกหน้าแบบหน้าเว็บ
+        ระหว่างสแกนทำอย่างอื่นบนจอต่อได้ หน้าที่พบชื่อป้ายสีให้ทันทีที่อ่านเสร็จ"""
+        doc = self.doc_info
+        pages = [n for n in doc.get('scan_pages') or () if n not in doc['marks']]
+        self._scan = {'pages': pages, 'done': 0, 'found': [], 'errors': 0, 'ready': True}
+        if pages and not tesseract_cmd():
+            self._scan['ready'] = False
+        elif pages:
+            token = self._scan_token = object()
+            threading.Thread(
+                target=scan_name_pages, args=(doc['pdf_path'], pages, self.A4_DPI),
+                kwargs={'on_page': lambda n, boxes, err: self.after(0, self._scan_result, token, n, boxes, err),
+                        'stop': lambda: self._scan_token is not token},
+                name="saraban-scan-pages", daemon=True).start()
+        self._show_hl_status()
+
+    def _scan_result(self, token, n, boxes, err):
+        """อ่านหน้าภาพเสร็จหนึ่งหน้า (บนจอ) — พบชื่อก็ป้ายสีหน้านั้นเลย"""
+        if token is not self._scan_token or not self.page_layout:
+            return                                     # ปิดหน้าต่าง/บันทึกไปแล้ว
+        st = self._scan
+        st['done'] += 1
+        if err is not None:
+            st['errors'] += 1
+            self.log(f"⚠️ สแกนหน้า {to_thai_digits(n)} ไม่สำเร็จ: {err}")
+        if boxes:
+            self.doc_info['marks'][n] = boxes
+            st['found'].append(n)
+            self.hl_pages.add(n)
+            self._page_tk.pop(n, None)
+            self.update_render(rebuild_bg=n in self.page_full)
+        self._show_hl_status()
+
+    def _show_hl_status(self):
+        """ผลการหาชื่อโรงเรียน/ความคืบหน้าการสแกน ในบรรทัดคำแนะนำใต้ชุดปรับแต่ง (ไม่มีอะไรบอก = คำแนะนำเดิม)"""
+        lab = getattr(self, 'hl_status', None)
+        if lab is None or not self.page_layout:
+            return
+        found = sorted(self.doc_info['marks'])
+        st = self._scan or {}
+        pages, done = st.get('pages') or [], st.get('done', 0)
+
+        def where(ns):
+            return ", ".join(to_thai_digits(n) for n in ns[:6]) + (" …" if len(ns) > 6 else "")
+        failed = f" (อ่านไม่สำเร็จ {to_thai_digits(st['errors'])} หน้า)" if st.get('errors') else ""
+        if pages and not st.get('ready'):
+            text, color = (f"หน้า {where(pages)} เป็นภาพสแกน — คอมนี้ยังไม่ได้ลงตัวอ่านภาพ\n"
+                           "(Tesseract ภาษาไทย) จึงหาชื่อในหน้าภาพไม่ได้ ตรวจดูด้วยตา"), "#b45309"
+        elif pages and done < len(pages):
+            text, color = (f"🔎 กำลังสแกนหน้าภาพหาชื่อโรงเรียน {to_thai_digits(done)}/{to_thai_digits(len(pages))} หน้า\n"
+                           + (f"พบที่หน้า {where(found)}" if found else "ทำอย่างอื่นบนจอต่อได้เลย")), "#1565C0"
+        elif found:
+            off = [n for n in found if n not in self.hl_pages]
+            text, color = (f"🖍️ พบชื่อโรงเรียนที่หน้า {where(found)}{failed}\n"
+                           + ("ไฮไลท์ให้แล้ว — เปิด/ปิดที่ปุ่มบนหัวหน้านั้น" if not off else
+                              f"ปิดไฮไลท์ไว้ {to_thai_digits(len(off))} หน้า — เปิดที่ปุ่มบนหัวหน้านั้น")), "#7c5e00"
+        elif pages:
+            text, color = (f"🔎 สแกนหน้าภาพครบ {to_thai_digits(len(pages))} หน้า ไม่พบชื่อโรงเรียน{failed}\n"
+                           "(ภาพไม่ชัดอาจอ่านไม่ออก ตรวจดูด้วยตา)"), "#555555"
+        else:
+            text, color = self.DRAG_HINT, "#e91e63"
+        lab.config(text=text, fg=color)
 
     # ---------- หน้ากระดาษเปล่า (กดแทรกเอง) ----------
     def _place_blank_button(self):
@@ -1647,7 +1789,7 @@ class SarabanApp(tk.Tk):
         red = self.blank_on
         c.itemconfig(text, text="✕ เอาหน้านี้ออก" if red else "➕ แทรกหน้ากระดาษเปล่าต่อจากหน้านี้",
                      fill="#c62828" if red else "#1565C0")
-        _, by0, bx1, by1 = c.bbox(it['btn'])               # ต่อจากขอบขวาของปุ่ม LINE
+        _, by0, bx1, by1 = self._header_right(n, it)       # ต่อจากปุ่ม LINE (หรือปุ่มไฮไลท์)
         c.coords(text, bx1 + 16, (by0 + by1) / 2)
         x0, y0, x1, y1 = c.bbox(text)
         c.coords(rect, x0 - 8, y0 - 3, x1 + 8, y1 + 3)
@@ -1763,6 +1905,7 @@ class SarabanApp(tk.Tk):
 
     def _release_preview(self):
         """ปิดหน้าต่างจัดเอกสารแล้ว ปล่อยภาพของเรื่องนี้ออกจากหน่วยความจำ (งานบันทึกถือสำเนาของตัวเองไว้)"""
+        self._scan_token = None          # เลิกสแกนหน้าภาพที่ยังเหลือ
         self._page_tk = {}
         self._orig_cache = {}
         self.page_full = {}
@@ -1779,6 +1922,8 @@ class SarabanApp(tk.Tk):
             'page_full': dict(self.page_full),     # หน้าแรก/หน้าลายเซ็นตามที่ย่อ/เลื่อนเนื้อหาไว้
             'line_pages': list(self._line_pages()),
             'blank': self.blank_on,                # แทรกหน้ากระดาษเปล่าไว้ = อยู่ในไฟล์ด้วย วางของหรือไม่ก็ตาม
+            # หน้าที่ไฮไลท์ชื่อโรงเรียนไว้ -> กรอบที่ต้องป้ายสี (หน้าแรก/หน้าลายเซ็นป้ายมาใน page_full แล้ว)
+            'highlight': {n: list(b) for n, b in self.doc_info['marks'].items() if n in self.hl_pages},
             'stamp_pct': self.stamp_pct.get(),
             'stamp_x': self.stamp_orig_x,
             'stamp_y': self.stamp_orig_y,
@@ -1832,16 +1977,19 @@ class SarabanApp(tk.Tk):
             used = pages_with_items([(y, img.height) for img, x, y in items],
                                     [(p['y'], p['h'], p['n']) for p in pages])
             has_blank_page = snapshot.get('blank', False) or blank_no in used
-            redo = {1, sig_page} | used | ({blank_no} if has_blank_page else set())
+            highlight = snapshot.get('highlight') or {}
+            redo = {1, sig_page} | used | set(highlight) | ({blank_no} if has_blank_page else set())
 
             def compose(p):
-                """หน้านี้ตามที่เห็นบนจอ: ภาพหน้า + ตรายาง/คำเกษียณส่วนที่ทับหน้านี้"""
+                """หน้านี้ตามที่เห็นบนจอ: ภาพหน้า (+ แถบไฮไลท์) + ตรายาง/คำเกษียณส่วนที่ทับหน้านี้"""
                 if p['n'] == blank_no:
                     page = Image.new('RGB', (p['w'], p['h']), 'white')
                 elif p['n'] in snapshot['page_full']:
-                    page = snapshot['page_full'][p['n']].copy()
+                    page = snapshot['page_full'][p['n']].copy()      # ไฮไลท์ป้ายไว้แล้วตอนจัดหน้า
                 else:
                     page = Image.open(self._page_file(p['n'], doc)).convert('RGB')
+                    if p['n'] in highlight:                          # ป้ายก่อนวางของ ของจะได้ไม่ติดสีเหลือง
+                        paint_marks(page, highlight[p['n']])
                 for img, x, y in items:
                     page.paste(img, (int(x) - 20, int(y) - p['y']), img)
                 return page

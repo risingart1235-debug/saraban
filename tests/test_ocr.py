@@ -114,6 +114,9 @@ class OcrMarksTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertEqual(args[args.index("-l") + 1], "tha")
         self.assertEqual(args[args.index("--psm") + 1], "4")
+        # Windows: no console window flashing up for every page the desktop program scans
+        self.assertEqual(run.call_args.kwargs["creationflags"],
+                         getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0))
 
 
 @unittest.skipIf(os.name == "nt", "ใช้สคริปต์ sh ปลอมตัวเป็น tesseract")
@@ -142,6 +145,66 @@ class FindTesseractTests(unittest.TestCase):
 
     def test_no_program_means_no_scanning(self):
         self.assertEqual(self.found("/nowhere/tesseract"), "")
+
+    def test_installed_while_the_program_runs_is_found_within_a_minute(self):
+        later = os.path.join(tempfile.mkdtemp(), "tesseract")
+        self.addCleanup(shutil.rmtree, os.path.dirname(later), True)
+        with patch.object(core, "_TESSERACT", None), patch.object(core, "_TESSERACT_AT", 0.0), \
+                patch.dict(os.environ, {"SARABAN_TESSERACT": later}), \
+                patch("shutil.which", return_value=None):
+            self.assertEqual(core.tesseract_cmd(), "")
+            shutil.copy(self.fake(["tha"]), later)
+            self.assertEqual(core.tesseract_cmd(), "")          # not asked again straight away
+            core._TESSERACT_AT -= 61
+            self.assertEqual(core.tesseract_cmd(), later)
+
+
+class ScanWholeDocumentTests(unittest.TestCase):
+    """the program on the school computer reads every scanned page itself, several at a time"""
+
+    def scan(self, pages, ocr, **kw):
+        got = []
+        with patch.object(core, "ocr_name_marks", side_effect=ocr):
+            core.scan_name_pages("doc.pdf", pages, 200, on_page=lambda n, b, e: got.append((n, b, e)), **kw)
+        return got
+
+    def test_every_page_is_read_and_what_is_found_is_reported(self):
+        got = self.scan([3, 4, 5, 6], lambda pdf, n, dpi, name: [(1, 2, 3, 4)] if n == 5 else [], workers=3)
+        self.assertEqual(sorted(n for n, _, _ in got), [3, 4, 5, 6])
+        self.assertEqual([(n, b) for n, b, _ in got if b], [(5, [(1, 2, 3, 4)])])
+
+    def test_pages_are_read_side_by_side(self):
+        lock, now, most = __import__("threading").Lock(), [0], [0]
+
+        def ocr(pdf, n, dpi, name):
+            with lock:
+                now[0] += 1
+                most[0] = max(most[0], now[0])
+            time.sleep(0.15)
+            with lock:
+                now[0] -= 1
+            return []
+        self.scan([1, 2, 3, 4], ocr, workers=2)
+        self.assertEqual(most[0], 2)
+
+    def test_a_page_that_cannot_be_read_does_not_stop_the_rest(self):
+        def ocr(pdf, n, dpi, name):
+            if n == 2:
+                raise RuntimeError("อ่านไม่ได้")
+            return []
+        got = self.scan([1, 2, 3], ocr, workers=1)
+        self.assertEqual([n for n, _, _ in got], [1, 2, 3])
+        self.assertIsInstance(got[1][2], RuntimeError)
+
+    def test_closing_the_window_stops_the_scan(self):
+        closed, read = __import__("threading").Event(), []
+
+        def ocr(pdf, n, dpi, name):
+            read.append(n)
+            closed.set()                                      # closed while page 1 was being read
+            return [(1, 2, 3, 4)]
+        self.assertEqual(self.scan([1, 2, 3], ocr, workers=1, stop=closed.is_set), [])
+        self.assertEqual(read, [1])
 
 
 def scanned_list_pdf(path, rows=30, ours=15):
@@ -257,6 +320,47 @@ class BackgroundScanTests(unittest.TestCase):
             state = docmode.start_ocr(job, 1, 5)
         docmode._ocr_tasks.join()
         self.assertEqual((state["pages"], state["cut"]), ([1, 2], True))
+
+    def test_only_the_given_pages_and_no_cap_when_the_system_scans_by_itself(self):
+        job = ready_job(self)
+        with patch.object(docmode, "OCR_MAX_PAGES", 2):
+            state = docmode.start_ocr(job, 2, 5, only={2, 4, 5}, limit=docmode.MAX_REVIEW_PAGES, auto=True)
+        docmode._ocr_tasks.join()
+        self.assertEqual((state["pages"], state["cut"], state["auto"]), ([2, 4, 5], False, True))
+        self.assertEqual(self.read, [2, 4, 5])                  # page 3 (text) is not read
+
+
+@unittest.skipIf(docmode is None or pymupdf is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน (pip install -r requirements.txt)")
+class AutoScanOnTheSchoolComputerTests(unittest.TestCase):
+    """the web app run on the school computer (เปิดเซิร์ฟเวอร์.bat sets SARABAN_OCR_AUTO): every
+    scanned page is read as soon as the document is ready - on the free cloud server only on request"""
+
+    def prepared(self, auto):
+        from tests.test_highlight import make_pdf
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        pdf = os.path.join(work, "doc.pdf")
+        make_pdf(pdf)                                           # page 4 is a scan, the rest is text
+        ai = ("เรียน ผอ.\nเพื่อโปรดทราบ", 1, "ศธ 1", "ประชุม", "-", "-", "-")
+        job = {"id": "auto-%d" % id(self), "user": "ครูเอ", "source": "upload", "status": "analyzing",
+               "dir": work}
+        with patch.object(docmode, "generate_kasien_text", return_value=ai), \
+                patch.object(docmode, "get_next_receipt_no", return_value="๕๗"), \
+                patch.object(docmode, "OCR_AUTO", auto), \
+                patch.object(core, "tesseract_cmd", return_value="tesseract"), \
+                patch.object(core, "ocr_name_marks", side_effect=lambda pdf, n, dpi: [(10, 20, 110, 50)]):
+            docmode._prepare(job, pdf, doc_no="-", doc_title="-", doc_date="-", sender="-",
+                             emoji="📄", attach="", book_id=None)
+            docmode._ocr_tasks.join()
+        self.assertEqual(job["status"], "ready")
+        return job
+
+    def test_scanned_pages_are_read_as_soon_as_the_document_is_ready(self):
+        st = docmode.ocr_state(self.prepared(True))
+        self.assertEqual((st["status"], st["pages"], st["found"], st["auto"]), ("done", [4], [4], True))
+
+    def test_not_on_the_free_cloud_server(self):
+        self.assertNotIn("status", docmode.ocr_state(self.prepared(False)))
 
 
 @unittest.skipIf(webmain is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน (pip install -r requirements.txt)")

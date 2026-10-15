@@ -77,6 +77,9 @@ _drive_tasks = queue.Queue()
 _ocr_tasks = queue.Queue()
 OCR_MAX_PAGES = 30             # สแกนครั้งละไม่เกินนี้ (Render ฟรีหน้าละ ~๑๕ วินาที ๓๐ หน้า ~๗ นาที)
 _ocr_sec = [15.0]              # วินาทีต่อหน้าที่วัดได้ล่าสุด ไว้บอกเวลาโดยประมาณก่อนกดสแกน
+# เปิดเว็บบนคอมเอง (เปิดเซิร์ฟเวอร์.bat ตั้ง SARABAN_OCR_AUTO=1): คอมอ่านภาพเร็ว สแกนหน้าภาพทุกหน้าให้เอง
+# ตอนเปิดเรื่องเหมือนโปรแกรมบนคอม — บน Render ฟรีช้า จึงยังให้กดปุ่ม 🔎 สแกน เลือกหน้าเอง
+OCR_AUTO = os.environ.get("SARABAN_OCR_AUTO", "").strip().lower() in ("1", "on", "true", "yes")
 
 # กู้คิวจากไดร์ฟเสร็จหรือยัง — เซิร์ฟเวอร์เพิ่งตื่น/บูตใหม่ คิวในหน่วยความจำยังว่างอยู่
 # จนกว่า restore_queue จะทำเสร็จ ใครจะถามว่า "อะไรอยู่ในคิวแล้ว" ต้องรอตัวนี้ก่อน
@@ -957,6 +960,13 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                  "fitted": kclear,             # False = ทับตัวหนังสืออยู่ หน้าจอบอกให้ลากย้าย
                  "png": _png_uri(kbox), "w": kbox.width, "h": kbox.height}])
 
+    # เปิดเว็บบนคอมเอง — สแกนหน้าภาพทุกหน้าเบื้องหลังเลย ไม่ต้องกดปุ่ม (หน้าจอแสดงความคืบหน้าที่ปุ่ม 🔎)
+    if OCR_AUTO and scan_pages:
+        try:
+            start_ocr(job, scan_pages[0], scan_pages[-1], only=set(scan_pages), limit=MAX_REVIEW_PAGES, auto=True)
+        except Exception as e:                 # ไม่มี Tesseract ฯลฯ — ยังกดปุ่มเองได้ หน้าจอบอกเหตุ
+            print(f"สแกนหน้าภาพเองไม่ได้: {type(e).__name__}: {e}")
+
 
 def _find_marks(pdf_path: str, pages: list) -> tuple:
     """ที่ป้ายสีชื่อโรงเรียนบนหน้าที่แสดง [{page: ลำดับหน้าบนจอ, x, y, w, h}] (จุดที่ DPI เต็ม)
@@ -999,19 +1009,22 @@ def ocr_state(job) -> dict:
     return state
 
 
-def start_ocr(job, first: int, last: int) -> dict:
+def start_ocr(job, first: int, last: int, *, only=None, limit=None, auto=False) -> dict:
     """ปุ่ม 🔎 สแกน — อ่านหน้า first..last (เลขหน้าจริง) ด้วยตัวอ่านภาพ หาชื่อโรงเรียนในหน้าที่เป็นภาพสแกน
 
     ผู้ใช้เลือกช่วงเอง (ปกติคือหน้าบัญชีรายชื่อ) เพราะอ่านช้า ทำเบื้องหลังทีละหน้า หน้าจอถามความคืบหน้าเอง
     หน้าที่เจอชื่อแล้ว (จากตัวหนังสือในไฟล์) ไม่อ่านซ้ำ — เจอชื่อเพิ่มก็ต่อท้าย job["marks"] ให้ป้ายสีได้เหมือนกัน
+    only = อ่านเฉพาะหน้าพวกนี้ในช่วงนั้น / auto = ระบบสแกนเองตอนเปิดเรื่อง (เปิดเว็บบนคอม — OCR_AUTO)
     """
     if not core.tesseract_cmd():
         raise OcrUnavailable("เครื่องนี้ยังไม่มีตัวอ่านภาพ (Tesseract ภาษาไทย) — สแกนหาชื่อในหน้าภาพไม่ได้")
     if job.get("status") not in ("ready", "save_error"):
         raise JobStateError("เรื่องนี้ไม่ได้อยู่ในหน้าจัดเอกสารแล้ว", status=job.get("status", ""))
     first, last = min(first, last), max(first, last)
+    limit = OCR_MAX_PAGES if limit is None else limit
     found = {job["pages"][m["page"]]["index"] for m in job.get("marks") or ()}
-    pages = [pg["index"] for pg in job["pages"] if first <= pg["index"] <= last and pg["index"] not in found]
+    pages = [pg["index"] for pg in job["pages"] if first <= pg["index"] <= last and pg["index"] not in found
+             and (only is None or pg["index"] in only)]
     if not any(first <= pg["index"] <= last for pg in job["pages"]):
         raise ValueError("ช่วงหน้าที่จะสแกนไม่มีอยู่ในเรื่องนี้")
     with _lock:
@@ -1019,7 +1032,7 @@ def start_ocr(job, first: int, last: int) -> dict:
         if current.get("status") in ("queued", "running"):
             return ocr_state(job)             # กดซ้ำระหว่างสแกนอยู่ ไม่เริ่มใหม่
         job["ocr"] = state = {"status": "queued", "first": first, "last": last,
-                              "pages": pages[:OCR_MAX_PAGES], "cut": len(pages) > OCR_MAX_PAGES,
+                              "pages": pages[:limit], "cut": len(pages) > limit, "auto": auto,
                               "done": 0, "current": None, "found": [], "error": "", "stop": False}
     _ocr_tasks.put(lambda: _run_ocr(job, state))
     return ocr_state(job)

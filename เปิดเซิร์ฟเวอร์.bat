@@ -15,6 +15,10 @@ echo.
 REM  Open the browser once the server is actually listening.
 REM  Runs in the background so it does not block the server.
 start /b "" python show_url.py --open
+REM  This computer reads scanned pages fast (Tesseract): scan every scanned page
+REM  by itself when a document opens. On the free cloud server the user picks
+REM  the pages with the scan button instead, because it is slow there.
+set SARABAN_OCR_AUTO=1
 python -m uvicorn web.main:app --host 0.0.0.0 --port 8000
 echo.
 python show_url.py --stopped
