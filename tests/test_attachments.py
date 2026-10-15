@@ -3,9 +3,11 @@
 A letter from สพป. often comes as separate attachments - 1. the covering letter, which ends
 at the sender's signature, 2. the list of schools, a form, a picture...  Only the first PDF
 used to be downloaded, so the screen showed pages up to the signature page and the rest never
-reached the saved file.  Now every PDF or picture attachment is put behind the covering letter
-in one file (by the server for the phone, which has no PDF tools), the AI still reads only the
-covering letter, and LINE still sends page 1 to the signature page unless more are ticked.
+reached the saved file.  Now every PDF attachment is put behind the covering letter in one
+file (by the server for the phone, which has no PDF tools) - pictures, Word and Excel files
+stay links in the LINE message, as the user chose - the AI still reads only the covering
+letter, and LINE still sends page 1 to the signature page unless more are ticked.  A PDF that
+did not come along (a phone script from before sends the letter alone) is pointed out.
 Offline: files are drawn on the spot; the สพป. site, the AI, Drive and LINE are fakes.
 """
 from __future__ import annotations
@@ -77,12 +79,15 @@ class PageAttachmentTests(unittest.TestCase):
         {"name": "บัญชีรายชื่อ", "url": "u/list.pdf", "ext": ".pdf"},
         {"name": "แบบฟอร์ม", "url": "u/form.docx", "ext": ".docx"},
         {"name": "รูปประกอบ", "url": "u/pic.jpg", "ext": ".jpg"},
+        {"name": "ภาคผนวก", "url": "u/annex.pdf", "ext": ".pdf"},
         {"name": "ไฟล์บีบอัด", "url": "u/all.zip", "ext": ".zip"},
-        {"name": "สแกน", "url": "u/scan.png", "ext": ".png"}]}
+        {"name": "สแกน", "url": "u/scan.png", "ext": ".png"},
+        {"name": "ปฏิทิน", "url": "u/annex2.pdf", "ext": ".pdf"}]}
 
-    def test_pdf_and_pictures_after_the_letter_in_site_order(self):
+    def test_only_pdf_files_after_the_letter_in_site_order(self):
+        """the user chose PDF only - pictures stay links in the LINE message like Word files"""
         self.assertEqual([a["url"] for a in sppweb.page_attachments(self.DETAIL)],
-                         ["u/list.pdf", "u/pic.jpg", "u/scan.png"])
+                         ["u/list.pdf", "u/annex.pdf", "u/annex2.pdf"])
 
     def test_every_pdf_comes_along_even_a_dozen_of_them(self):
         dozen = {"main_pdf": "0.pdf", "attachments": [
@@ -127,15 +132,15 @@ class PageAttachmentTests(unittest.TestCase):
         return [os.path.basename(p) for p in paths], skipped
 
     def test_a_file_that_will_not_download_is_skipped_not_fatal(self):
-        paths, skipped = self.fetch(fail={"u/pic.jpg": sppweb.DownloadError("หน้า error")})
-        self.assertEqual(paths, ["extra1.pdf", "extra3.png"])
+        paths, skipped = self.fetch(fail={"u/annex.pdf": sppweb.DownloadError("หน้า error")})
+        self.assertEqual(paths, ["extra1.pdf", "extra3.pdf"])
         self.assertEqual(len(skipped), 1)
-        self.assertIn("รูปประกอบ", skipped[0])
+        self.assertIn("ภาคผนวก", skipped[0])
 
     def test_files_past_the_size_budget_are_left_as_links(self):
-        paths, skipped = self.fetch(sizes={"u/list.pdf": 60, "u/pic.jpg": 50, "u/scan.png": 30},
+        paths, skipped = self.fetch(sizes={"u/list.pdf": 60, "u/annex.pdf": 50, "u/annex2.pdf": 30},
                                     budget=100)
-        self.assertEqual(paths, ["extra1.pdf", "extra3.png"])
+        self.assertEqual(paths, ["extra1.pdf", "extra3.pdf"])
         self.assertIn("ใหญ่เกิน", skipped[0])
 
     def test_an_expired_login_stops_like_for_the_letter_itself(self):
@@ -253,8 +258,8 @@ class ServerFlowTests(unittest.TestCase):
 
     def test_every_page_of_every_file_shows_and_the_ai_reads_only_the_letter(self):
         job = self.opened_from_the_news_list()
-        self.assertEqual((job["total_pages"], job["main_pages"]), (5, 2))
-        self.assertEqual([pg["index"] for pg in job["pages"]], [1, 2, 3, 4, 5])
+        self.assertEqual((job["total_pages"], job["main_pages"]), (4, 2))     # the picture stays a link
+        self.assertEqual([pg["index"] for pg in job["pages"]], [1, 2, 3, 4])
         self.assertEqual(self.ai_pages, [2])
         self.assertEqual(job["sig_page"], 2)                 # the AI said 4: no such page in the letter
         # pages after the first and the signature page load when scrolled to
@@ -271,7 +276,7 @@ class ServerFlowTests(unittest.TestCase):
                 patch.object(docmode, "send_line_with_image", sent):
             result = docmode._finalize_claimed(job, payload, lambda **kw: "๕๗")
         out = os.path.join(core.OUTPUT_ROOT, core.day_folder(), result["filename"])
-        self.assertEqual(len(pages_of(out)), 5)
+        self.assertEqual(len(pages_of(out)), 4)
         sent_pages = sorted(u.rsplit("_", 1)[1] for u in sent.call_args.args[1])
         self.assertEqual(sent_pages, ["หน้า๑.jpg", "หน้า๒.jpg"])
 
@@ -318,7 +323,8 @@ class ServerFlowTests(unittest.TestCase):
                                  ("junk.txt", b"not a document", "text/plain"),
                                  ("extra3.jpg", photo, "image/jpeg")])
         self.assertEqual(job["main_pages"], 2)
-        self.assertEqual(len(pages_of(os.path.join(job["dir"], "doc.pdf"))), 5)   # junk skipped
+        # the junk and the picture (from a phone script of before) are skipped: PDF only
+        self.assertEqual(len(pages_of(os.path.join(job["dir"], "doc.pdf"))), 4)
         docmode._drive_tasks.join()
         meta = self.drive.queue_put.call_args.args[1]
         self.assertEqual(meta["main_pages"], 2)             # kept for the restore after a restart
@@ -346,13 +352,14 @@ class ServerFlowTests(unittest.TestCase):
     # ---- ไฟล์แนบที่ไม่ได้มาด้วย: หน้าจอเตือน (เดิมหายเงียบ เช่นมือถือยังใช้สคริปต์รุ่นก่อน) ----
     ATTACH = sppweb.attach_text([{"name": "หนังสือนำ", "url": "https://spp/f/letter.pdf"},
                                  {"name": "บัญชีรายชื่อ", "url": "https://spp/f/list.pdf"},
+                                 {"name": "บัญชีรายชื่อ ๒", "url": "https://spp/f/list2.pdf"},
                                  {"name": "แบบฟอร์ม", "url": "https://spp/f/form.docx"},
                                  {"name": "รูป", "url": "https://spp/f/pic.jpg"}])
 
     @unittest.skipIf(webmain is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน")
     def test_phone_script_from_before_sends_no_attachments_and_the_editor_says_so(self):
         job = self.phone_submit([], attach=self.ATTACH)
-        self.assertEqual(docmode.missing_extras(job), 2)      # the list and the picture - not the Word file
+        self.assertEqual(docmode.missing_extras(job), 2)      # both lists - not the Word file or the picture
         self.assertTrue(docmode.prepare_stored(job))          # opened in the editor
         self.assertEqual(wait_ready(job), "ready", job.get("error"))
         users = {"ครูเอ": {"status": "approved", "salt": "a"}}
@@ -367,7 +374,8 @@ class ServerFlowTests(unittest.TestCase):
         with open(self.files["u/pic.jpg"], "rb") as f:
             photo = f.read()
         job = self.phone_submit([("extra1.pdf", listing, "application/pdf"),
-                                 ("extra2.jpg", photo, "image/jpeg")], attach=self.ATTACH)
+                                 ("extra2.pdf", listing, "application/pdf"),
+                                 ("extra3.jpg", photo, "image/jpeg")], attach=self.ATTACH)
         self.assertEqual(docmode.missing_extras(job), 0)
         docmode._drive_tasks.join()
         self.assertEqual(self.drive.queue_put.call_args.args[1]["extras_got"], 2)   # kept for a restore
@@ -384,11 +392,12 @@ class ServerFlowTests(unittest.TestCase):
         self.assertEqual(docmode.missing_extras({"attach": "📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)"}), 0)
         self.assertEqual(docmode.missing_extras({"attach": sppweb.attach_text(
             [{"name": "หนังสือนำ", "url": "https://spp/f/letter.pdf"},
-             {"name": "แบบฟอร์ม", "url": "https://spp/f/form.xlsx"}])}), 0)
+             {"name": "แบบฟอร์ม", "url": "https://spp/f/form.xlsx"},
+             {"name": "รูป", "url": "https://spp/f/pic.png"}])}), 0)       # links on purpose
 
     def test_opened_from_the_news_list_counts_what_was_downloaded(self):
         job = self.opened_from_the_news_list()
-        self.assertEqual(job["extras_got"], 2)
+        self.assertEqual(job["extras_got"], 1)                # the list; the picture stays a link
         self.assertEqual(docmode.missing_extras(job), 0)
 
 

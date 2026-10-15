@@ -232,13 +232,13 @@ class RunTests(unittest.TestCase):
         attachments = [{"name": "บัญชีรายชื่อ", "url": "list.pdf", "ext": ".pdf"},
                        {"name": "แบบฟอร์ม", "url": "form.docx", "ext": ".docx"},     # stays a link
                        {"name": "เสีย", "url": "bad.pdf", "ext": ".pdf"},
-                       {"name": "รูป", "url": "pic.jpg", "ext": ".jpg"}]
+                       {"name": "รูป", "url": "pic.jpg", "ext": ".jpg"}]           # PDF only: a link
         docs = [{"book_id": "186769", "doc_title": "เรื่อง"}]
         sent, _, downloads = self.run_main(docs, attachments=attachments, broken={"bad.pdf"})
         self.assertEqual(sent, ["186769"])
-        self.assertEqual(self.extras_sent, [["extra1.pdf", "extra3.jpg"]])
-        self.assertEqual(downloads, 4)                      # main + list + bad + picture
-        self.assertTrue(any("ส่งแล้ว (พร้อมไฟล์แนบ 2 ไฟล์)" in line for line in self.printed))
+        self.assertEqual(self.extras_sent, [["extra1.pdf"]])
+        self.assertEqual(downloads, 3)                      # main + list + bad - not the picture
+        self.assertTrue(any("ส่งแล้ว (พร้อมไฟล์แนบ 1 ไฟล์)" in line for line in self.printed))
 
     def test_stops_downloading_after_the_server_stays_down(self):
         docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]

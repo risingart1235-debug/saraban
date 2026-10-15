@@ -1107,7 +1107,8 @@ async def api_phone_submit(request: Request):
     """รับ PDF ที่มือถือโหลดจาก สพป. มาแล้ว สร้างงานให้รอลงรับ (ทบทวนในเบราว์เซอร์)
 
     file  = หนังสือนำ (PDF ไฟล์แรกของเรื่อง)
-    extra = ไฟล์แนบอื่นของเรื่องเดียวกัน (PDF/JPG/PNG ส่งได้หลายไฟล์ เรียงตามบนเว็บ สพป.)
+    extra = ไฟล์แนบ PDF อื่นของเรื่องเดียวกัน (ส่งได้หลายไฟล์ เรียงตามบนเว็บ สพป.) — รับเฉพาะ PDF
+            มือถือที่ยังใช้สคริปต์รุ่นก่อนส่งรูปมาด้วย ข้ามไป (ผู้ใช้เลือกให้ต่อท้ายเฉพาะ PDF)
             ต่อท้ายหนังสือนำเป็นเล่มเดียว — มือถือไม่มีเครื่องมือรวม PDF จึงส่งมาให้รวมที่นี่
     """
     user = _check_phone_token(request)
@@ -1130,11 +1131,11 @@ async def api_phone_submit(request: Request):
             path = _new_incoming_path()
             extra_paths.append(path)
             try:
-                total += await _stream_upload(extra, path, "document")
+                total += await _stream_upload(extra, path, "pdf")
             except HTTPException as e:
                 if e.status_code != 400:
                     raise
-                os.remove(path)                    # ไฟล์แนบเสีย/ไม่ใช่เอกสาร ข้ามไป เรื่องนี้ยังลงรับได้
+                os.remove(path)                    # ไฟล์แนบเสีย/ไม่ใช่ PDF ข้ามไป เรื่องนี้ยังลงรับได้
                 extra_paths.pop()
                 continue
             if total > MAX_UPLOAD_BYTES:
@@ -1281,7 +1282,7 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     # ชื่อโรงเรียนที่หาเจอ (marks) หาไว้ทุกเรื่อง ป้ายสีให้เมื่อคนที่เปิดตั้งโหมดไฮไลท์ไว้ในบัญชี
     out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
     out["ocr"] = docmode.ocr_state(job)      # ปุ่ม 🔎 สแกน (อ่านหน้าภาพสแกน)
-    out["missing_extras"] = docmode.missing_extras(job)   # ไฟล์แนบ PDF/รูป ที่ไม่ได้มาต่อท้าย
+    out["missing_extras"] = docmode.missing_extras(job)   # ไฟล์แนบ PDF ที่ไม่ได้มาต่อท้าย
     return out
 
 
