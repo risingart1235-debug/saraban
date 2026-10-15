@@ -21,6 +21,35 @@
 .cal-btn input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
                  cursor: pointer; border: 0; padding: 0; }
 .memo-del:hover { color: var(--red) !important; }
+
+/* ขอเลขหนังสือส่ง — ปุ่มใหญ่สีส้มแดง มีคำว่า "คลิก" ให้รู้ว่ากดได้ (เดิมเป็นการ์ดสีครีม ดูเหมือนป้ายประกาศ
+   ครูไม่รู้ว่าต้องแตะ) สีต่างจากปุ่มเข้าสู่ระบบ (เขียว) และหัวข้อ (น้ำเงิน) จะได้เด่นตั้งแต่เปิดหน้า */
+.send-card { border: 2px solid #d84315; border-radius: 16px; background: #fff; overflow: hidden;
+             margin-bottom: 14px; box-shadow: 0 8px 20px rgba(216, 67, 21, .30); }
+/* จอแคบ (มือถือส่วนใหญ่) ป้าย "คลิก" ลงไปเป็นแถบเต็มกว้างใต้หัวข้อ จอกว้างอยู่ข้างหัวข้อ — หัวข้อไม่ถูกบีบตัดคำ */
+.send-tab { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; width: 100%; min-height: 84px;
+            padding: 14px 14px 14px 16px; border: 0; cursor: pointer; text-align: left;
+            font-family: inherit; color: #fff; background: linear-gradient(180deg, #f4511e, #d84315);
+            text-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
+.send-tab:hover { filter: brightness(1.05); }
+.send-tab:active { filter: brightness(.95); }
+.send-tab:focus-visible { outline: 3px solid #1d4ed8; outline-offset: -5px; }
+.send-ico { flex: none; font-size: 32px; line-height: 1; }
+.send-txt { flex: 1 1 165px; min-width: 0; }
+.send-txt b { display: block; font-size: 20px; line-height: 1.3; }
+.send-txt small { display: block; margin-top: 2px; font-size: 14px; line-height: 1.4; }
+/* ป้าย "คลิก" สีขาว กะพริบเป็นวงรอบเบาๆ ชวนให้แตะ — เปิดแล้วเปลี่ยนเป็นปุ่มปิด หยุดกะพริบ */
+.send-cta { flex: 1 0 auto; text-align: center; padding: 9px 14px; border-radius: 999px;
+            background: #fff; color: #bf360c; font-size: 16px; font-weight: 700; white-space: nowrap; text-shadow: none;
+            animation: send-pulse 1.8s ease-out infinite; }
+.send-card.open .send-cta { animation: none; background: rgba(255, 255, 255, .22); color: #fff; }
+@keyframes send-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 255, 255, .9); }
+  70%  { box-shadow: 0 0 0 12px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+@media (prefers-reduced-motion: reduce) { .send-cta { animation: none; } }
+#sendPanel { padding: 4px 16px 16px; }
 </style>
 </head>
 <body>
@@ -32,17 +61,17 @@
   </div>
 
   <!-- ขอเลขหนังสือส่ง — ครูขอเองได้โดยไม่ต้องมีบัญชี จึงต้องอยู่หน้านี้ -->
-  <div class="card" style="border-color:#f59e0b; background:#fffbeb">
-    <button id="sendToggle" style="display:flex; align-items:center; justify-content:space-between;
-        gap:8px; width:100%; min-height:46px; padding:0; background:none; border:0;
-        font-family:inherit; font-size:16px; font-weight:700; color:#92400e; cursor:pointer">
-      <span>📤 ขอเลขหนังสือส่ง</span><span id="sendCaret">▾</span>
+  <div class="send-card" id="sendCard">
+    <button id="sendToggle" class="send-tab" aria-expanded="false" aria-controls="sendPanel">
+      <span class="send-ico" aria-hidden="true">📤</span>
+      <span class="send-txt">
+        <b>ขอเลขหนังสือส่ง</b>
+        <small id="sendHint">ไม่ต้องเข้าสู่ระบบ<br>กรอกครบ ได้เลขทันที</small>
+      </span>
+      <span class="send-cta" id="sendCaret">คลิกที่นี่ 👆</span>
     </button>
-    <p class="tiny" id="sendHint" style="margin:2px 0 0; color:#92400e">
-      ไม่ต้องเข้าสู่ระบบ — กรอกให้ครบแล้วระบบจะออกเลขให้ทันที
-    </p>
 
-    <div id="sendPanel" class="hidden" style="margin-top:14px">
+    <div id="sendPanel" class="hidden">
       <div id="sendMsg" class="hidden"></div>
       <div id="sendForm">
         <label for="sSender">ผู้ขอ / เจ้าของเรื่อง
@@ -265,9 +294,11 @@ document.addEventListener('keydown', (e) => {
 if (!$('sSender').value) $('sSender').value = memoLoad('sSender')[0] || '';
 
 $('sendToggle').onclick = () => {
-  const open = $('sendPanel').classList.toggle('hidden');
-  $('sendCaret').textContent = open ? '▾' : '▴';
-  if (!open) $('sSender').focus();
+  const shown = !$('sendPanel').classList.toggle('hidden');
+  $('sendCard').classList.toggle('open', shown);
+  $('sendToggle').setAttribute('aria-expanded', shown ? 'true' : 'false');
+  $('sendCaret').textContent = shown ? '▲ ปิด' : 'คลิกที่นี่ 👆';
+  if (shown) $('sSender').focus();
 };
 
 // ขอเลขได้ทีละเลข พอได้แล้วฟอร์มจะถูกซ่อน ต้องกด "ตกลง" ก่อนถึงจะขอเลขต่อไปได้
