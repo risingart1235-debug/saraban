@@ -1281,6 +1281,7 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     # ชื่อโรงเรียนที่หาเจอ (marks) หาไว้ทุกเรื่อง ป้ายสีให้เมื่อคนที่เปิดตั้งโหมดไฮไลท์ไว้ในบัญชี
     out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
     out["ocr"] = docmode.ocr_state(job)      # ปุ่ม 🔎 สแกน (อ่านหน้าภาพสแกน)
+    out["missing_extras"] = docmode.missing_extras(job)   # ไฟล์แนบ PDF/รูป ที่ไม่ได้มาต่อท้าย
     return out
 
 

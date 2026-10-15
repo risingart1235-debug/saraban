@@ -84,9 +84,14 @@ class PageAttachmentTests(unittest.TestCase):
         self.assertEqual([a["url"] for a in sppweb.page_attachments(self.DETAIL)],
                          ["u/list.pdf", "u/pic.jpg", "u/scan.png"])
 
-    def test_at_most_ten_extra_files(self):
+    def test_every_pdf_comes_along_even_a_dozen_of_them(self):
+        dozen = {"main_pdf": "0.pdf", "attachments": [
+            {"name": str(i), "url": f"{i}.pdf", "ext": ".pdf"} for i in range(13)]}
+        self.assertEqual(len(sppweb.page_attachments(dozen)), 12)        # used to stop at ten
+
+    def test_only_an_absurd_number_of_files_is_cut(self):
         many = {"main_pdf": "m.pdf", "attachments": [
-            {"name": str(i), "url": f"{i}.pdf", "ext": ".pdf"} for i in range(15)]}
+            {"name": str(i), "url": f"{i}.pdf", "ext": ".pdf"} for i in range(sppweb.MAX_EXTRA_FILES + 5)]}
         self.assertEqual(len(sppweb.page_attachments(many)), sppweb.MAX_EXTRA_FILES)
 
     def test_detail_page_records_each_files_type(self):
@@ -286,13 +291,13 @@ class ServerFlowTests(unittest.TestCase):
             self.assertEqual(b.get(f"/api/doc/{job['id']}/page/4").status_code, 404)
             self.assertEqual(TestClient(webmain.app).get(f"/api/doc/{job['id']}/page/4").status_code, 401)
 
-    def phone_submit(self, extras):
+    def phone_submit(self, extras, attach=""):
         client = TestClient(webmain.app)
         files = [("file", ("doc.pdf", open(self.files["u/letter.pdf"], "rb"), "application/pdf"))]
         for name, data, kind in extras:
             files.append(("extra", (name, data, kind)))
         meta = {"book_id": "88", "doc_no": "ศธ 1", "doc_title": "ประชุม", "doc_date": "-",
-                "sender": "-", "emoji": "🔵", "attach": ""}
+                "sender": "-", "emoji": "🔵", "attach": attach}
         try:
             r = client.post("/api/phone/submit", headers={"X-Phone-Token": "tok"},
                             files=files, data=meta)
@@ -337,6 +342,54 @@ class ServerFlowTests(unittest.TestCase):
         job = next(j for j in docmode._jobs.values() if j.get("book_id") == "99")
         self.addCleanup(lambda: docmode._jobs.pop(job["id"], None))
         self.assertEqual(job["main_pages"], 3)
+
+    # ---- ไฟล์แนบที่ไม่ได้มาด้วย: หน้าจอเตือน (เดิมหายเงียบ เช่นมือถือยังใช้สคริปต์รุ่นก่อน) ----
+    ATTACH = sppweb.attach_text([{"name": "หนังสือนำ", "url": "https://spp/f/letter.pdf"},
+                                 {"name": "บัญชีรายชื่อ", "url": "https://spp/f/list.pdf"},
+                                 {"name": "แบบฟอร์ม", "url": "https://spp/f/form.docx"},
+                                 {"name": "รูป", "url": "https://spp/f/pic.jpg"}])
+
+    @unittest.skipIf(webmain is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน")
+    def test_phone_script_from_before_sends_no_attachments_and_the_editor_says_so(self):
+        job = self.phone_submit([], attach=self.ATTACH)
+        self.assertEqual(docmode.missing_extras(job), 2)      # the list and the picture - not the Word file
+        self.assertTrue(docmode.prepare_stored(job))          # opened in the editor
+        self.assertEqual(wait_ready(job), "ready", job.get("error"))
+        users = {"ครูเอ": {"status": "approved", "salt": "a"}}
+        with patch.object(webmain, "load_users", return_value=users):
+            a = TestClient(webmain.app, cookies={"session": webmain.make_session("ครูเอ", users["ครูเอ"])})
+            self.assertEqual(a.get(f"/api/doc/{job['id']}").json()["missing_extras"], 2)
+
+    @unittest.skipIf(webmain is None, "ต้องลงแพ็กเกจฝั่งเซิร์ฟเวอร์ก่อน")
+    def test_nothing_to_say_when_every_attachment_came(self):
+        with open(self.files["u/list.pdf"], "rb") as f:
+            listing = f.read()
+        with open(self.files["u/pic.jpg"], "rb") as f:
+            photo = f.read()
+        job = self.phone_submit([("extra1.pdf", listing, "application/pdf"),
+                                 ("extra2.jpg", photo, "image/jpeg")], attach=self.ATTACH)
+        self.assertEqual(docmode.missing_extras(job), 0)
+        docmode._drive_tasks.join()
+        self.assertEqual(self.drive.queue_put.call_args.args[1]["extras_got"], 2)   # kept for a restore
+
+    def test_one_left_out_is_counted(self):
+        self.assertEqual(docmode.missing_extras({"attach": self.ATTACH, "main_pages": 2, "extras_got": 1}), 1)
+
+    def test_queue_saved_before_the_count_existed(self):
+        old = {"attach": self.ATTACH}                            # restored, no extras_got
+        self.assertEqual(docmode.missing_extras(dict(old, main_pages=None)), 2)
+        self.assertEqual(docmode.missing_extras(dict(old, main_pages=2)), 0)   # had attachments: trust it
+
+    def test_uploads_and_letters_without_attachments_say_nothing(self):
+        self.assertEqual(docmode.missing_extras({"attach": "📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)"}), 0)
+        self.assertEqual(docmode.missing_extras({"attach": sppweb.attach_text(
+            [{"name": "หนังสือนำ", "url": "https://spp/f/letter.pdf"},
+             {"name": "แบบฟอร์ม", "url": "https://spp/f/form.xlsx"}])}), 0)
+
+    def test_opened_from_the_news_list_counts_what_was_downloaded(self):
+        job = self.opened_from_the_news_list()
+        self.assertEqual(job["extras_got"], 2)
+        self.assertEqual(docmode.missing_extras(job), 0)
 
 
 if __name__ == "__main__":

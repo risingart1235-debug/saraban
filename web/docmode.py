@@ -361,7 +361,7 @@ def _backup_to_drive(job: dict, pdf: str):
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
                                             "sender", "emoji", "attach", "redo_no", "user",
-                                            "main_pages")}
+                                            "main_pages", "extras_got")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             fid = _dr.queue_put(pdf, meta)
@@ -446,6 +446,7 @@ def _restore_from_drive() -> int:
                                   status="stored", step="รอเปิดอ่าน",
                                   book_id=bid, redo_no=meta.get("redo_no") or None,
                                   main_pages=meta.get("main_pages") or None,
+                                  extras_got=meta.get("extras_got"),
                                   drive_file_id=item["id"], **fields)
             try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
                 job["created"] = datetime.fromisoformat(meta["created"])
@@ -723,13 +724,14 @@ def start_from_spp(user: str, book_id: str, session_state=None, redo_no: str = N
             main = os.path.join(job["dir"], "main.pdf")
             sppweb.download(sess, det["main_pdf"], main)
             extras = sppweb.download_extras(sess, det, job["dir"])
+            main_pages = _combine(main, extras, pdf)
+            _set(job, extras_got=len(extras) if main_pages else 0)
 
             _prepare(job, pdf,
                      doc_no=meta["doc_no"], doc_title=meta["doc_title"],
                      doc_date=meta["doc_date"], sender=meta["sender"],
                      emoji=det["emoji"], attach=sppweb.attach_text(det["attachments"]),
-                     book_id=str(book_id), redo_no=redo_no,
-                     main_pages=_combine(main, extras, pdf))
+                     book_id=str(book_id), redo_no=redo_no, main_pages=main_pages)
         except Exception as e:
             _fail(job, e)
 
@@ -806,7 +808,8 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
 
     pdf = os.path.join(job["dir"], "doc.pdf")
     try:
-        _set(job, main_pages=_combine(source_path, list(extras), pdf))
+        main_pages = _combine(source_path, list(extras), pdf)
+        _set(job, main_pages=main_pages, extras_got=len(extras) if main_pages else 0)
     except Exception as e:
         _fail(job, e)
         raise
@@ -849,6 +852,27 @@ def _fail(job, e):
 # ==========================================================
 # เตรียมข้อมูลให้หน้าจอแก้ไข
 # ==========================================================
+_ATTACH_URL = re.compile(r"👉\s*(\S+)")
+
+
+def missing_extras(job) -> int:
+    """ไฟล์แนบ PDF/รูป ที่เว็บ สพป. มีแต่ไม่ได้มาต่อท้ายเรื่องนี้ — หน้าจัดเอกสารเตือนให้รู้
+
+    นับจากรายการไฟล์แนบในข้อความ LINE (attach) เทียบกับที่ได้มาจริง (extras_got)
+    มือถือที่ยังใช้ phone_fetch.py รุ่นก่อนส่งมาแค่หนังสือนำ ไฟล์แนบหายเงียบโดยไม่มีอะไรบอก
+    (ไฟล์ใหญ่เกินงบหรือโหลดไม่สำเร็จก็ข้ามเหมือนกัน) — ไฟล์ Word/Excel ไม่นับ เพราะตั้งใจให้เป็นลิงก์
+    """
+    links = [u for u in _ATTACH_URL.findall(job.get("attach") or "")
+             if sppweb._attachment_ext(u) in sppweb.PAGE_EXTENSIONS]
+    if not any(sppweb._attachment_ext(u) == ".pdf" for u in links):
+        return 0                                   # อัปโหลดเอง / ไม่มีรายการไฟล์แนบ
+    expected = min(len(links) - 1, sppweb.MAX_EXTRA_FILES)     # ไฟล์ PDF แรก = หนังสือนำ
+    got = job.get("extras_got")
+    if got is None:          # กู้จากไดร์ฟที่ฝากไว้ก่อนมีตัวนับ: รู้แค่ว่ามีไฟล์แนบต่อท้ายหรือไม่
+        got = expected if job.get("main_pages") else 0
+    return max(0, expected - got)
+
+
 def _combine(main: str, extras: list, pdf: str):
     """หนังสือนำ + ไฟล์แนบอื่นของเรื่องเดียวกัน -> pdf เล่มเดียว (หนังสือนำอยู่หน้าแรกๆ เสมอ)
     คืนจำนวนหน้าของหนังสือนำ หรือ None ถ้าไม่มีไฟล์แนบต่อท้าย — รวมไม่สำเร็จก็ใช้แค่หนังสือนำเหมือนเดิม"""

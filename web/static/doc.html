@@ -345,6 +345,11 @@ function build() {
     // ไฟล์แนบอื่นของเรื่องนี้ (บัญชีรายชื่อ ฯลฯ) ต่อท้ายหนังสือนำไว้แล้ว — บอกว่าเริ่มหน้าไหน
     (D.main_pages && D.total_pages > D.main_pages
       ? `<br>📎 สิ่งที่ส่งมาด้วยต่อท้ายไว้แล้ว ตั้งแต่หน้า ${thaiNum(D.main_pages + 1)} (ทั้งเรื่อง ${thaiNum(D.total_pages)} หน้า)` : '') +
+    // ไฟล์แนบ PDF/รูป ที่เว็บ สพป. มีแต่ไม่ได้มาด้วย — ส่วนใหญ่เพราะมือถือยังใช้สคริปต์รุ่นก่อน (ส่งแค่หนังสือนำ)
+    (D.missing_extras > 0
+      ? `<br><span style="color:#b45309">⚠️ ไฟล์แนบ PDF/รูป อีก ${thaiNum(D.missing_extras)} ไฟล์ไม่ได้มาด้วย ` +
+        '— เปิดดูได้จากลิงก์ในข้อความ LINE · ถ้าเป็นทุกเรื่องที่ส่งจากมือถือ ให้อัปเดต ' +
+        'phone_fetch.py, core.py, sppweb.py ในมือถือ</span>' : '') +
     (D.total_pages > D.pages.length
       ? `<br>แสดง ${thaiNum(D.pages.length)} หน้าแรกจาก ${thaiNum(D.total_pages)} หน้า — ไฟล์ที่บันทึกยังมีครบทุกหน้า` : '');
   if (D.category && D.category !== 'auto') {

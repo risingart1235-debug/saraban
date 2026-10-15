@@ -43,7 +43,7 @@ FILE_EXTENSIONS = {
 MAX_DOWNLOAD_BYTES = int(os.environ.get("SARABAN_MAX_DOWNLOAD_MB", "80")) * 1024 * 1024
 # ไฟล์แนบที่ต่อท้ายหนังสือนำเป็นหน้าในเล่มเดียวกันได้ — Word/Excel/zip ยังเป็นลิงก์ในข้อความ LINE
 PAGE_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png")
-MAX_EXTRA_FILES = 10
+MAX_EXTRA_FILES = 30          # กันไฟล์แนบเยอะผิดปกติ — เรื่องจริงไม่ถึง ขนาดรวมยังคุมด้วยงบ MB
 
 # ==========================================================
 # เว้นจังหวะการยิง — กัน rate limit
