@@ -64,6 +64,12 @@ JOB_WORKERS = _env_int("SARABAN_JOB_WORKERS", 2, 1, 8)
 JOB_QUEUE_LIMIT = _env_int("SARABAN_JOB_QUEUE_LIMIT", 20, 1, 100)
 _work_queue = queue.Queue(maxsize=JOB_QUEUE_LIMIT)
 
+# ลงรับผิด -> กด "♻️ ลงรับใหม่ (ใช้เลขเดิม)" ในโหมด ๑ ได้ภายในกี่วันหลังลงรับ
+# เรื่องจากมือถือต้องเก็บต้นฉบับไว้บนไดร์ฟเอง เพราะบน Render ดึงจากเว็บ สพป. ใหม่ไม่ได้ (โดนบล็อก)
+# ของเดิมลบต้นฉบับทิ้งทันทีที่ลงรับ ลงรับผิดแล้วแก้จากมือถือไม่ได้เลย (ตั้ง 0 = ลบทันทีแบบเดิม)
+REDO_DAYS = _env_int("SARABAN_REDO_DAYS", 7, 0, 60)
+REDO_KEEP = timedelta(days=REDO_DAYS)
+
 # งานฝาก/ลบไฟล์คิวบนไดร์ฟ ทำเบื้องหลังทีละงานด้วยเธรดเดียว
 # ของเดิมเปิดเธรดใหม่ทุกเรื่อง มือถือส่งรวด ๘ เรื่องก็อัปพร้อมกันหลายทาง แต่ละทาง
 # อ่านไฟล์ทั้งก้อนเข้า RAM (อัปแบบไม่แบ่งก้อนใช้ราว ๓ เท่าของขนาดไฟล์) แถมยิงซ้อนกัน
@@ -354,8 +360,10 @@ def _backup_to_drive(job: dict, pdf: str):
     (ดู _drive_tasks ว่าทำไมต้องเข้าแถวทีละเรื่อง ไม่แยกเธรดใครเธรดมัน)
     """
     def work():
-        # ลงรับ/ข้ามไปแล้วระหว่างรอคิวอัป ไม่ต้องฝากแล้ว
-        if job.get("status") in ("done", "skipped"):
+        # ข้ามไปแล้วระหว่างรอคิวอัป ไม่ต้องฝากแล้ว — แต่ที่ลงรับไปแล้วยังต้องฝาก
+        # (เก็บไว้ให้กดลงรับใหม่ได้ ดู REDO_KEEP) ไม่งั้นเรื่องที่ลงรับไวกว่าที่อัปทันจะลงรับใหม่ไม่ได้
+        status = job.get("status")
+        if status == "skipped" or (status == "done" and not _keeps_original(job)):
             return
         try:
             import drive as _dr
@@ -388,6 +396,55 @@ def _drop_backup(job: dict):
     _drive_tasks.put(work)
 
 
+def _keeps_original(job: dict) -> bool:
+    """ลงรับแล้วยังเก็บต้นฉบับไว้ให้กด ♻️ ลงรับใหม่ได้ไหม — เฉพาะเรื่องจากมือถือ
+    (เรื่องจากเว็บ สพป. เครื่องที่ต่อเว็บได้ดึงใหม่เองได้ ส่วนไฟล์ที่อัปเอง ผู้ใช้มีไฟล์อยู่แล้ว)"""
+    return bool(REDO_DAYS and job.get("source") == "phone" and job.get("book_id"))
+
+
+def _has_original(job: dict) -> bool:
+    """ต้นฉบับยังอยู่ไหม — ในเครื่อง หรือฝากไว้บนไดร์ฟ (หลังเซิร์ฟเวอร์เกิดใหม่มีแต่บนไดร์ฟ)"""
+    return bool(job.get("drive_file_id")) or bool(
+        job.get("dir") and os.path.exists(os.path.join(job["dir"], "doc.pdf")))
+
+
+def _redo_since(rec: dict, meta: dict):
+    """เวลาที่ลงรับ ถ้ายังอยู่ในกำหนดเก็บไว้ลงรับใหม่ (REDO_KEEP) — ไม่อยู่หรือทำไม่ได้ คืน None
+
+    ทำไม่ได้ = ข้ามไปแล้ว หรือประวัติรุ่นเก่าที่ไม่ได้จดเลขรับไว้ (ไม่รู้จะใช้เลขอะไร)
+    """
+    if not REDO_DAYS or rec.get("status") != "registered" or not rec.get("receipt_no"):
+        return None
+    try:
+        at = datetime.strptime(str(rec.get("when") or "").strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        # ไม่รู้เวลาลงรับ ใช้เวลาที่มือถือส่งเข้ามาแทน (เก่ากว่า หมดกำหนดเร็วกว่า ไม่ค้างไดร์ฟนาน)
+        try:
+            at = datetime.fromisoformat(str(meta.get("created") or ""))
+        except ValueError:
+            return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=core.THAI_TZ)
+    return at if now_th() - at <= REDO_KEEP else None
+
+
+def _expire_kept():
+    """พ้นกำหนดเก็บไว้ลงรับใหม่แล้ว — เอาต้นฉบับบนไดร์ฟออก แล้วลืมเรื่องนั้นไป
+
+    ลืมแล้วมือถือก็ไม่ดึงซ้ำ เพราะเรื่องนี้อยู่ในประวัติลงรับ (ชีต) แล้ว
+    """
+    now = now_th()
+    with _lock:
+        old = [j for j in _jobs.values()
+               if j.get("status") == "done" and _keeps_original(j)
+               and now - (j.get("registered_at") or j["created"]) > REDO_KEEP]
+        for j in old:
+            _jobs.pop(j["id"], None)
+    for j in old:
+        _drop_backup(j)
+        shutil.rmtree(j.get("dir") or "", ignore_errors=True)
+
+
 def restore_queue() -> int:
     """กู้คิวจากไดร์ฟ แล้วบอกทุกคนที่รออยู่ว่ากู้เสร็จแล้ว (ถึงจะกู้ไม่สำเร็จก็ต้องบอก)"""
     try:
@@ -410,6 +467,9 @@ def _restore_from_drive() -> int:
 
     ตัวไฟล์ยังไม่ดึงลงมาตอนนี้ รอจนผู้ใช้กดเปิดเรื่องนั้นจริงถึงค่อยดึง
     (เหตุผลเดียวกับ prepare_stored — ไม่เปลืองแรงกับเรื่องที่ยังไม่มีใครดู)
+
+    เรื่องที่ลงรับไปแล้วแต่ยังอยู่ในกำหนดเก็บไว้ลงรับใหม่ (REDO_KEEP) กู้กลับมาเป็น "ลงรับแล้ว"
+    ไม่เข้าคิว แค่ให้หน้ารายการมีปุ่ม ♻️ ลงรับใหม่ให้กด
     """
     try:
         import drive as _dr
@@ -420,17 +480,25 @@ def _restore_from_drive() -> int:
         print(f"กู้คิวจากไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
         return 0
 
-    restored = 0
+    restored = kept = 0
     for item in items:
         meta = item["meta"]
         bid = str(meta.get("book_id") or "")
         try:
-            # ลงรับ/ข้ามไปแล้วระหว่างที่เซิร์ฟเวอร์ดับ ก็ไม่ต้องกู้ เก็บกวาดทิ้งเลย
-            if _durable_phone_record(bid):
-                _dr.queue_drop(item["id"])
-                continue
+            rec = _durable_phone_record(bid)
         except Exception:
-            pass          # อ่านสถานะไม่ได้ก็กู้ไว้ก่อน ดีกว่าทำหาย
+            rec = None    # อ่านสถานะไม่ได้ก็กู้ไว้ก่อน ดีกว่าทำหาย
+        registered_at = _redo_since(rec, meta) if rec else None
+        if rec and registered_at is None:
+            # ข้ามไปแล้ว / ลงรับนานเกินกำหนดเก็บ (รวมที่จบไประหว่างเซิร์ฟเวอร์ดับ) — เก็บกวาดทิ้งเลย
+            try:
+                _dr.queue_drop(item["id"])
+            except Exception:
+                pass      # ลบไม่ได้ก็ไม่กู้ ไว้ลองลบใหม่ตอนเซิร์ฟเวอร์เกิดใหม่รอบหน้า
+            continue
+        state = ({"status": "done", "step": "ลงรับแล้ว", "receipt_no": str(rec["receipt_no"]),
+                  "registered_at": registered_at}
+                 if registered_at else {"status": "stored", "step": "รอเปิดอ่าน"})
         with _lock:
             if any(j.get("source") == "phone" and j.get("book_id") == bid
                    for j in _jobs.values()):
@@ -442,8 +510,7 @@ def _restore_from_drive() -> int:
             # (กดโหลดใหม่แล้ว AI อ่านเรื่องเดิมให้ ไม่ใช่ "ไม่พบงานนี้")
             old_id = str(meta.get("job_id") or "")
             jid = old_id if re.fullmatch(r"[0-9a-f]{32}", old_id) and old_id not in _jobs else None
-            job = _new_job_locked(meta.get("user") or "phone", jid=jid, source="phone",
-                                  status="stored", step="รอเปิดอ่าน",
+            job = _new_job_locked(meta.get("user") or "phone", jid=jid, source="phone", **state,
                                   book_id=bid, redo_no=meta.get("redo_no") or None,
                                   main_pages=meta.get("main_pages") or None,
                                   extras_got=meta.get("extras_got"),
@@ -453,8 +520,11 @@ def _restore_from_drive() -> int:
             except Exception:
                 pass
         restored += 1
-    if restored:
-        print(f"กู้คิวรอลงรับจากไดร์ฟกลับมาได้ {restored} เรื่อง")
+        kept += 1 if registered_at else 0
+    if restored - kept:
+        print(f"กู้คิวรอลงรับจากไดร์ฟกลับมาได้ {restored - kept} เรื่อง")
+    if kept:
+        print(f"กู้เรื่องที่ลงรับแล้ว (เก็บต้นฉบับไว้ลงรับใหม่) กลับมาได้ {kept} เรื่อง")
     return restored
 
 
@@ -465,7 +535,9 @@ def _cleanup():
     ลงรับและยังไม่ได้ข้าม — เป็นงานค้างจริงที่ต้องคาไว้ให้เห็น ไม่ใช่ขยะ
     สำคัญกับเรื่องที่กู้กลับมาหลังเซิร์ฟเวอร์เกิดใหม่ ซึ่งเวลาสร้างเป็นของเมื่อวาน
     ถ้าไม่ยกเว้นไว้ พอมีใครนำเข้าไฟล์ในโหมด ๒ ทีเดียว คิวที่เพิ่งกู้มาจะหายเกลี้ยง
+    (หรือลงรับแล้วแต่เก็บต้นฉบับไว้ลงรับใหม่ — อันนั้น _expire_kept ลบให้เมื่อพ้นกำหนด)
     """
+    _expire_kept()
     now = now_th()
     with _lock:
         stale = [j for j, v in _jobs.items()
@@ -649,35 +721,94 @@ def phone_queue() -> list:
     ต้องรวม status "error" ด้วย ไม่งั้นเรื่องที่ประมวลผลพังจะหายเงียบ
     ผู้ใช้จะเห็นแค่หน้าว่างทั้งที่สคริปต์บอกว่าส่งสำเร็จ — หาสาเหตุไม่ได้เลย
     """
-    rows = []
     with _lock:
-        for j in _jobs.values():
-            if j.get("source") != "phone" or j.get("status") not in (
+        rows = [(j.get("created"), _phone_row(j)) for j in _jobs.values()
+                if j.get("source") == "phone" and j.get("status") in (
                     "uploading", "stored", "queued", "analyzing", "ready", "saving",
-                    "skipping", "error", "save_error"):
-                continue
-            rows.append((j.get("created"), {
-                "job_id": j["id"],
-                "status": j.get("status"),
-                "step": j.get("step", ""),
-                "error": j.get("error", ""),
-                "receipt_no": j.get("receipt_no", ""),
-                "doc_no": j.get("doc_no", "-"),
-                "doc_title": j.get("doc_title", "-"),
-                "doc_date": j.get("doc_date", "-"),
-                "sender": j.get("sender", "-"),
-                "emoji": j.get("emoji", ""),
-                "book_id": j.get("book_id", ""),
-                "time": j["created"].strftime("%H:%M") if j.get("created") else "",
-                # เติมให้หน้ารายการรวมใช้ได้เหมือนของที่ดึงจากเว็บ สพป.
-                # ของ สพป. คือ "วันที่เว็บอัปโหลด" ของทางนี้คือ "วันที่มือถือส่งเข้ามา"
-                "sent_key": _sent_key(j.get("created")),
-                "sent_date": _sent_thai(j.get("created")),
-                "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
-                "source": "phone",
-            }))
+                    "skipping", "error", "save_error")]
     rows.sort(key=lambda r: r[0] or _OLDEST, reverse=True)
     return [r[1] for r in rows]
+
+
+def phone_registered() -> list:
+    """เรื่องจากมือถือที่ลงรับแล้วและยังเก็บต้นฉบับไว้ — ใหม่สุดอยู่บน
+
+    ให้ขึ้นในรายการโหมด ๑ พร้อมปุ่ม ♻️ ลงรับใหม่ (บน Render รายการมีแต่ของจากมือถือ
+    ถ้าไม่ใส่ไว้ เรื่องที่ลงรับแล้วจะหายจากจอทันที ลงรับผิดก็หาทางกลับไปแก้ไม่ได้)
+    """
+    _expire_kept()
+    with _lock:
+        rows = [(j.get("created"), _phone_row(j)) for j in _jobs.values()
+                if j.get("status") == "done" and _keeps_original(j) and _has_original(j)]
+    rows.sort(key=lambda r: r[0] or _OLDEST, reverse=True)
+    return [r[1] for r in rows]
+
+
+def _phone_row(j: dict) -> dict:
+    return {
+        "job_id": j["id"],
+        "status": j.get("status"),
+        "step": j.get("step", ""),
+        "error": j.get("error", ""),
+        "receipt_no": j.get("receipt_no", ""),
+        "doc_no": j.get("doc_no", "-"),
+        "doc_title": j.get("doc_title", "-"),
+        "doc_date": j.get("doc_date", "-"),
+        "sender": j.get("sender", "-"),
+        "emoji": j.get("emoji", ""),
+        "book_id": j.get("book_id", ""),
+        "time": j["created"].strftime("%H:%M") if j.get("created") else "",
+        # เติมให้หน้ารายการรวมใช้ได้เหมือนของที่ดึงจากเว็บ สพป.
+        # ของ สพป. คือ "วันที่เว็บอัปโหลด" ของทางนี้คือ "วันที่มือถือส่งเข้ามา"
+        "sent_key": _sent_key(j.get("created")),
+        "sent_date": _sent_thai(j.get("created")),
+        "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
+        "source": "phone",
+    }
+
+
+# ติดตัวเรื่องมาตั้งแต่มือถือส่ง ลงรับใหม่ต้องคงไว้ — ที่เหลือ (ผล AI ตำแหน่งที่วาง เลขที่จองไว้)
+# ล้างทิ้งให้หมด โดยเฉพาะ reserved_receipt: ถ้าค้างไว้ ตอนบันทึกจะข้ามการเขียนทับแถวในทะเบียน
+_PHONE_SEED = ("id", "user", "created", "dir", "source", "book_id", "doc_no", "doc_title",
+               "doc_date", "sender", "emoji", "attach", "main_pages", "extras_got",
+               "drive_file_id", "registered_at")
+
+
+def reopen_phone(book_id: str, redo_no: str = None):
+    """เปิดเรื่องจากมือถือที่ลงรับไปแล้วขึ้นมาทำใหม่ จากต้นฉบับที่เก็บไว้ (ดู REDO_KEEP)
+
+    redo_no = ลงรับใหม่ด้วยเลขเดิม (เขียนทับแถวเดิมในทะเบียน ไม่กินเลขใหม่ ส่ง LINE ใหม่)
+    ไม่ใส่ = ลงรับตามปกติ ได้เฉพาะเรื่องที่ไม่มีสถานะลงรับ/ข้ามแล้ว (ถอนออกจากประวัติที่หน้า 🔧 ถอยเลข)
+    คืน None ถ้าเซิร์ฟเวอร์ไม่มีต้นฉบับ — ผู้เรียกไปดึงจากเว็บ สพป. แทน (ได้เฉพาะเครื่องที่ต่อเว็บได้)
+    """
+    bid = str(book_id or "").strip()
+
+    def latest():
+        mine = [j for j in _jobs.values() if j.get("source") == "phone" and j.get("book_id") == bid]
+        return max(mine, key=lambda j: j.get("created") or _OLDEST) if mine else None
+
+    with _lock:
+        if not bid or latest() is None:
+            return None             # เช็คในหน่วยความจำก่อน ไม่ต้องอ่านชีตทุกครั้งที่เปิดเรื่องจากเว็บ สพป.
+    if not redo_no and _durable_phone_record(bid):
+        return None
+    with _lock:
+        job = latest()
+        status = job.get("status") if job else None
+        if status in ("uploading", "queued", "analyzing", "ready", "saving", "save_error"):
+            return job              # กำลังทำอยู่ (เปิดค้างไว้ หรืออีกเครื่องกดไปก่อน) — เปิดงานเดิมต่อ
+        if status not in ("done", "error", "stored") or not _has_original(job):
+            return None
+        fresh = {"status": "stored", "step": "รอเปิดอ่าน", "error": "",
+                 "redo_no": str(redo_no) if redo_no else None,
+                 "redo_of": job.get("result") if status == "done" else job.get("redo_of")}
+        # สถานะเปลี่ยนทีเดียวตอน update — หน้าที่ถามสถานะอยู่ (ไม่ได้ถือล็อก) ไม่เจองานที่ไม่มี status
+        for k in [k for k in job if k not in _PHONE_SEED and k not in fresh]:
+            del job[k]
+        job.update(fresh)
+    # เซิร์ฟเวอร์เกิดใหม่มาแล้ว โฟลเดอร์งานไม่มี — ไฟล์ดึงจากไดร์ฟลงมาตอนผู้ใช้เปิดเรื่อง
+    os.makedirs(job["dir"], exist_ok=True)
+    return job
 
 
 # ==========================================================
@@ -1253,8 +1384,11 @@ def finalize(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dic
         _set(job, status="save_error", step="บันทึกยังไม่สมบูรณ์",
              error=f"{type(e).__name__}: {e}")
         raise
-    _set(job, status="done", step="บันทึกเรียบร้อย", error="", result=result)
-    _drop_backup(job)
+    _set(job, status="done", step="บันทึกเรียบร้อย", error="", result=result,
+         registered_at=now_th())
+    # เรื่องจากมือถือเก็บต้นฉบับไว้อีก REDO_DAYS วัน ลงรับผิดจะได้กด ♻️ ลงรับใหม่ได้
+    if not _keeps_original(job):
+        _drop_backup(job)
     return result
 
 
@@ -1412,7 +1546,9 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
                  else to_thai_digits(dd))
         kasien_line = " | ".join(" ".join((b.get("text") or "").split())
                                  for b in boxes[:2] if (b.get("text") or "").strip())
-        msg = (f"📌 เลขที่รับ {receipt_no}\n"
+        # ลงรับใหม่ด้วยเลขเดิม — กลุ่มจะเห็นเลขรับเดียวกันสองข้อความ ต้องบอกว่าอันไหนใช้จริง
+        redo = "♻️ ลงรับใหม่ (แก้ไข) — ใช้ข้อความนี้แทนข้อความก่อนหน้า\n" if job.get("redo_no") else ""
+        msg = (f"{redo}📌 เลขที่รับ {receipt_no}\n"
                f"{job['emoji']} {to_thai_digits(job['doc_no'])}\n"
                f"🆕เรื่อง: {job['doc_title']}\n"
                f"🌟หนังสือลงวันที่ : {shown}\n"
@@ -1431,13 +1567,19 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
 
 
 def skip(job):
-    """ไม่รับเอกสารนี้ — จำไว้ว่าข้ามแล้ว จะได้ไม่ดึงซ้ำ"""
+    """ไม่รับเอกสารนี้ — จำไว้ว่าข้ามแล้ว จะได้ไม่ดึงซ้ำ
+
+    งานลงรับใหม่ (มี redo_no) คือเรื่องที่ลงรับไว้แล้ว กดปุ่มนี้แค่ "ยกเลิกการลงรับใหม่"
+    ห้ามจดว่าข้าม — ของเดิมจดลงชีต เรื่องที่มีแถวในทะเบียนอยู่แล้วเลยกลายเป็น "ข้าม" ในรายการ
+    """
     with _lock:
         status = job.get("status", "")
         if status == "skipped":
             return {"ok": True, "existing": True}
         if status in ("saving", "done", "skipping"):
             raise JobStateError("ข้ามงานนี้ไม่ได้ เพราะกำลังบันทึกหรือบันทึกแล้ว", status=status)
+        if job.get("redo_no"):
+            return _cancel_redo_locked(job)
         previous = status
         job.update(status="skipping", step="กำลังบันทึกว่าไม่รับเอกสาร...")
     try:
@@ -1451,3 +1593,16 @@ def skip(job):
     _set(job, status="skipped", step="ข้ามเอกสารแล้ว", result=result)
     _drop_backup(job)
     return result
+
+
+def _cancel_redo_locked(job) -> dict:
+    """เลิกลงรับใหม่ (ถือ _lock อยู่) — เรื่องนี้ยังลงรับไว้ด้วยเลขเดิมเหมือนก่อนกด ไม่แตะทะเบียน/ชีต"""
+    no = str(job["redo_no"])
+    if _keeps_original(job) and _has_original(job):
+        # กลับเป็นเรื่องที่ลงรับแล้ว ต้นฉบับยังเก็บไว้ กด ♻️ ลงรับใหม่ได้อีกจนพ้นกำหนด
+        job.update(status="done", step="ลงรับแล้ว", error="", receipt_no=no,
+                   result=job.get("redo_of") or {"ok": True, "receipt_no": no})
+    else:
+        job.update(status="skipped", step="ยกเลิกการลงรับใหม่แล้ว", error="",
+                   result={"ok": True, "cancelled": True, "receipt_no": no})
+    return {"ok": True, "cancelled": True, "receipt_no": no}

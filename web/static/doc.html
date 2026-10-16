@@ -340,7 +340,13 @@ function build() {
   $('savebar').classList.remove('hidden');
   $('back').href = backUrl();          // ปุ่มมุมซ้ายบนก็กลับที่เดิม
   $('rno').textContent = D.receipt_no;
+  // ลงรับใหม่ด้วยเลขเดิม (กด ♻️ ในรายการ) — ปุ่ม "ไม่รับ" กลายเป็นยกเลิกการลงรับใหม่ ไม่ใช่ข้ามเรื่อง
+  $('skip').textContent = D.redo_no ? '↩️ ยกเลิก' : '🚫 ไม่รับ';
   $('meta').innerHTML =
+    (D.redo_no
+      ? `<span style="color:#0369a1;font-weight:700">♻️ ลงรับใหม่ด้วยเลขเดิม ${esc(D.redo_no)}</span>` +
+        '<br><span class="tiny">บันทึกแล้วจะเขียนทับแถวเดิมในทะเบียน (ไม่กินเลขใหม่) ' +
+        'และส่ง LINE ใหม่อีกข้อความ บอกกลุ่มว่าใช้แทนข้อความเดิม</span><br>' : '') +
     `${esc(D.emoji)} <b>${esc(D.doc_no)}</b><br>เรื่อง: ${esc(D.doc_title)}<br>ลงวันที่ ${esc(D.doc_date)} · จาก ${esc(D.sender)}` +
     // ไฟล์แนบอื่นของเรื่องนี้ (บัญชีรายชื่อ ฯลฯ) ต่อท้ายหนังสือนำไว้แล้ว — บอกว่าเริ่มหน้าไหน
     (D.main_pages && D.total_pages > D.main_pages
@@ -1243,7 +1249,10 @@ $('save').onclick = async () => {
     if (!d.ok) throw new Error(d.detail || 'บันทึกไม่สำเร็จ');
     dropDraft(); clearTimeout(ocrTimer);
     $('app').classList.add('hidden'); $('savebar').classList.add('hidden');
-    show('ok', `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>` +
+    show('ok', (D.redo_no
+        ? `<b>ลงรับใหม่เรียบร้อย — ใช้เลขที่รับเดิม ${esc(d.receipt_no)}</b><br>` +
+          'เขียนทับแถวเดิมในทะเบียนแล้ว · ไฟล์ของครั้งก่อนยังอยู่ในไดร์ฟ ลบเองได้ถ้าไม่ใช้แล้ว<br>'
+        : `<b>ลงรับเรียบร้อย — เลขที่รับ ${esc(d.receipt_no)}</b><br>`) +
       (d.line_ok ? 'ส่งเข้ากลุ่ม LINE แล้ว' : '⚠️ ส่ง LINE ไม่สำเร็จ (ไฟล์กับทะเบียนบันทึกแล้ว)') +
       // รูปกับข้อความล้มคนละเรื่อง เคยเจอข้อความเข้าแต่รูปหาย แล้วไม่มีอะไรบอก
       (d.line_ok && !d.photo_ok ? '<br>⚠️ แต่รูปหน้าที่ลงรับไม่ได้แนบไป (อัป imgbb ไม่สำเร็จ)' : '') +
@@ -1262,7 +1271,9 @@ $('save').onclick = async () => {
 };
 
 $('skip').onclick = async () => {
-  if (!confirm('ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนและไม่ส่ง LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก')) return;
+  if (!confirm(D && D.redo_no
+      ? `ยกเลิกการลงรับใหม่ใช่ไหม?\n\nเรื่องนี้ยังลงรับไว้ด้วยเลข ${D.redo_no} เหมือนเดิม — ไม่ลบหรือแก้อะไร`
+      : 'ไม่รับเอกสารนี้ใช่ไหม?\n\n• จะไม่ลงทะเบียนและไม่ส่ง LINE\n• จะไม่ดึงเรื่องนี้ขึ้นมาอีก')) return;
   await fetch(`/api/doc/${JOB}/skip`, { method: 'POST' });
   dropDraft();
   location.href = backUrl();

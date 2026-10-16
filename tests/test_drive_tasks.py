@@ -90,9 +90,11 @@ class DriveTaskQueueTests(unittest.TestCase):
         self.assertEqual(self.fake.dropped, ["f9"])
         self.assertEqual(job["drive_file_id"], "")
 
-    def test_job_finished_before_its_turn_is_not_uploaded(self):
-        docmode._backup_to_drive(phone_job("7", status="done"), "doc.pdf")
-        self.finish()
+    def test_job_skipped_before_its_turn_is_not_uploaded(self):
+        docmode._backup_to_drive(phone_job("7", status="skipped"), "doc.pdf")
+        with patch.object(docmode, "REDO_DAYS", 0):     # not kept for re-registering either
+            docmode._backup_to_drive(phone_job("8", status="done"), "doc.pdf")
+            self.finish()
         self.assertEqual(self.fake.put, [])
 
     def test_backup_remembers_the_job_id(self):

@@ -331,23 +331,30 @@ def queue_put(local_pdf: str, meta: dict) -> str:
 
 
 def queue_list() -> list:
-    """รายการที่ฝากไว้ทั้งหมด — ใช้ตอนเซิร์ฟเวอร์เปิดใหม่"""
+    """รายการที่ฝากไว้ทั้งหมด — ใช้ตอนเซิร์ฟเวอร์เปิดใหม่
+
+    ไล่ให้ครบทุกหน้า: เรื่องที่ลงรับแล้วยังเก็บไว้หลายวัน (ไว้กดลงรับใหม่) จำนวนจึงเกินหน้าเดียวได้
+    """
     if not enabled():
         return []
     svc = _service()
-    res = _run(svc.files().list(
-        q=f"'{_queue_folder()}' in parents and trashed = false",
-        fields="files(id,description,createdTime)", pageSize=200,
-        supportsAllDrives=True, includeItemsFromAllDrives=True))
-    rows = []
-    for f in res.get("files", []):
-        try:
-            meta = json.loads(f.get("description") or "{}")
-        except Exception:
-            continue          # ไฟล์แปลกปลอมที่คนเอามาวางเอง ข้ามไป
-        if isinstance(meta, dict) and meta.get("book_id"):
-            rows.append({"id": f["id"], "meta": meta, "created": f.get("createdTime", "")})
-    return rows
+    folder = _queue_folder()
+    rows, token = [], None
+    while True:
+        res = _run(svc.files().list(
+            q=f"'{folder}' in parents and trashed = false",
+            fields="nextPageToken, files(id,description,createdTime)", pageSize=200,
+            pageToken=token, supportsAllDrives=True, includeItemsFromAllDrives=True))
+        for f in res.get("files", []):
+            try:
+                meta = json.loads(f.get("description") or "{}")
+            except Exception:
+                continue          # ไฟล์แปลกปลอมที่คนเอามาวางเอง ข้ามไป
+            if isinstance(meta, dict) and meta.get("book_id"):
+                rows.append({"id": f["id"], "meta": meta, "created": f.get("createdTime", "")})
+        token = res.get("nextPageToken")
+        if not token:
+            return rows
 
 
 def queue_drop(file_id: str) -> bool:

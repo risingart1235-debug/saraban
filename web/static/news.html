@@ -68,6 +68,7 @@ function esc(v) {
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
+const thaiNum = (n) => String(n).replace(/[0-9]/g, (c) => '๐๑๒๓๔๕๖๗๘๙'[c]);
 
 // อ่านคำตอบจากเซิร์ฟเวอร์อย่างปลอดภัย
 // ถ้าเซิร์ฟเวอร์พังแล้วส่ง HTML กลับมา r.json() จะพังและ Safari ขึ้นข้อความว่า
@@ -186,7 +187,8 @@ function render() {
      </div>
      <p class="tiny" style="margin:10px 0 0">
        เรียงตามวันที่เว็บอัปโหลด (วันเวลาที่ส่ง) ใหม่สุดอยู่บน<br>
-       กด "ลงรับใหม่" ในเรื่องที่รับแล้ว จะใช้<b>เลขรับเดิม</b> ไม่กินเลขใหม่
+       ลงรับผิด กด "♻️ ลงรับใหม่" ในเรื่องที่รับแล้ว จะใช้<b>เลขรับเดิม</b> ไม่กินเลขใหม่
+       ${DATA.redo_days ? `(เรื่องจากมือถือกดได้ภายใน ${thaiNum(DATA.redo_days)} วันหลังลงรับ)` : ''}
      </p>`;
   for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; remember('filter', filter); render(); };
 

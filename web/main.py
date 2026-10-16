@@ -930,6 +930,10 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         spp_error = f"{type(e).__name__}: {e}"
 
     jobs = {r["book_id"]: r for r in docmode.phone_queue() if r.get("book_id")}
+    # ลงรับแล้วแต่ยังเก็บต้นฉบับไว้ (บน Render ไม่มีรายการจากเว็บ สพป. ถ้าไม่ใส่ไว้จะหายจากจอ
+    # ลงรับผิดก็กด ♻️ ลงรับใหม่ไม่ได้) — ไม่พ่วง job_id: เปิดผ่าน /api/doc/open ให้ล้างงานเดิมก่อนเสมอ
+    kept = {r["book_id"]: r for r in docmode.phone_registered()
+            if r.get("book_id") and r["book_id"] not in jobs}
     docs, seen = [], set()
     for d in fetched:
         d = dict(d)
@@ -939,14 +943,16 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         if bid in jobs:                    # ไฟล์อยู่บนเซิร์ฟเวอร์แล้ว เปิดได้เลย
             d["job_id"] = jobs[bid]["job_id"]
         docs.append(d)
-    for bid, r in jobs.items():
+    for bid, r in list(jobs.items()) + list(kept.items()):
         if bid in seen:
             continue
-        docs.append({"book_id": bid, "doc_no": r["doc_no"], "doc_title": r["doc_title"],
-                     "doc_date": r["doc_date"], "sender": r["sender"],
-                     "sent_key": r["sent_key"], "sent_date": r["sent_date"],
-                     "sent_time": r["sent_time"], "source": "phone",
-                     "job_id": r["job_id"]})
+        doc = {"book_id": bid, "doc_no": r["doc_no"], "doc_title": r["doc_title"],
+               "doc_date": r["doc_date"], "sender": r["sender"],
+               "sent_key": r["sent_key"], "sent_date": r["sent_date"],
+               "sent_time": r["sent_time"], "source": "phone"}
+        if bid in jobs:
+            doc["job_id"] = r["job_id"]
+        docs.append(doc)
 
     # ถูกเว็บ สพป. ปิดกั้น + คิวว่าง = "ยังไม่มีเรื่องรอลงรับ" ไม่ใช่ความผิดพลาด
     # บนคลาวด์การดึงเว็บไม่ได้เป็นสภาพปกติตลอดเวลา ถ้าขึ้นหน้าแดงทุกครั้งที่คิวว่าง
@@ -979,7 +985,7 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
     # ใช้ spp_ok บอกสถานะแทน (หน้าเว็บเอาไปขึ้นแถบว่าเห็นเฉพาะของจากมือถือ)
     return {"ok": True, "days": ordered, "total": total, "count": len(docs),
             "spp_ok": not spp_error, "spp_error": spp_error,
-            "phone_count": len(jobs)}
+            "phone_count": len(jobs), "redo_days": docmode.REDO_DAYS}
 
 
 @app.post("/api/spp/skip")
@@ -994,12 +1000,28 @@ async def api_spp_skip(request: Request, user: str = Depends(current_user)):
     return {"ok": True}
 
 
+def _receipt_exists(receipt_no: str) -> bool:
+    want = core.to_arabic_digits(str(receipt_no).strip())
+    return any(r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want
+               for r in _store_mod.get_store().registry_rows())
+
+
 @app.post("/api/doc/open")
 async def api_doc_open(request: Request, user: str = Depends(current_user)):
     d = await request.json()
+    book_id = str(d.get("book_id", ""))
+    redo_no = str(d.get("redo_no") or "").strip() or None
+    # ลงรับใหม่ด้วยเลขเดิม — แถวนั้นต้องยังอยู่ (เผื่อถอยเลขไปแล้ว) บอกเลยดีกว่าให้รอ AI อ่านจนจบ
+    if redo_no and not await asyncio.to_thread(_receipt_exists, redo_no):
+        raise HTTPException(status_code=404, detail=(
+            f"ไม่พบเลขรับ {redo_no} ในทะเบียน (อาจถอยเลขไปแล้ว) จึงลงรับใหม่ด้วยเลขนี้ไม่ได้"))
+    # เรื่องจากมือถือ: เซิร์ฟเวอร์ยังเก็บต้นฉบับไว้ เปิดจากตรงนั้นเลย
+    # (บน Render ดึงจากเว็บ สพป. ไม่ได้ ของเดิมจึงกด ♻️ ลงรับใหม่เรื่องจากมือถือไม่ได้)
+    job = await asyncio.to_thread(docmode.reopen_phone, book_id, redo_no)
+    if job is not None:
+        return {"job_id": job["id"]}
     try:
-        job = docmode.start_from_spp(user, str(d.get("book_id", "")), _spp_session_snapshot(),
-                                     redo_no=(d.get("redo_no") or None))
+        job = docmode.start_from_spp(user, book_id, _spp_session_snapshot(), redo_no=redo_no)
     except docmode.QueueFullError as e:
         raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": "30"})
     return {"job_id": job["id"]}
@@ -1098,8 +1120,10 @@ def api_phone_history(request: Request):
         done = sorted(_s.get_store().history_ids())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
-    return {"ok": True, "done": done, "queued": sorted(docmode.phone_held_ids()),
-            "queue_ready": ready}
+    # เรื่องที่ลงรับแล้วอยู่ใน done อยู่แล้ว ไม่ต้องนับซ้ำว่า "อยู่ในคิว" — เซิร์ฟเวอร์เก็บต้นฉบับ
+    # เรื่องที่ลงรับแล้วไว้หลายวัน (ไว้ลงรับใหม่) ถ้านับรวมมือถือจะบอกว่ามีเรื่องรอลงรับเกินจริง
+    held = docmode.phone_held_ids() - set(done)
+    return {"ok": True, "done": done, "queued": sorted(held), "queue_ready": ready}
 
 
 @app.post("/api/phone/submit")
@@ -1219,14 +1243,9 @@ async def api_doc_upload(request: Request):
     # ลงรับใหม่ด้วยเลขเดิม — ต้องมีแถวนั้นอยู่จริงก่อน ไม่งั้นผู้ใช้จะรอ AI อ่านจนจบ
     # แล้วค่อยมาเจอว่าเลขไม่มีในทะเบียน เสียเวลาเปล่า
     redo_no = str(form.get("redo_no") or "").strip()
-    if redo_no:
-        want = core.to_arabic_digits(redo_no)
-        st = _store_mod.get_store()
-        have = any(r and r[0] and core.to_arabic_digits(str(r[0]).strip()) == want
-                   for r in st.registry_rows())
-        if not have:
-            raise HTTPException(status_code=404,
-                                detail=f"ไม่พบเลขรับ {redo_no} ในทะเบียน จึงลงรับใหม่ด้วยเลขนี้ไม่ได้")
+    if redo_no and not _receipt_exists(redo_no):
+        raise HTTPException(status_code=404,
+                            detail=f"ไม่พบเลขรับ {redo_no} ในทะเบียน จึงลงรับใหม่ด้วยเลขนี้ไม่ได้")
 
     incoming = _new_incoming_path()
     try:
