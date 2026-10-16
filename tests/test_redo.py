@@ -102,6 +102,38 @@ class FakeStore(store.StatusMixin):
         self.skipped.append(str(book_id))
         super().mark_skipped(book_id)
 
+    def delete_receipt(self, receipt_no):
+        for i, r in enumerate(self.rows):
+            if r[0] == receipt_no:
+                del self.rows[i]
+                return {"row": r, "reusable": i == len(self.rows)}
+        return {}
+
+    def remove_history(self, book_id):
+        had = book_id in self.history or book_id in self.records
+        self.history.discard(book_id)
+        self.records.pop(book_id, None)
+        return had
+
+
+class LocalStoreWithdrawTests(unittest.TestCase):
+    """the file store keeps the history and the records apart: taking a document out of the
+    history must take its registered/skipped record too, as the Sheet does (one row)"""
+
+    def test_withdrawn_document_is_new_again(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(core, "OUTPUT_ROOT", tmp):
+            st = store.LocalStore.__new__(store.LocalStore)
+            st._lock = MagicMock()
+            st._hist = os.path.join(tmp, "history_ids.txt")
+            st.mark_registered("88", "๕๗")
+            st.mark_skipped("90")
+            self.assertTrue(st.remove_history("88"))
+            self.assertNotIn("88", st.history_ids())
+            self.assertNotIn("88", st.doc_records())
+            self.assertEqual(st.status_of([{"book_id": "88"}])[0]["status"], store.NEW)
+            self.assertEqual(st.doc_records()["90"]["status"], "skipped")   # the others stay
+            self.assertFalse(st.remove_history("404"))
+
 
 def settle(job, timeout=60):
     end = time.time() + timeout
@@ -190,7 +222,7 @@ class RedoTests(RedoBase):
         self.assertEqual((job["status"], job["receipt_no"]), ("done", "๕๗"))
         self.drive.queue_drop.assert_not_called()          # used to be deleted right here
         self.assertEqual(job["drive_file_id"], "f88")
-        self.assertEqual([r["book_id"] for r in docmode.phone_registered()], ["88"])
+        self.assertEqual([r["book_id"] for r in docmode.phone_kept()], ["88"])
         self.assertNotIn("88", [r["book_id"] for r in docmode.phone_queue()])
 
     def test_redo_uses_the_same_number_and_overwrites_the_row(self):
@@ -241,7 +273,7 @@ class RedoTests(RedoBase):
         self.assertEqual(self.store.skipped, [])
         self.assertEqual(self.store.records["88"]["status"], "registered")
         self.assertEqual((job["status"], job["receipt_no"]), ("done", "๕๗"))
-        self.assertEqual([r["book_id"] for r in docmode.phone_registered()], ["88"])
+        self.assertEqual([r["book_id"] for r in docmode.phone_kept()], ["88"])
         self.drive.queue_drop.assert_not_called()
 
     def test_cancelling_a_redo_from_the_spp_site_does_not_record_a_skip_either(self):
@@ -251,12 +283,43 @@ class RedoTests(RedoBase):
         self.assertEqual(job["status"], "skipped")
         self.assertEqual(self.store.skipped, [])
 
-    def test_a_document_never_registered_is_still_skipped_as_before(self):
+    # ---- ข้ามแล้วก็เก็บต้นฉบับไว้ ๗ วัน ข้ามผิดลงรับได้อีก ----
+    def test_skipping_keeps_the_original_too(self):
+        """it used to be deleted on the spot: skipped by mistake = ask the phone to fetch it again"""
         job = self.from_phone("90")
         docmode.skip(job)
         docmode._drive_tasks.join()
         self.assertEqual(self.store.skipped, ["90"])
-        self.drive.queue_drop.assert_called_once_with("f90")
+        self.drive.queue_drop.assert_not_called()
+        self.assertEqual(job["status"], "skipped")
+        self.assertEqual([(r["book_id"], r["status"]) for r in docmode.phone_kept()],
+                         [("90", "skipped")])
+
+    def test_skipped_by_mistake_is_registered_after_all(self):
+        job = self.from_phone("90")
+        docmode.skip(job)
+        self.assertIs(docmode.reopen_phone("90"), job)        # 📥 ลงรับเรื่องนี้ in the list
+        self.assertEqual((job["status"], job["redo_no"]), ("stored", None))
+        self.open_and_save(job)                                  # the skip used to block the save
+        self.assertEqual(self.store.records["90"]["status"], "registered")
+        self.assertEqual(len(self.store.rows), 1)
+        self.assertEqual(job["status"], "done")
+
+    def test_a_skip_made_elsewhere_does_not_stop_opening_it_from_the_queue(self):
+        job = self.from_phone("90")
+        self.store.mark_skipped("90")                            # ข้าม on another computer
+        self.assertTrue(docmode.prepare_stored(job))             # used to end in "ข้ามแล้ว"
+        self.assertEqual(settle(job), "ready", job.get("error"))
+
+    def test_registered_elsewhere_still_stops_a_second_number(self):
+        job = self.from_phone("90")
+        self.store.mark_registered("90", "๙๙")
+        self.assertFalse(docmode.prepare_stored(job))
+        self.assertIn("ลงรับแล้ว (เลขรับ ๙๙)", job["error"])
+        self.assertIn("♻️", job["error"])                         # kept: ♻️ in the list works
+        self.drive.queue_drop.assert_not_called()
+        self.assertIsNone(docmode.reopen_phone("90"))             # not a second registration…
+        self.assertIs(docmode.reopen_phone("90", "๙๙"), job)      # …only ♻️ with its number
 
     def test_nothing_to_reopen_without_an_original(self):
         self.assertIsNone(docmode.reopen_phone("404", "๕๗"))       # never came from the phone
@@ -264,7 +327,7 @@ class RedoTests(RedoBase):
         job["drive_file_id"] = ""
         os.remove(os.path.join(job["dir"], "doc.pdf"))
         self.assertIsNone(docmode.reopen_phone("88", "๕๗"))
-        self.assertEqual(docmode.phone_registered(), [])
+        self.assertEqual(docmode.phone_kept(), [])
 
     def test_fresh_registration_only_once_the_record_is_withdrawn(self):
         job = self.registered()
@@ -292,7 +355,7 @@ class RedoTests(RedoBase):
         self.assertNotIn(old["id"], docmode._jobs)
         self.assertEqual(new["status"], "stored")
         self.assertEqual([r["book_id"] for r in docmode.phone_queue()], ["88"])
-        self.assertEqual(docmode.phone_registered(), [])
+        self.assertEqual(docmode.phone_kept(), [])
         self.assertFalse(os.path.exists(old["dir"]))
         self.drive.queue_drop.assert_called_once_with("f88")     # the copy kept for ♻️
         self.assertEqual(new["drive_file_id"], "f88-1")
@@ -334,7 +397,7 @@ class RedoTests(RedoBase):
         self.assertEqual(self.restart(), 1)
         back = docmode._jobs[job["id"]]
         self.assertEqual((back["status"], back["receipt_no"]), ("done", "๕๗"))
-        self.assertEqual([r["book_id"] for r in docmode.phone_registered()], ["88"])
+        self.assertEqual([r["book_id"] for r in docmode.phone_kept()], ["88"])
         self.assertNotIn("88", [r["book_id"] for r in docmode.phone_queue()])
         self.assertIs(docmode.reopen_phone("88", "๕๗"), back)
         self.open_and_save(back)                               # the file comes back from Drive
@@ -354,16 +417,16 @@ class RedoTests(RedoBase):
         self.drive.queue_list.return_value = [
             {"id": "f" + b, "meta": {"book_id": b, "doc_no": "ศธ " + b, "created": created}}
             for b in ("61", "62", "63", "64", "65", "66")]
-        self.assertEqual(docmode._restore_from_drive(), 2)
-        self.assertEqual(self.dropped(), {"f61", "f62", "f65", "f66"})
+        self.assertEqual(docmode._restore_from_drive(), 3)
+        self.assertEqual(self.dropped(), {"f61", "f65", "f66"})
         status = {j["book_id"]: j["status"] for j in docmode._jobs.values()
-                  if j.get("book_id") in ("63", "64")}
-        self.assertEqual(status, {"63": "done", "64": "stored"})
+                  if j.get("book_id") in ("62", "63", "64")}
+        self.assertEqual(status, {"62": "skipped", "63": "done", "64": "stored"})
 
     def test_kept_originals_are_deleted_once_the_days_are_up(self):
         job = self.registered()
-        job["registered_at"] = now_th() - timedelta(days=docmode.REDO_DAYS, minutes=1)
-        self.assertEqual(docmode.phone_registered(), [])
+        job["finished_at"] = now_th() - timedelta(days=docmode.REDO_DAYS, minutes=1)
+        self.assertEqual(docmode.phone_kept(), [])
         docmode._drive_tasks.join()
         self.drive.queue_drop.assert_called_once_with("f88")
         self.assertNotIn(job["id"], docmode._jobs)
@@ -375,7 +438,7 @@ class RedoTests(RedoBase):
         self.drive.queue_drop.assert_called_once_with("f88")
         self.assertEqual(job["status"], "done")
 
-    def test_registered_before_its_backup_went_up_is_still_kept(self):
+    def test_finished_before_its_backup_went_up_is_still_kept(self):
         job = {"id": "early", "book_id": "91", "status": "done", "source": "phone",
                "created": now_th(), "dir": self.work}
         skipped = dict(job, id="gone", book_id="92", status="skipped")
@@ -383,7 +446,7 @@ class RedoTests(RedoBase):
         docmode._backup_to_drive(skipped, self.letter)
         docmode._drive_tasks.join()
         self.assertEqual(job.get("drive_file_id"), "f91")
-        self.assertNotIn("drive_file_id", skipped)
+        self.assertEqual(skipped.get("drive_file_id"), "f92")
 
 
 @unittest.skipIf(webmain is None or pymupdf is None,
@@ -484,6 +547,53 @@ class RedoOnTheWebTests(RedoBase):
         r = self.web.post("/api/doc/open", json={"book_id": "88", "redo_no": None})
         self.assertEqual(r.json()["job_id"], job["id"])
         self.assertEqual((job["status"], job["redo_no"]), ("stored", None))   # a new number
+
+    # ---- ถอยเลขที่หน้า 🔧 = ลบเรื่อง แล้วลงรับใหม่ได้เลย ----
+    def test_undoing_the_number_puts_the_document_back_to_register_again(self):
+        """it used to need the book ID typed into the box below as well - nobody knows that number"""
+        job = self.registered()
+        r = self.web.post("/api/fix/undo", json={"receipt_no": "๕๗"})
+        self.assertEqual(r.status_code, 200, r.text)
+        d = r.json()
+        self.assertTrue(d["deleted"]["reusable"])
+        self.assertEqual((d["book_id"], d["unmarked"], d["kept"]), ("88", True, True))
+        self.assertNotIn("88", self.store.records)
+        self.assertEqual(self.listed()[1]["88"]["status"], "new")
+        r = self.web.post("/api/doc/open", json={"book_id": "88", "redo_no": None})
+        self.assertEqual(r.json()["job_id"], job["id"])
+        self.open_and_save(job)
+        self.assertEqual([row[0] for row in self.store.rows], ["๕๗"])   # the number again
+
+    def test_undoing_a_duplicate_row_keeps_the_letter_registered(self):
+        self.registered()
+        first = list(self.store.rows[0])
+        self.store.rows.append(["๕๘"] + first[1:])               # the same letter twice
+        self.store.records["88"]["receipt_no"] = "๕๘"
+        d = self.web.post("/api/fix/undo", json={"receipt_no": "๕๘"}).json()
+        self.assertNotIn("book_id", d)                            # still registered, row ๕๗
+        rec = self.store.records["88"]
+        self.assertEqual((rec["status"], rec["receipt_no"]), ("registered", "๕๗"))
+        self.assertEqual(self.listed()[1]["88"]["receipt_no"], "๕๗")
+
+    def test_undo_by_book_id_still_works_on_its_own(self):
+        self.registered()
+        d = self.web.post("/api/fix/undo", json={"book_id": "88"}).json()
+        self.assertTrue(d["unmarked"])
+        self.assertEqual(len(self.store.rows), 1)                 # the register is left alone
+
+    # ---- ข้ามจากหน้ารายการ แล้วลงรับได้อีก ----
+    def test_skip_button_in_the_list_keeps_it_and_it_can_be_registered_later(self):
+        job = self.from_phone("90")
+        r = self.web.post("/api/spp/skip", json={"book_id": "90"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(job["status"], "skipped")               # the queue item itself, not only the Sheet
+        doc = self.listed()[1]["90"]
+        self.assertEqual(doc["status"], "skipped")
+        self.assertNotIn("job_id", doc)
+        r = self.web.post("/api/doc/open", json={"book_id": "90", "redo_no": None})
+        self.assertEqual(r.json()["job_id"], job["id"])
+        self.open_and_save(job)
+        self.assertEqual(self.store.records["90"]["status"], "registered")
 
     def test_phone_does_not_count_registered_documents_as_waiting(self):
         self.registered()

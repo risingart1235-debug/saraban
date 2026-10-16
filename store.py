@@ -593,15 +593,25 @@ class LocalStore(StatusMixin, UsersMixin):
 
     # ---- ถอยกลับเวลาลงรับผิด ----
     def remove_history(self, book_id: str) -> bool:
-        """เอาเรื่องออกจากประวัติ เพื่อให้กลับมาขึ้นในรายการ 'หนังสือใหม่' อีกครั้ง"""
+        """เอาเรื่องออกจากประวัติ เพื่อให้กลับมาขึ้นในรายการ 'หนังสือใหม่' อีกครั้ง
+
+        เอาสถานะลงรับ/ข้ามของเรื่องนั้นออกด้วย (แบบชีตอยู่แถวเดียวกัน ลบทีเดียวหายทั้งคู่)
+        เดิมเหลือสถานะค้างไว้ รายการยังขึ้น "รับแล้ว" และลงรับใหม่ไม่ได้ทั้งที่ถอนแล้ว
+        """
+        import json
         book_id = str(book_id).strip()
         with _mem_lock, self._lock:
             ids = self.history_ids()
-            if book_id not in ids:
+            recs = self.doc_records()
+            if book_id not in ids and book_id not in recs:
                 return False
-            keep = [i for i in self._ordered_history() if i != book_id]
-            with open(self._hist, "w", encoding="utf-8") as f:
-                f.write("\n".join(keep) + ("\n" if keep else ""))
+            if book_id in ids:
+                keep = [i for i in self._ordered_history() if i != book_id]
+                with open(self._hist, "w", encoding="utf-8") as f:
+                    f.write("\n".join(keep) + ("\n" if keep else ""))
+            if recs.pop(book_id, None) is not None:
+                with open(self._rec_path(), "w", encoding="utf-8") as f:
+                    json.dump(recs, f, ensure_ascii=False, indent=1)
             return True
 
     def _ordered_history(self):

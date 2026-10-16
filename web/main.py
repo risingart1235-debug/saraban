@@ -930,9 +930,9 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         spp_error = f"{type(e).__name__}: {e}"
 
     jobs = {r["book_id"]: r for r in docmode.phone_queue() if r.get("book_id")}
-    # ลงรับแล้วแต่ยังเก็บต้นฉบับไว้ (บน Render ไม่มีรายการจากเว็บ สพป. ถ้าไม่ใส่ไว้จะหายจากจอ
-    # ลงรับผิดก็กด ♻️ ลงรับใหม่ไม่ได้) — ไม่พ่วง job_id: เปิดผ่าน /api/doc/open ให้ล้างงานเดิมก่อนเสมอ
-    kept = {r["book_id"]: r for r in docmode.phone_registered()
+    # ลงรับ/ข้ามแล้วแต่ยังเก็บต้นฉบับไว้ (บน Render ไม่มีรายการจากเว็บ สพป. ถ้าไม่ใส่ไว้จะหายจากจอ
+    # ทำผิดก็กลับไปลงรับใหม่ไม่ได้) — ไม่พ่วง job_id: เปิดผ่าน /api/doc/open ให้ล้างงานเดิมก่อนเสมอ
+    kept = {r["book_id"]: r for r in docmode.phone_kept()
             if r.get("book_id") and r["book_id"] not in jobs}
     docs, seen = [], set()
     for d in fetched:
@@ -996,7 +996,16 @@ async def api_spp_skip(request: Request, user: str = Depends(current_user)):
     bid = str(d.get("book_id", "")).strip()
     if not bid:
         raise HTTPException(status_code=400, detail="ไม่ได้ระบุเรื่อง")
-    _s.get_store().mark_skipped(bid)
+    # มือถือส่งไฟล์มาแล้ว ข้ามที่งานนั้น — เก็บต้นฉบับไว้ ข้ามผิดกด 📥 ลงรับเรื่องนี้ ได้อีก
+    # (เดิมจดแค่ในชีต งานในคิวค้างอยู่อย่างนั้น)
+    job = docmode.phone_job(bid)
+    if job is not None and job.get("status") not in ("done", "skipped", "saving", "skipping"):
+        try:
+            await asyncio.to_thread(docmode.skip, job)
+        except docmode.JobStateError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+    else:
+        await asyncio.to_thread(_s.get_store().mark_skipped, bid)
     return {"ok": True}
 
 
@@ -1459,11 +1468,37 @@ def api_fix_recent(user: str = Depends(current_user)):
     return {"rows": out, "next_no": st.peek_receipt_no(), "store": st.kind}
 
 
+def _book_of_deleted_receipt(st, receipt_no: str, deleted_row) -> str:
+    """เรื่องที่ลงรับไว้ด้วยเลขที่เพิ่งถอย (จากบันทึกในแท็บประวัติ) — ต้องถอนออกจากประวัติด้วย
+    เรื่องจะได้กลับไปรอลงรับใหม่ เดิมต้องไปพิมพ์เลข ID หนังสือเองที่ช่องล่าง ซึ่งผู้ใช้ไม่รู้เลข
+
+    หนังสือฉบับเดียวกัน (เลขที่หนังสือเดียวกัน) ยังมีอีกแถวในทะเบียน = เคยลงรับซ้ำสองแถว
+    ลบแถวซ้ำออก เรื่องนั้นยังลงรับอยู่ด้วยแถวที่เหลือ — ไม่ถอน แต่ชี้บันทึกไปที่เลขที่เหลือแทน
+    """
+    def digits(v):
+        return core.to_arabic_digits(str(v or "").strip())
+
+    want = digits(receipt_no)
+    hits = sorted((str(rec.get("when") or ""), bid, rec) for bid, rec in st.doc_records().items()
+                  if rec.get("status") == "registered" and digits(rec.get("receipt_no")) == want)
+    if not hits:
+        return ""                       # ลงรับก่อนมีบันทึกเลขรับ / อัปโหลดเอง — ใช้ช่องล่างแทน
+    _, bid, rec = hits[-1]
+    doc_no = digits(deleted_row[1] if len(deleted_row) > 1 else "")
+    same = [r[0] for r in st.registry_rows() if r and len(r) > 1 and r[0] and doc_no
+            and doc_no != "-" and digits(r[1]) == doc_no]
+    if same:
+        st.set_record(bid, dict(rec, receipt_no=str(same[-1])))
+        return ""
+    return bid
+
+
 @app.post("/api/fix/undo")
 async def api_fix_undo(request: Request, user: str = Depends(current_user)):
-    """ลบแถวทะเบียนตามเลขรับ และถอนเรื่องออกจากประวัติ (ถ้าระบุ book_id มา)
+    """ลบแถวทะเบียนตามเลขรับ และถอนเรื่องนั้นออกจากประวัติให้ด้วย (หรือถอนตาม book_id ที่ระบุมา)
 
-    ผลลัพธ์: เลขรับถูกปล่อยคืน และหนังสือเรื่องนั้นจะกลับมาขึ้นในรายการ 'หนังสือใหม่'
+    ผลลัพธ์: เลขรับถูกปล่อยคืน และหนังสือเรื่องนั้นกลับไปรอลงรับใหม่ในโหมด ๑
+    (เรื่องจากมือถือที่เซิร์ฟเวอร์ยังเก็บต้นฉบับไว้ เปิดลงรับได้เลย ไม่ต้องให้มือถือดึงมาใหม่)
     """
     d = await request.json()
     receipt_no = str(d.get("receipt_no", "")).strip()
@@ -1478,8 +1513,12 @@ async def api_fix_undo(request: Request, user: str = Depends(current_user)):
                 raise HTTPException(status_code=404, detail=f"ไม่พบเลขรับ {receipt_no} ในทะเบียน")
             result["deleted"] = {"row": [str(x) if x is not None else "" for x in res["row"]],
                                  "reusable": res["reusable"]}
+            if not book_id:
+                book_id = _book_of_deleted_receipt(st, receipt_no, res["row"])
         if book_id:
             result["unmarked"] = sppweb.unmark(book_id)
+            result["book_id"] = book_id
+            result["kept"] = docmode.holds_original(book_id)
     result["next_no"] = st.peek_receipt_no()
     return result
 

@@ -188,7 +188,8 @@ function render() {
      <p class="tiny" style="margin:10px 0 0">
        เรียงตามวันที่เว็บอัปโหลด (วันเวลาที่ส่ง) ใหม่สุดอยู่บน<br>
        ลงรับผิด กด "♻️ ลงรับใหม่" ในเรื่องที่รับแล้ว จะใช้<b>เลขรับเดิม</b> ไม่กินเลขใหม่
-       ${DATA.redo_days ? `(เรื่องจากมือถือกดได้ภายใน ${thaiNum(DATA.redo_days)} วันหลังลงรับ)` : ''}
+       · ข้ามผิด กด "📥 ลงรับเรื่องนี้" ได้
+       ${DATA.redo_days ? `(เรื่องจากมือถือเก็บไว้ให้ ${thaiNum(DATA.redo_days)} วันหลังลงรับ/ข้าม)` : ''}
      </p>`;
   for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; remember('filter', filter); render(); };
 
