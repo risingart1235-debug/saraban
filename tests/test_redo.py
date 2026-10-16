@@ -149,6 +149,8 @@ class RedoBase(unittest.TestCase):
 
     def backed_up(self, pdf, meta):
         fid = "f" + meta["book_id"]
+        if fid in self.on_drive:                    # sent again: Drive hands out a new id
+            fid += "-%d" % len(self.on_drive)
         self.on_drive[fid] = shutil.copy(pdf, os.path.join(self.work, fid + ".pdf"))
         self.metas[fid] = dict(meta)
         return fid
@@ -272,6 +274,44 @@ class RedoTests(RedoBase):
         self.assertIs(docmode.reopen_phone("88"), job)
         self.assertIsNone(job["redo_no"])
         self.assertEqual(job["status"], "stored")
+
+    # ---- ถอนออกจากประวัติที่หน้า 🔧 ถอยเลข แล้วให้มือถือส่งกลับมา ----
+    def withdraw(self, book_id="88"):
+        """🔧 ถอยเลข + ถอน ID — on the Sheet the record and the history are one row"""
+        self.store.records.pop(book_id, None)
+        self.store.history.discard(book_id)
+        self.store.rows.clear()
+
+    def test_phone_can_send_a_withdrawn_document_again(self):
+        """it used to answer "จัดการไปแล้วโดยอีกเครื่อง" until the server happened to restart"""
+        old = self.registered()
+        self.withdraw()
+        self.assertNotIn("88", docmode.phone_held_ids())
+        new = self.from_phone()
+        self.assertIsNot(new, old)
+        self.assertNotIn(old["id"], docmode._jobs)
+        self.assertEqual(new["status"], "stored")
+        self.assertEqual([r["book_id"] for r in docmode.phone_queue()], ["88"])
+        self.assertEqual(docmode.phone_registered(), [])
+        self.assertFalse(os.path.exists(old["dir"]))
+        self.drive.queue_drop.assert_called_once_with("f88")     # the copy kept for ♻️
+        self.assertEqual(new["drive_file_id"], "f88-1")
+        self.open_and_save(new)                                   # registered afresh
+        self.assertEqual(len(self.store.rows), 1)
+        self.assertEqual(self.store.records["88"]["status"], "registered")
+
+    def test_a_document_still_on_record_is_still_refused(self):
+        self.registered()
+        with self.assertRaises(docmode.AlreadyHandledError):
+            self.from_phone()
+        self.store.records.pop("88")                  # history alone still counts (older data)
+        with self.assertRaises(docmode.AlreadyHandledError):
+            self.from_phone()
+
+    def test_a_withdrawn_skip_comes_back_too(self):
+        docmode.skip(self.from_phone("90"))
+        self.withdraw("90")
+        self.assertEqual(self.from_phone("90")["status"], "stored")
 
     # ---- เซิร์ฟเวอร์เกิดใหม่ / พ้นกำหนดเก็บ ----
     def restart(self):
@@ -408,6 +448,42 @@ class RedoOnTheWebTests(RedoBase):
             r = self.web.post("/api/doc/open", json={"book_id": "123", "redo_no": None})
         self.assertEqual(r.json(), {"job_id": "x"})
         spp.assert_called_once()
+
+    def withdraw(self, book_id="88"):
+        self.store.records.pop(book_id, None)
+        self.store.history.discard(book_id)
+        self.store.rows.clear()
+
+    def phone_sends(self, book_id="88"):
+        with open(self.letter, "rb") as f:
+            return TestClient(webmain.app).post(
+                "/api/phone/submit", headers={"X-Phone-Token": "tok"},
+                files=[("file", ("doc.pdf", f, "application/pdf"))],
+                data={"book_id": book_id, "doc_no": "ศธ 04142/ว1234", "doc_title": "ประชุม"})
+
+    def test_phone_sends_a_withdrawn_document_back_into_the_queue(self):
+        """what the user saw: "ยังไม่ลงรับ 1 เรื่อง … จัดการไปแล้วโดยอีกเครื่อง" (HTTP 409)"""
+        self.registered()
+        self.withdraw()
+        d = TestClient(webmain.app).get("/api/phone/history", headers={"X-Phone-Token": "tok"}).json()
+        self.assertNotIn("88", d["done"])
+        self.assertNotIn("88", d["queued"])                    # the new phone script fetches it too
+        r = self.phone_sends()
+        self.assertEqual(r.status_code, 200, r.text)          # used to be 409
+        self.assertTrue(r.json()["created"])
+        doc = self.listed()[1]["88"]
+        self.assertEqual(doc["status"], "new")
+        self.assertEqual(doc["job_id"], r.json()["job_id"])
+        self.assertEqual(self.phone_sends().status_code, 200)  # sent twice: the same queue item
+
+    def test_withdrawn_document_opens_from_the_list_without_the_phone(self):
+        job = self.registered()
+        self.withdraw()
+        docs = self.listed()[1]
+        self.assertEqual(docs["88"]["status"], "new")          # still listed, from the kept copy
+        r = self.web.post("/api/doc/open", json={"book_id": "88", "redo_no": None})
+        self.assertEqual(r.json()["job_id"], job["id"])
+        self.assertEqual((job["status"], job["redo_no"]), ("stored", None))   # a new number
 
     def test_phone_does_not_count_registered_documents_as_waiting(self):
         self.registered()

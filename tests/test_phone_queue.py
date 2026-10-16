@@ -35,16 +35,22 @@ def put_job(test, book_id, status, source="phone"):
 
 class HeldIdsTests(unittest.TestCase):
     def test_counts_documents_whose_file_the_server_holds(self):
-        for book_id, status in (("1", "stored"), ("2", "ready"), ("3", "save_error"),
-                                ("4", "done")):
+        for book_id, status in (("1", "stored"), ("2", "ready"), ("3", "save_error")):
             put_job(self, book_id, status)
-        self.assertLessEqual({"1", "2", "3", "4"}, docmode.phone_held_ids())
+        self.assertLessEqual({"1", "2", "3"}, docmode.phone_held_ids())
 
     def test_failed_or_unfinished_uploads_are_pulled_again(self):
         put_job(self, "5", "error")
         put_job(self, "6", "uploading")
         put_job(self, "7", "stored", source="web")
         self.assertFalse({"5", "6", "7"} & docmode.phone_held_ids())
+
+    def test_finished_ones_are_left_to_the_history(self):
+        """registered/skipped is in the history the phone gets anyway; once taken out of
+        the history on the 🔧 page, the phone must be able to send it again"""
+        put_job(self, "8", "done")
+        put_job(self, "9", "skipped")
+        self.assertFalse({"8", "9"} & docmode.phone_held_ids())
 
 
 class RestoreSignalTests(unittest.TestCase):

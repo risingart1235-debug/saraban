@@ -1120,8 +1120,7 @@ def api_phone_history(request: Request):
         done = sorted(_s.get_store().history_ids())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
-    # เรื่องที่ลงรับแล้วอยู่ใน done อยู่แล้ว ไม่ต้องนับซ้ำว่า "อยู่ในคิว" — เซิร์ฟเวอร์เก็บต้นฉบับ
-    # เรื่องที่ลงรับแล้วไว้หลายวัน (ไว้ลงรับใหม่) ถ้านับรวมมือถือจะบอกว่ามีเรื่องรอลงรับเกินจริง
+    # เรื่องในคิวที่ไปลงรับ/ข้ามจากที่อื่นแล้ว อยู่ใน done แล้ว ไม่ต้องนับซ้ำว่า "อยู่ในคิว"
     held = docmode.phone_held_ids() - set(done)
     return {"ok": True, "done": done, "queued": sorted(held), "queue_ready": ready}
 

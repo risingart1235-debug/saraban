@@ -645,15 +645,25 @@ def _durable_phone_record(book_id: str):
 
 
 def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
-    """อะตอมมิกต่อโปรเซส: คืน (job, created) และไม่สร้างงานซ้ำจาก book_id เดียวกัน"""
+    """อะตอมมิกต่อโปรเซส: คืน (job, created) และไม่สร้างงานซ้ำจาก book_id เดียวกัน
+
+    งานที่จบไปแล้ว (ลงรับ/ข้าม) แต่ชีตไม่มีบันทึกแล้ว = ถูกถอนออกจากประวัติที่หน้า 🔧 ถอยเลข
+    เพื่อเอากลับมาลงรับใหม่ — ทิ้งงานเก่า ให้ไฟล์ที่มือถือส่งมาเข้าคิวแทน
+    ของเดิมตอบมือถือว่า "จัดการไปแล้วโดยอีกเครื่อง" จนกว่าเซิร์ฟเวอร์จะรีสตาร์ท ดึงกลับเข้าคิวไม่ได้
+    (ยิ่งตอนนี้งานที่ลงรับแล้วอยู่หลายวัน เพราะเก็บต้นฉบับไว้ลงรับใหม่ ดู REDO_KEEP)
+    """
     clean = sanitize_phone_meta(meta)
     durable = _durable_phone_record(clean["book_id"])
+    retired, claimed = [], None
     with _lock:
         matching = [j for j in _jobs.values()
                     if j.get("source") == "phone" and j.get("book_id") == clean["book_id"]]
         matching.sort(key=lambda j: j.get("created") or _OLDEST, reverse=True)
         for existing in matching:
             status = existing.get("status", "")
+            if status in ("done", "skipped") and not durable:
+                retired.append(_jobs.pop(existing["id"]))
+                continue
             if status in ("done", "skipped"):
                 raise AlreadyHandledError(
                     "registered" if status == "done" else "skipped",
@@ -662,16 +672,22 @@ def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
                 existing.update(clean)
                 existing.update(user=user, status="uploading", error="",
                                 step="กำลังรับไฟล์จากมือถือ...")
-                return existing, True
-            # uploading/queued/analyzing/ready/saving/save_error/error ล้วนต้องใช้ job เดิม
-            return existing, False
-        if durable and not clean.get("redo_no"):
-            # มี redo_no = ตั้งใจลงรับซ้ำด้วยเลขเดิม จึงไม่ใช่การลงรับซ้ำโดยพลาด
-            raise AlreadyHandledError(durable.get("status", "registered"),
-                                      durable.get("receipt_no", ""))
-        job = _new_job_locked(user, source="phone", status="uploading",
-                              step="กำลังรับไฟล์จากมือถือ...", **clean)
-        return job, True
+                claimed = (existing, True)
+            else:
+                # uploading/queued/analyzing/ready/saving/save_error/error ล้วนต้องใช้ job เดิม
+                claimed = (existing, False)
+            break
+        if claimed is None:
+            if durable and not clean.get("redo_no"):
+                # มี redo_no = ตั้งใจลงรับซ้ำด้วยเลขเดิม จึงไม่ใช่การลงรับซ้ำโดยพลาด
+                raise AlreadyHandledError(durable.get("status", "registered"),
+                                          durable.get("receipt_no", ""))
+            claimed = (_new_job_locked(user, source="phone", status="uploading",
+                                       step="กำลังรับไฟล์จากมือถือ...", **clean), True)
+    for old in retired:
+        _drop_backup(old)           # ต้นฉบับที่เก็บไว้ (ถ้ามี) — ไฟล์ที่เพิ่งส่งมาใช้แทนแล้ว
+        shutil.rmtree(old.get("dir") or "", ignore_errors=True)
+    return claimed
 
 
 def get_job(job_id: str, user: str):
@@ -696,14 +712,15 @@ def _sent_thai(dt):
     return to_thai_digits(f"{dt.day} {core.THAI_MONTHS_ABBR[dt.month - 1]} {dt.year + 543}")
 
 
-# เรื่องจากมือถือที่เซิร์ฟเวอร์รับไฟล์ไว้แล้ว — มือถือไม่ต้องดึงจาก สพป. มาส่งซ้ำ
+# เรื่องจากมือถือที่เซิร์ฟเวอร์รับไฟล์ไว้แล้วและยังไม่จบ — มือถือไม่ต้องดึงจาก สพป. มาส่งซ้ำ
 # ไม่นับ error (ให้มือถือส่งไฟล์ใหม่ทับได้ ดู retry_failed) และ uploading (ยังรับไฟล์ไม่จบ)
-_HELD = ("stored", "queued", "analyzing", "ready", "saving", "save_error",
-         "skipping", "skipped", "done")
+# ไม่นับที่จบแล้ว (ลงรับ/ข้าม) — อยู่ในประวัติที่มือถือได้ไปอยู่แล้ว ถ้าถูกถอนออกจากประวัติ
+# (หน้า 🔧 ถอยเลข) แปลว่าจะเอากลับมาลงรับใหม่ ต้องให้มือถือดึงมาส่งได้ (ดู claim_phone_job)
+_HELD = ("stored", "queued", "analyzing", "ready", "saving", "save_error", "skipping")
 
 
 def phone_held_ids() -> set:
-    """book_id ที่ดึงลงคิวรอลงรับแล้ว (รวมที่เพิ่งลงรับ/ข้ามจากคิวไป)
+    """book_id ที่ดึงลงคิวรอลงรับแล้ว และยังไม่ได้ลงรับ/ข้าม (ดู _HELD)
 
     นับจากของที่เซิร์ฟเวอร์ถืออยู่จริง ไม่ได้จดแยกไว้ที่ไหน จึงไม่มีวันคลาดกับคิว
     ถ้าเซิร์ฟเวอร์ทำเรื่องไหนหาย (ล้มก่อนฝากไดร์ฟเสร็จ) เรื่องนั้นหลุดจากรายการ
