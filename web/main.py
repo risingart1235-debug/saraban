@@ -942,6 +942,7 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         d["source"] = "spp"
         if bid in jobs:                    # ไฟล์อยู่บนเซิร์ฟเวอร์แล้ว เปิดได้เลย
             d["job_id"] = jobs[bid]["job_id"]
+            d["refetch"] = jobs[bid]["refetch"]
         docs.append(d)
     for bid, r in list(jobs.items()) + list(kept.items()):
         if bid in seen:
@@ -952,6 +953,7 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
                "sent_time": r["sent_time"], "source": "phone"}
         if bid in jobs:
             doc["job_id"] = r["job_id"]
+            doc["refetch"] = r["refetch"]  # 🔄 ขอให้มือถือดึงเรื่องนี้ใหม่ (พร้อมไฟล์แนบ) รออยู่
         docs.append(doc)
 
     # ถูกเว็บ สพป. ปิดกั้น + คิวว่าง = "ยังไม่มีเรื่องรอลงรับ" ไม่ใช่ความผิดพลาด
@@ -1125,12 +1127,15 @@ def api_phone_history(request: Request):
     # (รอในเธรดได้ เพราะ endpoint นี้เป็น def ธรรมดา FastAPI แยกเธรดให้)
     ready = docmode.wait_queue_restored()
     import store as _s
+    # 🔄 ดึงเรื่องนี้ใหม่ (หน้าจัดเอกสาร) — ไม่นับว่าลงรับแล้วหรืออยู่ในคิว มือถือจะได้ดึงมาส่งใหม่พร้อมไฟล์แนบ
+    # (ลงรับใหม่ด้วยเลขเดิม ♻️ เรื่องนั้นมีบันทึกลงรับอยู่ ก็ต้องเอาออกจาก done ด้วย)
+    again = docmode.refetch_ids()
     try:
-        done = sorted(_s.get_store().history_ids())
+        done = sorted(_s.get_store().history_ids() - again)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
     # เรื่องในคิวที่ไปลงรับ/ข้ามจากที่อื่นแล้ว อยู่ใน done แล้ว ไม่ต้องนับซ้ำว่า "อยู่ในคิว"
-    held = docmode.phone_held_ids() - set(done)
+    held = docmode.phone_held_ids() - set(done) - again
     return {"ok": True, "done": done, "queued": sorted(held), "queue_ready": ready}
 
 
@@ -1285,16 +1290,23 @@ def _job_or_404(job_id: str, user: str):
 
 
 @app.get("/api/doc/{job_id}")
-def api_doc_status(job_id: str, user: str = Depends(current_user)):
+def api_doc_status(job_id: str, brief: bool = False, user: str = Depends(current_user)):
+    """สถานะเรื่อง — พร้อมแล้วส่งทุกอย่างที่หน้าจัดเอกสารใช้
+    brief = ถามสถานะเฉยๆ (หน้าที่รอมือถือส่งเรื่องมาใหม่ถามทุกครู่) ไม่ต้องส่งภาพหน้าเอกสารมาทุกครั้ง"""
     job = _job_or_404(job_id, user)
     if job["status"] == "stored":
         # เก็บไฟล์ไว้แล้วแต่ยังไม่ได้ประมวลผล — หน้าจอจะสั่ง /prepare ให้เริ่ม
-        return {"status": "stored", "step": job.get("step", "")}
+        # refetched = มือถือเพิ่งส่งเรื่องนี้มาใหม่ (🔄 ดึงเรื่องนี้ใหม่) ไม่ใช่เซิร์ฟเวอร์เพิ่งเริ่มใหม่
+        return {"status": "stored", "step": job.get("step", ""),
+                "refetched": bool(job.get("refetched"))}
     if job["status"] in ("uploading", "queued", "analyzing", "saving", "skipping"):
         return {"status": "analyzing", "step": job.get("step", "")}
     if job["status"] in ("error", "save_error"):
         return {"status": "error", "error": job.get("error", ""),
                 "receipt_no": job.get("reserved_receipt", "")}
+    if brief:
+        return {"status": job["status"], "refetch": bool(job.get("refetch")),
+                "refetched": bool(job.get("refetched"))}
     # ส่งเฉพาะที่หน้าจอต้องใช้ (ตัด pdf_path และของภายในออก)
     # book_id บอกหน้าจอว่าเข้ามาจากทางไหน (มี = โหมด ๑ / ไม่มี = อัปโหลดเอง)
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
@@ -1310,7 +1322,19 @@ def api_doc_status(job_id: str, user: str = Depends(current_user)):
     out["highlight"] = bool(load_users().get(user, {}).get("highlight"))
     out["ocr"] = docmode.ocr_state(job)      # ปุ่ม 🔎 สแกน (อ่านหน้าภาพสแกน)
     out["missing_extras"] = docmode.missing_extras(job)   # ไฟล์แนบ PDF ที่ไม่ได้มาต่อท้าย
+    out["refetch"] = bool(job.get("refetch"))             # ขอให้มือถือดึงเรื่องนี้ใหม่แล้ว รออยู่
     return out
+
+
+@app.post("/api/doc/{job_id}/refetch")
+def api_doc_refetch(job_id: str, user: str = Depends(current_user)):
+    """🔄 ดึงเรื่องนี้ใหม่ — ไฟล์แนบไม่ได้มาด้วย ให้มือถือดึงเรื่องนี้จากเว็บ สพป. มาส่งใหม่รอบหน้า
+    (บน Render ดึงเองไม่ได้ — เครื่องที่ต่อเว็บได้ หน้าจอเปิดเรื่องใหม่จาก /api/doc/open เอง)"""
+    try:
+        docmode.request_refetch(_job_or_404(job_id, user))
+    except docmode.JobStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
 
 
 @app.get("/api/doc/{job_id}/page/{n}")

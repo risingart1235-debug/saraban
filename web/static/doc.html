@@ -48,6 +48,17 @@
   }
   .page .bhint { position:absolute; left:6%; right:6%; top:40%; text-align:center; color:#9ca3af;
                  font-size:13px; line-height:1.7; pointer-events:none }
+  /* ภาพหน้าที่ดึงจากเซิร์ฟเวอร์ (สิ่งที่ส่งมาด้วย ฯลฯ) — ระหว่างดึงบอกว่ากำลังดึง ไม่สำเร็จบอกเหตุพร้อมปุ่มดึงใหม่
+     (เดิมเป็นหน้าขาวเฉยๆ ไม่รู้ว่ารอหรือพัง) */
+  .page .pwait { position:absolute; left:6%; right:6%; top:34%; text-align:center; color:#9ca3af;
+                 font-size:13px; line-height:1.7; pointer-events:none }
+  .page[data-state="ok"] .pwait { display:none }
+  .page[data-state="fail"] .pwait { color:#92400e }
+  .page .pwait .sub { font-size:12px; color:var(--muted) }
+  .page .pwait a { color:inherit; font-weight:700; pointer-events:auto }
+  .page .rbtn { pointer-events:auto; margin:8px 4px 0; padding:8px 14px; min-height:40px;
+                border:1px solid #93c5fd; border-radius:999px; background:#eff6ff; color:#1d4ed8;
+                font-size:14px; font-family:inherit; cursor:pointer }
   .ov { position:absolute; cursor:grab; touch-action:none; }
   .ov img { width:100%; display:block; pointer-events:none }
   .ov.sel { outline:2px dashed #e91e63; outline-offset:2px }
@@ -78,9 +89,12 @@
   .chips button.on { background:#dbeafe; border-color:#60a5fa; font-weight:700 }
   #savebar { position:sticky; bottom:0; z-index:30; background:rgba(240,242,245,.97);
              border-top:1px solid var(--line); padding:10px 16px calc(10px + env(safe-area-inset-bottom));
-             margin:0 -16px; display:flex; gap:8px }
+             margin:0 -16px; display:flex; flex-wrap:wrap; gap:8px }
   #savebar .btn { margin:0 }
-  #ocrBtn { flex:0 0 auto; width:auto; padding:12px 10px; white-space:nowrap }
+  /* ปุ่มเครื่องมือ (🔎 สแกน ✍️ ลายเซ็น) กับปุ่มไม่รับ กว้างเท่าตัวหนังสือ — จอแคบที่เหลือไม่พอ
+     ปุ่มบันทึกขึ้นแถวใหม่เต็มความกว้าง แทนที่จะถูกบีบจนตัวหนังสือหักสามบรรทัด */
+  #savebar .tool, #skip { flex:0 0 auto; width:auto; padding:12px 10px; white-space:nowrap }
+  #save { flex:1 1 120px }
   /* แผงสแกนหาชื่อ — เด้งขึ้นเหนือแถบปุ่มล่างจอ */
   #ocrPanel { position:absolute; left:0; right:0; bottom:100%; background:#fff; padding:12px 16px;
               border-top:1px solid var(--line); box-shadow:0 -6px 16px rgba(0,0,0,.12); font-size:14px }
@@ -143,6 +157,11 @@
         <span id="rno" style="font-size:26px;font-weight:700;color:var(--purple)"></span>
       </div>
       <p class="tiny" id="meta" style="margin-top:6px; line-height:1.6"></p>
+      <!-- ไฟล์แนบ PDF ไม่ได้มาด้วย — ดึงเรื่องนี้ใหม่ (มือถือดึงมาส่งรอบหน้า / เครื่องที่ต่อเว็บ สพป. ได้ดึงเลย) -->
+      <div id="refetchBox" class="hidden" style="margin-top:8px">
+        <button class="btn grey small" id="refetchBtn">🔄 ดึงเรื่องนี้ใหม่พร้อมไฟล์แนบ</button>
+        <p class="tiny" id="refetchMsg" style="margin-top:6px; line-height:1.6"></p>
+      </div>
       <div id="warn" class="err hidden" style="margin-top:8px"></div>
       <p class="tiny hidden" id="knote" style="margin-top:8px; line-height:1.6"></p>
       <!-- โหมดไฮไลท์ชื่อโรงเรียน (เปิดในตั้งค่าบัญชี) — บอกว่าเจอชื่อหน้าไหน ปิดเฉพาะเรื่องนี้ได้ -->
@@ -260,9 +279,11 @@
       <div class="obar hidden" id="ocrBar"><div id="ocrFill"></div></div>
       <div id="ocrMsg"></div>
     </div>
-    <button class="btn grey" id="ocrBtn">🔎 สแกน</button>
-    <button class="btn grey" id="skip" style="flex:0 0 28%">🚫 ไม่รับ</button>
-    <button class="btn" id="save" style="flex:1">✅ ยืนยัน &amp; สร้างไฟล์</button>
+    <button class="btn grey tool" id="ocrBtn">🔎 สแกน</button>
+    <!-- แทรกลายเซ็นได้จากตรงนี้เลย ไม่ต้องเลื่อนขึ้นไปกางแผง ✍️ ลายเซ็น ด้านบน (กดอีกครั้ง = เอาออก) -->
+    <button class="btn grey tool" id="sigBtn">✍️ แทรกลายเซ็น</button>
+    <button class="btn grey" id="skip">🚫 ไม่รับ</button>
+    <button class="btn" id="save">✅ ยืนยัน &amp; สร้างไฟล์</button>
   </div>
 </div>
 
@@ -354,7 +375,7 @@ function build() {
     // ไฟล์แนบ PDF ที่เว็บ สพป. มีแต่ไม่ได้มาด้วย — ส่วนใหญ่เพราะมือถือยังใช้สคริปต์รุ่นก่อน (ส่งแค่หนังสือนำ)
     (D.missing_extras > 0
       ? `<br><span style="color:#b45309">⚠️ ไฟล์แนบ PDF อีก ${thaiNum(D.missing_extras)} ไฟล์ไม่ได้มาด้วย ` +
-        '— เปิดดูได้จากลิงก์ในข้อความ LINE · ถ้าเป็นทุกเรื่องที่ส่งจากมือถือ ให้อัปเดต ' +
+        '— ดึงใหม่ได้ที่ปุ่ม 🔄 ด้านล่าง หรือเปิดดูจากลิงก์ในข้อความ LINE · ถ้าเป็นทุกเรื่องที่ส่งจากมือถือ ให้อัปเดต ' +
         'phone_fetch.py, core.py, sppweb.py ในมือถือ</span>' : '') +
     (D.total_pages > D.pages.length
       ? `<br>แสดง ${thaiNum(D.pages.length)} หน้าแรกจาก ${thaiNum(D.total_pages)} หน้า — ไฟล์ที่บันทึกยังมีครบทุกหน้า` : '');
@@ -365,6 +386,7 @@ function build() {
       (D.all_pages ? `<br><b>แสดงเอกสารครบทุกหน้าไว้ให้ตรวจแล้ว</b> — เลื่อนลงดูบัญชีรายชื่อได้` : '');
     $('warn').classList.remove('hidden');
   }
+  showRefetch();
   $('d').value = D.date; $('t').value = D.time;
   $('ssv').textContent = D.stamp.size_pct + '%';
   $('stampPrev').src = D.stamp.png;
@@ -399,12 +421,12 @@ function build() {
     for (const b of D.boxes) if (b.indent_pct !== pref) { b.indent_pct = pref; renderBox(b); }
   }
   select(D.boxes[0] ? D.boxes[0].id : 'stamp');
-  // บันทึกไม่ผ่านเพราะเซิร์ฟเวอร์เพิ่งเริ่มใหม่ — ใส่สิ่งที่จัดไว้ก่อนหน้านั้นคืนให้
+  // เซิร์ฟเวอร์เพิ่งเริ่มใหม่ / มือถือส่งเรื่องนี้มาใหม่ (🔄) — ใส่สิ่งที่จัดไว้ก่อนโหลดใหม่คืนให้
   const v = takeDraft();
   if (v) restoreDraft(v).then((ok) => {
     if (ok) {
       kasienNote(null);
-      show('ok', '♻️ ใส่คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ก่อนเซิร์ฟเวอร์เริ่มใหม่คืนให้แล้ว ' +
+      show('ok', '♻️ ใส่คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ก่อนโหลดใหม่คืนให้แล้ว ' +
                  '— ตรวจดูแล้วกดบันทึกได้เลย');
     }
   }).catch(() => {});
@@ -420,17 +442,198 @@ function kasienNote(b) {
   n.classList.toggle('hidden', !n.textContent);
 }
 
+// ---------- 🔄 ดึงเรื่องนี้ใหม่ (ไฟล์แนบไม่ได้มาด้วย) ----------
+// เรื่องจากมือถือ: เซิร์ฟเวอร์ (Render) ดึงจากเว็บ สพป. เองไม่ได้ — ขอให้มือถือดึงมาส่งใหม่ตอนรัน phone_fetch.py รอบหน้า
+// ของเดิมมือถือไม่ดึงเรื่องที่อยู่ในคิวแล้วซ้ำ เรื่องที่ค้างคิวมาก่อนอัปเดตสคริปต์มือถือจึงไม่มีทางได้ไฟล์แนบ
+// ส่งมาแล้วหน้านี้บอกให้โหลดใหม่ (สิ่งที่จัดไว้ใส่คืนให้) ระหว่างรอยังจัดและบันทึกแบบเดิมได้
+// เรื่องที่เปิดจากเว็บ สพป. เอง (เครื่องที่ต่อเว็บได้) เปิดเรื่องนี้ใหม่จากเว็บเลย
+let refetchTimer = null;
+function showRefetch() {
+  $('refetchBox').classList.toggle('hidden', !(D.missing_extras > 0 && D.book_id));
+  $('refetchBtn').classList.toggle('hidden', !!D.refetch);
+  $('refetchMsg').textContent = D.refetch
+    ? '📲 ขอให้มือถือดึงเรื่องนี้ใหม่แล้ว — รัน phone_fetch.py ในมือถือ ส่งมาแล้วหน้านี้จะบอกให้โหลดใหม่ ' +
+      '(คำเกษียณและสิ่งที่จัดไว้ใส่คืนให้) · ระหว่างรอยังบันทึกแบบที่เห็นอยู่ได้'
+    : D.source === 'phone'
+      ? 'เซิร์ฟเวอร์ดึงจากเว็บ สพป. เองไม่ได้ — กดแล้วรัน phone_fetch.py ในมือถือ มือถือจะดึงเรื่องนี้มาส่งใหม่ ' +
+        '(มือถือต้องใช้สคริปต์รุ่นที่ส่งไฟล์แนบได้)'
+      : 'ดึงเรื่องนี้จากเว็บ สพป. ใหม่ทั้งเรื่อง AI อ่านอีกรอบ — คำเกษียณและสิ่งที่จัดไว้ใส่คืนให้';
+  clearTimeout(refetchTimer);
+  if (D.refetch) refetchTimer = setTimeout(refetchPoll, 15000);
+}
+$('refetchBtn').onclick = async () => {
+  const b = $('refetchBtn'); b.disabled = true;
+  try {
+    if (D.source !== 'phone') {
+      keepDraft();
+      const r = await fetch('/api/doc/open', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ book_id: D.book_id, redo_no: D.redo_no || null }) });
+      const d = await readJSON(r);
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'เปิดเรื่องใหม่ไม่สำเร็จ');
+      location.href = '/doc?job=' + d.job_id;
+      return;
+    }
+    const r = await fetch(`/api/doc/${JOB}/refetch`, { method: 'POST' });
+    const d = await readJSON(r);
+    if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'ขอให้ดึงใหม่ไม่สำเร็จ');
+    D.refetch = true;
+    showRefetch();
+  } catch (e) {
+    $('refetchMsg').textContent = '⚠️ ' + e.message;
+  } finally {
+    b.disabled = false;
+  }
+};
+// รอมือถือส่งเรื่องนี้มาใหม่ — ถามสถานะสั้นๆ ทุก ๑๕ วินาที (ไม่ดึงภาพหน้าเอกสารมาทั้งก้อน)
+async function refetchPoll() {
+  if (!D.refetch || pageLost || $('app').classList.contains('hidden')) return;
+  let d = null;
+  if (document.visibilityState === 'visible') {
+    try {
+      const r = await fetch(`/api/doc/${JOB}?brief=1`);
+      d = r.status === 404 ? { status: 'gone' } : r.ok ? await readJSON(r) : null;
+    } catch (e) { d = null; }
+  }
+  if (!d || d.status === 'analyzing' || (d.status === 'ready' && d.refetch)) {
+    refetchTimer = setTimeout(refetchPoll, 15000);      // ยังรออยู่ (หรือถามไม่สำเร็จ ถามใหม่รอบหน้า)
+  } else if (d.status === 'stored' || (d.status === 'ready' && d.refetched)) {
+    lostNotice(d.refetched ? 'refetched' : 'reset');    // มือถือส่งมาใหม่แล้ว (หรือเซิร์ฟเวอร์เพิ่งเริ่มใหม่)
+  } else if (d.status === 'gone') {
+    lostNotice('gone');
+  } else if (d.status === 'ready') {
+    D.refetch = false;                                  // คำขอหายไปกับเซิร์ฟเวอร์ที่เริ่มใหม่ — กดขอใหม่ได้
+    showRefetch();
+  }                                                     // บันทึก/ไม่รับจากที่อื่นไปแล้ว — เลิกถาม
+}
+
 function mkPage(i, name, png, w, h, pdfNo) {
   const el = document.createElement('div');
   el.className = 'page'; el.dataset.index = i;
   el.style.aspectRatio = `${w} / ${h}`;
+  // ภาพหน้าแรก/หน้าที่มีลายเซ็นมากับข้อมูลเรื่อง (data:) — หน้าอื่นดึงจากเซิร์ฟเวอร์ตอนเลื่อนไปใกล้ถึง (watchPage)
+  const fetched = !!png && !png.startsWith('data:');
   el.innerHTML = `<div class="phead"><span class="plabel">${name}</span>` +
     `<button class="lbtn" data-line="${pdfNo}"></button></div>` +
-    (png ? `<img class="bg" src="${png}" loading="lazy" decoding="async">` : '');
+    (png ? `<img class="bg"${fetched ? '' : ` src="${png}"`} decoding="async">` : '') +
+    (fetched ? '<div class="pwait"></div>' : '');
+  if (fetched) watchPage(el, png);
   return el;
 }
 
 function pageEl(i) { return $('pages').querySelector(`.page[data-index="${i}"]`); }
+
+// ---------- ภาพหน้าที่ดึงจากเซิร์ฟเวอร์ — ไม่ขึ้นก็กด 🔄 ดึงใหม่ได้ ----------
+// เดิมปล่อยเบราว์เซอร์ดึงเอง (loading=lazy) ดึงไม่สำเร็จก็เป็นหน้าขาวเฉยๆ ไม่มีอะไรบอก และสั่งดึงใหม่ไม่ได้
+// นอกจากโหลดทั้งหน้าใหม่ (สิ่งที่จัดไว้หายหมด) — เลื่อนเร็วๆ เบราว์เซอร์ขอทีเดียวหลายสิบหน้า แต่เซิร์ฟเวอร์
+// เรนเดอร์ได้ทีละหน้า (PDF_LOCK) หน้าท้ายแถวรอจนหมดเวลา จึงดึงทีละ ๒ หน้า หน้าที่อยู่กลางจอก่อน
+// ไม่สำเร็จลองเองอีกรอบ แล้วขึ้นปุ่มดึงใหม่บนหน้านั้น (ไฟล์ที่บันทึกไม่เกี่ยว ยังมีทุกหน้าครบ)
+const PAGE_JOBS = 2;                 // ดึงพร้อมกันกี่หน้า
+const PAGE_TIMEOUT = 45000;          // รอภาพหน้าหนึ่งนานสุดเท่านี้ (มิลลิวินาที) แล้วถือว่าไม่สำเร็จ
+const pageWant = new Set();          // หน้าที่อยู่ใกล้จอ รอคิวดึง
+let pageBusy = 0;
+let pageLost = '';                   // เซิร์ฟเวอร์เริ่มใหม่ เรื่องนี้หายไป (jobLost) — ดึงหน้าไหนก็ไม่ได้แล้ว
+const pageSeen = window.IntersectionObserver && new IntersectionObserver((seen) => {
+  for (const e of seen) {
+    if (!e.isIntersecting) pageWant.delete(e.target);
+    else if (e.target.dataset.state === 'wait') pageWant.add(e.target);
+  }
+  pumpPages();
+}, { rootMargin: '1500px 0px' });
+
+function watchPage(el, src) {
+  el.dataset.src = src;
+  pageState(el, 'wait');
+  if (pageSeen) pageSeen.observe(el);
+  else pageWant.add(el);             // เบราว์เซอร์เก่า: ดึงไล่ไปทุกหน้า
+}
+function pumpPages() {
+  while (pageBusy < PAGE_JOBS && pageWant.size && !pageLost) {
+    let next = null, best = Infinity;
+    for (const el of pageWant) {
+      const r = el.getBoundingClientRect(), d = Math.abs(r.top + r.height / 2 - innerHeight / 2);
+      if (d < best) { best = d; next = el; }
+    }
+    pageWant.delete(next);
+    loadPage(next);
+  }
+}
+async function loadPage(el) {
+  pageBusy++;
+  pageState(el, 'busy');
+  const why = await fetchPage(el);
+  pageBusy--;
+  if (why) await pageFailed(el, why);
+  pumpPages();
+}
+// '' = ภาพขึ้นแล้ว / อื่นๆ = เหตุที่ไม่ขึ้น (รหัส HTTP, 'slow' หมดเวลา, 'net' เน็ตหลุด/ภาพเสีย)
+async function fetchPage(el) {
+  const stop = new AbortController(), timer = setTimeout(() => stop.abort(), PAGE_TIMEOUT);
+  try {
+    // ดึงใหม่หลังไม่สำเร็จ ไม่เอาของในแคชของเบราว์เซอร์
+    const r = await fetch(el.dataset.src, { cache: el.dataset.again ? 'reload' : 'default', signal: stop.signal });
+    if (!r.ok) return String(r.status);
+    const img = el.querySelector('img.bg');
+    img.src = URL.createObjectURL(await r.blob());
+    if (img.decode) await img.decode();      // ได้หน้าเว็บอื่นมาแทนภาพ (เน็ตสาธารณะ/พร็อกซี) ถือว่าไม่สำเร็จ
+    pageState(el, 'ok');
+    return '';
+  } catch (e) {
+    return e.name === 'AbortError' ? 'slow' : 'net';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function pageFailed(el, why) {
+  el.dataset.again = '1';
+  // ไม่พบ = เซิร์ฟเวอร์เพิ่งเริ่มใหม่ เรื่องที่เปิดค้างไว้หายไปหรือเปล่า — ใช่ก็บอกทางไปต่อทีเดียวที่ด้านบน
+  if (why === '404' && !pageLost) {
+    const lost = await jobLost();
+    if (lost && !pageLost) lostNotice(lost);
+  }
+  if (pageLost) { pageState(el, 'fail', 'lost'); return; }
+  const tries = (+el.dataset.tries || 0) + 1;
+  el.dataset.tries = tries;
+  if (tries < 2 && why !== '401') {            // ลองเองอีกรอบก่อน ส่วนใหญ่แค่เน็ตสะดุด/เซิร์ฟเวอร์ยุ่งชั่วครู่
+    pageState(el, 'wait');
+    setTimeout(() => { if (el.dataset.state === 'wait') { pageWant.add(el); pumpPages(); } }, 2000);
+    return;
+  }
+  pageState(el, 'fail', why);
+}
+function pageState(el, state, why = '') {
+  const was = el.dataset.state;
+  el.dataset.state = state;
+  el.dataset.why = why;
+  if (state !== 'fail') el.querySelector('.pwait').textContent = state === 'ok' ? '' : '⏳ กำลังดึงภาพหน้านี้...';
+  if (state === 'fail' || was === 'fail') paintFails();      // จำนวนหน้าบนปุ่ม "ดึงใหม่ทุกหน้า" เปลี่ยนตาม
+}
+function paintFails() {
+  const fails = [...$('pages').querySelectorAll('.page[data-state="fail"]')];
+  for (const el of fails) {
+    const why = el.dataset.why;
+    el.querySelector('.pwait').innerHTML = '<b>⚠️ ดึงภาพหน้านี้ไม่สำเร็จ</b><br>' + (why === 'lost'
+      ? (pageLost === 'refetched' ? 'มือถือส่งเรื่องนี้มาใหม่แล้ว' : 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ เรื่องที่เปิดไว้หายไป') +
+        ' — ดูวิธีไปต่อที่ข้อความบนสุดของหน้า'
+      : (why === '401' ? 'หลุดจากระบบ — <a href="/login" target="_blank">เข้าสู่ระบบใหม่ (แท็บใหม่)</a> แล้วกดดึงใหม่'
+         : why === 'slow' ? 'เซิร์ฟเวอร์ตอบช้าเกินไป'
+         : 'เน็ตสะดุด หรือเซิร์ฟเวอร์ไม่ว่างชั่วครู่') +
+        '<br><span class="sub">ไฟล์ที่บันทึกยังมีหน้านี้ครบ — ดึงใหม่เพื่อดูบนจอ</span><br>' +
+        '<button class="rbtn" data-retry="one">🔄 ดึงหน้านี้ใหม่</button>' +
+        (fails.length > 1
+          ? `<button class="rbtn" data-retry="all">🔄 ดึงใหม่ทุกหน้าที่ไม่ขึ้น (${thaiNum(fails.length)} หน้า)</button>` : ''));
+  }
+}
+// 🔄 ดึงใหม่ — หน้านี้ / ทุกหน้าที่ไม่ขึ้น (el = null) เข้าคิวเดิม ทีละ ๒ หน้า หน้าที่อยู่บนจอก่อน
+function retryPages(el) {
+  if (pageLost) return;
+  for (const p of el ? [el] : $('pages').querySelectorAll('.page[data-state="fail"]')) {
+    p.dataset.tries = 0;
+    pageState(p, 'wait');
+    pageWant.add(p);
+  }
+  pumpPages();
+}
 // หน้ากระดาษเปล่า (ลำดับ = D.pages.length) แทรกต่อจากหน้าที่มีลายเซ็น ขนาดเท่าหน้านั้น
 // (กติกาเดียวกับเซิร์ฟเวอร์ core.page_order / docmode._blank_size)
 function blankAfter() { return Math.max(1, Math.min(D.sig_page || 1, D.total_pages)); }
@@ -774,6 +977,7 @@ function showSigCard() {
   $('sgv').textContent = (D.sig ? D.sig.size_pct : sigSize) + '%';
   $('sigAdd').classList.toggle('hidden', !hasSig || !!D.sig);
   $('sigEdit').classList.toggle('hidden', !D.sig);
+  $('sigBtn').textContent = D.sig ? '✕ เอาลายเซ็นออก' : '✍️ แทรกลายเซ็น';
 }
 async function loadSig() {
   try {
@@ -793,13 +997,16 @@ async function renderSig(o) {
   Object.assign(o, { png: d.png, w: d.w, h: d.h, date: d.date, size_pct: d.size_pct });
 }
 
-$('sigAdd').onclick = async () => {
+// แทรกใต้คำเกษียณ — ปุ่มในแผงนี้กับปุ่มล่างจอข้าง 🔎 สแกน ใช้ตัวเดียวกัน คืน false ถ้าแทรกไม่สำเร็จ (บอกเหตุในแผง)
+let sigBusy = false;               // กำลังวาดอยู่ — กดสองปุ่มรัวๆ ต้องไม่ได้ลายเซ็นสองอัน
+async function insertSig() {
+  if (D.sig || sigBusy) return true;
   const src = isBox(sel) ? objOf(sel) : D.boxes[0];
   const o = { page: src ? src.page : 0, left_cm: 1, top_cm: 1, size_pct: sigSize };
-  const b = $('sigAdd'); b.disabled = true;
+  sigBusy = $('sigAdd').disabled = $('sigBtn').disabled = true;
   try { await renderSig(o); }
-  catch (e) { sigMsg('err', e.message); b.disabled = false; return; }
-  b.disabled = false;
+  catch (e) { sigMsg('err', e.message); return false; }
+  finally { sigBusy = $('sigAdd').disabled = $('sigBtn').disabled = false; }
   // วางใต้คำเกษียณเสมอ ไม่ย้ายคำเกษียณเอง — ทับตัวหนังสือก็ลากย้ายเอง (หรือกด 📍 ในแผงลายเซ็น)
   if (src) {                    // วางใต้กล่องคำเกษียณ กึ่งกลางกล่อง
     o.page = src.page;
@@ -808,6 +1015,17 @@ $('sigAdd').onclick = async () => {
   }
   placeSig(o); select('sig');
   o._el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  return true;
+}
+$('sigAdd').onclick = insertSig;
+// ปุ่มล่างจอ: ยังไม่ได้แทรก = แทรกใต้คำเกษียณเลย / แทรกแล้ว = เอาออก
+// ยังไม่มีรูปลายเซ็น หรือแทรกไม่สำเร็จ — กางแผง ✍️ ลายเซ็น ให้เลือกรูป/เห็นเหตุ (เลือกรูปแล้วแทรกให้เอง)
+$('sigBtn').onclick = async () => {
+  if (D.sig) { removeSig(); return; }
+  if (!hasSig) await loadSig();
+  if (hasSig && await insertSig()) return;
+  openSig(true);
+  $('sigPanel').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 // ปรับขนาดลายเซ็นแล้วไปทับตัวหนังสือ ฯลฯ — จัดคำเกษียณพร้อมลายเซ็นไปชิดลายเซ็นผู้ส่งอีกรอบ (กดเอง)
 $('sigFit').onclick = () => {
@@ -842,11 +1060,12 @@ function sigStep(delta) {
 }
 $('sgm').onclick = () => sigStep(-10);
 $('sgp').onclick = () => sigStep(10);
-$('sigDel').onclick = () => {
+function removeSig() {
   if (!D.sig) return;
   D.sig._el.remove(); D.sig = null;
   showSigCard(); select(D.boxes[0] ? D.boxes[0].id : 'stamp'); showLine();
-};
+}
+$('sigDel').onclick = removeSig;
 
 // ยังไม่มีรูป: เลือกรูปตรงนี้ได้เลย ระบบตัดพื้นหลังแล้วจำไว้ใช้ครั้งต่อไป แล้วแทรกให้ทันที
 $('sigPick').onclick = () => $('sigFile').click();
@@ -861,7 +1080,7 @@ $('sigFile').onchange = async () => {
     if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'อัปรูปไม่สำเร็จ');
     hasSig = true; showSigCard();
     sigMsg('ok', 'จำรูปลายเซ็นไว้แล้ว ครั้งต่อไปกดแทรกได้เลย');
-    $('sigAdd').click();
+    insertSig();
   } catch (e) {
     sigMsg('err', e.message);
   } finally {
@@ -1101,6 +1320,8 @@ function showLine() {
   if (hint) hint.classList.toggle('hidden', itemPages().includes(D.total_pages + 1));
 }
 $('pages').addEventListener('click', (e) => {
+  const rt = e.target.closest('[data-retry]');
+  if (rt) { retryPages(rt.dataset.retry === 'one' ? rt.closest('.page') : null); return; }
   if (e.target.closest('#addBlank')) { insertBlank(true); return; }
   if (e.target.closest('#dropBlank')) { dropBlank(); return; }
   const h = e.target.closest('.hbtn');
@@ -1136,8 +1357,11 @@ function payload() {
 const DRAFT_HOURS = 12;
 function draftKey() { return 'saraban.draft.' + (D && D.book_id ? 'b' + D.book_id : 'j' + JOB); }
 function keepDraft() {
-  try { localStorage.setItem(draftKey(), JSON.stringify({ at: Date.now(), pick: linePick, ...payload() })); }
-  catch (e) {}
+  // npages/total — มือถือส่งเรื่องนี้มาใหม่พร้อมไฟล์แนบ หน้าเพิ่มขึ้น หน้ากระดาษเปล่าต้องย้ายไปท้ายเล่มใหม่ตาม
+  try {
+    localStorage.setItem(draftKey(), JSON.stringify({ at: Date.now(), pick: linePick, npages: D.pages.length,
+                                                      total: D.total_pages, ...payload() }));
+  } catch (e) {}
 }
 function dropDraft() { try { localStorage.removeItem(draftKey()); } catch (e) {} }
 function takeDraft() {
@@ -1148,7 +1372,12 @@ function takeDraft() {
 }
 
 async function restoreDraft(v) {
-  const pg = (n) => Math.max(0, Math.min(Math.floor(+n) || 0, D.pages.length));  // ท้ายสุด = หน้ากระดาษเปล่า
+  // ท้ายสุด = หน้ากระดาษเปล่า — เดิมอยู่ลำดับที่ v.npages ถ้าไฟล์ใหม่มีหน้ามากกว่าเดิม (ได้ไฟล์แนบมา) ย้ายตามไปท้ายสุด
+  const was = Math.floor(+v.npages) || 0;
+  const pg = (n) => {
+    n = Math.max(0, Math.floor(+n) || 0);
+    return was && n >= was ? D.pages.length : Math.min(n, D.pages.length);
+  };
   // หน้ากระดาษเปล่าที่แทรกไว้ (หรือมีของวางอยู่ — ฉบับที่จัดจากหน้าจอรุ่นก่อน) แทรกคืนก่อนวางของ
   const onBlank = (o) => !!o && pg(o.page) === D.pages.length;
   if (v.blank === true || onBlank(v.stamp) || (v.boxes || []).some(onBlank) || onBlank(v.signature))
@@ -1192,7 +1421,9 @@ async function restoreDraft(v) {
                       : v.highlight === false ? [] : v.highlight.map(Number).filter(n => found.includes(n)));
     showMarks();
   }
-  linePick = Array.isArray(v.pick) ? v.pick : null;
+  // เลขหน้ากระดาษเปล่า = หน้าสุดท้าย + ๑ ไฟล์ใหม่มีหน้ามากขึ้น เลขก็เลื่อนตาม
+  const oldBlank = (Math.floor(+v.total) || 0) + 1;
+  linePick = Array.isArray(v.pick) ? v.pick.map(n => v.total && n === oldBlank ? D.total_pages + 1 : n) : null;
   showLine();
   select(D.boxes[0] ? D.boxes[0].id : 'stamp');
   return true;
@@ -1200,41 +1431,63 @@ async function restoreDraft(v) {
 
 // บันทึกไม่ผ่านเพราะเซิร์ฟเวอร์เพิ่งเริ่มใหม่หรือเปล่า — ดูว่างานนี้ยังอยู่ไหม
 // เรื่องจากมือถือถูกกู้กลับมาเป็น "รอเปิดอ่าน" (ต้องให้ AI อ่านใหม่) ส่วนเรื่องอื่นหายไปเลย
+// มือถือส่งเรื่องนี้มาใหม่ (🔄 ดึงเรื่องนี้ใหม่) ก็กลับเป็น "รอเปิดอ่าน" เหมือนกัน แต่บอกคนละอย่าง ('refetched')
 async function jobLost() {
   try {
     const r = await fetch('/api/doc/' + JOB);
     if (r.status === 404) return 'gone';
-    return r.ok && (await readJSON(r)).status === 'stored' ? 'reset' : '';
+    const d = r.ok ? await readJSON(r) : {};
+    return d.status !== 'stored' ? '' : d.refetched ? 'refetched' : 'reset';
   } catch (e) { return ''; }
 }
 
-async function saveFailed(status, message) {
-  const btn = (href, label, extra = '') =>
-    `<a class="btn" href="${href}" ${extra} style="margin-top:10px;text-decoration:none;text-align:center;line-height:28px">${label}</a>`;
-  if (status === 401) {
-    // คุกกี้หมดอายุ (๑๒ ชม.) หรือเปลี่ยนรหัสผ่านจากที่อื่น — งานบนเซิร์ฟเวอร์ยังอยู่ ล็อกอินแล้วกดซ้ำได้
-    show('err', 'หลุดจากระบบ — เข้าสู่ระบบใหม่ในแท็บใหม่ แล้วกลับมากดบันทึกที่หน้านี้อีกครั้ง ' +
-      '(สิ่งที่จัดไว้บนจอนี้ยังอยู่ครบ)' + btn('/login', '🔑 เข้าสู่ระบบ (แท็บใหม่)', 'target="_blank"'));
-    return;
-  }
-  // งานหาย = 404 / ถูกกู้กลับมาเป็น "รอเปิดอ่าน" = 409 ยังไม่พร้อมบันทึก (กรณีอื่นไม่ต้องถามซ้ำ)
-  const lost = status === 404 || status === 409 ? await jobLost() : '';
-  if (lost === 'reset') {
+const linkBtn = (href, label, extra = '') =>
+  `<a class="btn" href="${href}" ${extra} style="margin-top:10px;text-decoration:none;text-align:center;line-height:28px">${label}</a>`;
+
+// เซิร์ฟเวอร์เพิ่งเริ่มใหม่ เรื่องที่เปิดค้างไว้หาย (lost จาก jobLost) — เก็บสิ่งที่จัดไว้แล้วบอกทางไปต่อ
+// เจอได้ทั้งตอนกดบันทึก และตอนดึงภาพหน้าเอกสารไม่ขึ้น คืน false ถ้าเรื่องยังอยู่ดี
+function lostNotice(lost) {
+  if (lost === 'refetched') {
+    keepDraft();
+    show('ok', '📎 มือถือส่งเรื่องนี้มาใหม่แล้ว — โหลดเรื่องนี้ใหม่เพื่อดูไฟล์แนบ (AI อ่านหนังสือนำอีกรอบ)<br>' +
+      'คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ เก็บไว้ให้แล้ว — โหลดเสร็จจะใส่คืนให้เอง' +
+      linkBtn(esc(location.pathname + location.search), '🔄 โหลดเรื่องนี้ใหม่', 'data-keep'));
+    $('refetchMsg').textContent = '📎 มือถือส่งมาแล้ว — กด 🔄 โหลดเรื่องนี้ใหม่ ที่ด้านบน';
+  } else if (lost === 'reset') {
     keepDraft();
     show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ เรื่องนี้ต้องให้ AI อ่านใหม่ก่อนจึงจะบันทึกได้<br>' +
       'คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้ เก็บไว้ให้แล้ว — โหลดเสร็จจะใส่คืนให้เอง' +
-      btn(esc(location.pathname + location.search), '🔄 โหลดเรื่องนี้ใหม่'));
+      linkBtn(esc(location.pathname + location.search), '🔄 โหลดเรื่องนี้ใหม่', 'data-keep'));
   } else if (lost === 'gone' && D.book_id) {
     keepDraft();
     show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ เรื่องที่เปิดค้างไว้จึงหายไป<br>' +
       'เปิดเรื่องนี้จากรายการอีกครั้ง — คำเกษียณ ตำแหน่ง และลายเซ็นที่จัดไว้จะใส่คืนให้เอง' +
-      btn(backUrl(), '⬅️ กลับไปที่รายการ'));
+      linkBtn(backUrl(), '⬅️ กลับไปที่รายการ', 'data-keep'));
   } else if (lost === 'gone') {
     show('err', 'เซิร์ฟเวอร์เพิ่งเริ่มทำงานใหม่ ไฟล์ที่อัปโหลดไว้จึงหายไป — กรุณาอัปโหลดไฟล์นี้อีกครั้ง' +
-      btn('/', 'กลับหน้าแรก'));
+      linkBtn('/', 'กลับหน้าแรก'));
   } else {
-    show('err', 'บันทึกไม่สำเร็จ: ' + esc(message));
+    return false;
   }
+  // หน้าที่ยังไม่ได้ดึงภาพ ดึงไม่ได้แล้ว — บอกเหตุเดียวกัน ไม่ค้างว่ากำลังดึง
+  pageLost = lost;
+  for (const p of $('pages').querySelectorAll('.page[data-state="wait"], .page[data-state="busy"]'))
+    pageState(p, 'fail', 'lost');
+  return true;
+}
+// กดไปต่อจากข้อความด้านบน — เก็บสิ่งที่จัดไว้อีกรอบ เผื่อจัดต่อหลังข้อความขึ้น
+$('msg').addEventListener('click', (e) => { if (e.target.closest('[data-keep]')) keepDraft(); });
+
+async function saveFailed(status, message) {
+  if (status === 401) {
+    // คุกกี้หมดอายุ (๑๒ ชม.) หรือเปลี่ยนรหัสผ่านจากที่อื่น — งานบนเซิร์ฟเวอร์ยังอยู่ ล็อกอินแล้วกดซ้ำได้
+    show('err', 'หลุดจากระบบ — เข้าสู่ระบบใหม่ในแท็บใหม่ แล้วกลับมากดบันทึกที่หน้านี้อีกครั้ง ' +
+      '(สิ่งที่จัดไว้บนจอนี้ยังอยู่ครบ)' + linkBtn('/login', '🔑 เข้าสู่ระบบ (แท็บใหม่)', 'target="_blank"'));
+    return;
+  }
+  // งานหาย = 404 / ถูกกู้กลับมาเป็น "รอเปิดอ่าน" = 409 ยังไม่พร้อมบันทึก (กรณีอื่นไม่ต้องถามซ้ำ)
+  const lost = status === 404 || status === 409 ? await jobLost() : '';
+  if (!lostNotice(lost)) show('err', 'บันทึกไม่สำเร็จ: ' + esc(message));
 }
 
 $('save').onclick = async () => {

@@ -263,7 +263,7 @@ class ServerFlowTests(unittest.TestCase):
         self.assertEqual(self.ai_pages, [2])
         self.assertEqual(job["sig_page"], 2)                 # the AI said 4: no such page in the letter
         # pages after the first and the signature page load when scrolled to
-        self.assertEqual(job["pages"][3]["png"], f"/api/doc/{job['id']}/page/4")
+        self.assertRegex(job["pages"][3]["png"], rf"^/api/doc/{job['id']}/page/4\?v=[\w-]+$")
         self.assertEqual(job["pages"][3]["w"], 1653)
         self.assertEqual(sorted(m["page"] for m in job["marks"]), [2])       # the list, page 3
 

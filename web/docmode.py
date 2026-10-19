@@ -359,6 +359,7 @@ def _backup_to_drive(job: dict, pdf: str):
     ทำเบื้องหลังเพราะมือถือส่งรวดเดียวหลายเรื่อง ถ้ารออัปทีละไฟล์จะช้ามาก
     แลกกับช่องว่างสั้นๆ ถ้าเครื่องดับพอดีก่อนถึงคิวอัป เรื่องนั้นจะไม่ถูกสำรอง
     (ดู _drive_tasks ว่าทำไมต้องเข้าแถวทีละเรื่อง ไม่แยกเธรดใครเธรดมัน)
+    งานนี้ฝากไว้แล้ว (มือถือส่งเรื่องเดิมมาใหม่ — 🔄 ดึงเรื่องนี้ใหม่ / ส่งซ้ำหลังพัง) ฝากตัวใหม่ได้แล้วเอาตัวเก่าออก
     """
     def work():
         # ลงรับ/ข้ามไปแล้วระหว่างรอคิวอัป ก็ยังต้องฝาก (เก็บไว้ลงรับใหม่ได้ ดู REDO_KEEP)
@@ -372,9 +373,12 @@ def _backup_to_drive(job: dict, pdf: str):
                                             "main_pages", "extras_got")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
+            old = job.get("drive_file_id")
             fid = _dr.queue_put(pdf, meta)
             if fid:
                 _set(job, drive_file_id=fid)
+                if old and old != fid:
+                    _dr.queue_drop(old)
         except Exception as e:
             print(f"ฝากไฟล์คิวไว้บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
 
@@ -683,7 +687,14 @@ def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
                 raise AlreadyHandledError(
                     "registered" if status == "done" else "skipped",
                     existing.get("reserved_receipt") or existing.get("receipt_no", ""))
-            if status == "error" and retry_failed:
+            if existing.get("refetch") and status in _REFETCH_OK:
+                # 🔄 ดึงเรื่องนี้ใหม่ — ไฟล์ที่มือถือเพิ่งดึงมาใช้แทนของเดิม ในงานเดิม (หน้าที่เปิดค้างไว้ยังหางานเจอ)
+                # ลงรับใหม่ด้วยเลขเดิม (♻️) ยังเป็นเลขเดิม มือถือไม่ได้ส่งเลขนั้นมาด้วย
+                _reseed(existing, **{k: v for k, v in clean.items() if k != "redo_no"},
+                        user=user, status="uploading", step="กำลังรับไฟล์จากมือถือ...", error="",
+                        redo_no=existing.get("redo_no"), redo_of=existing.get("redo_of"), refetched=True)
+                claimed = (existing, True)
+            elif status == "error" and retry_failed:
                 existing.update(clean)
                 existing.update(user=user, status="uploading", error="",
                                 step="กำลังรับไฟล์จากมือถือ...")
@@ -797,6 +808,7 @@ def _phone_row(j: dict) -> dict:
         "sent_date": _sent_thai(j.get("created")),
         "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
         "source": "phone",
+        "refetch": bool(j.get("refetch")) and j.get("status") in _REFETCH_OK,   # รอมือถือดึงมาใหม่
     }
 
 
@@ -825,6 +837,43 @@ _PHONE_SEED = ("id", "user", "created", "dir", "source", "book_id", "doc_no", "d
                "drive_file_id", "finished_at")
 
 
+def _reseed(job: dict, **fresh):
+    """ล้างงานเหลือแต่ที่ติดตัวเรื่องมา (_PHONE_SEED) แล้วใส่ fresh — ต้องถือ _lock อยู่
+    สถานะเปลี่ยนทีเดียวตอน update — หน้าที่ถามสถานะอยู่ (ไม่ได้ถือล็อก) ไม่เจองานที่ไม่มี status"""
+    for k in [k for k in job if k not in _PHONE_SEED and k not in fresh]:
+        del job[k]
+    job.update(fresh)
+
+
+# ขอให้มือถือดึงเรื่องใหม่ได้เฉพาะเรื่องที่ยังรอลงรับ — กำลังบันทึก/บันทึกไม่สำเร็จครึ่งทาง (จองเลขแล้ว) ห้ามแทนไฟล์
+_REFETCH_OK = ("stored", "ready")
+
+
+def request_refetch(job: dict):
+    """🔄 ดึงเรื่องนี้ใหม่ — ไฟล์แนบไม่ได้มาด้วย (มือถือยังใช้สคริปต์รุ่นก่อน / โหลดไฟล์แนบไม่สำเร็จ)
+
+    บน Render ดึงจากเว็บ สพป. เองไม่ได้ จึงให้มือถือดึงเรื่องนี้มาส่งใหม่รอบหน้า (ดู refetch_ids)
+    ของเดิมมือถือไม่ดึงซ้ำเพราะเรื่องอยู่ในคิวแล้ว เรื่องที่ค้างคิวมาก่อนอัปเดตสคริปต์จึงไม่มีทางได้ไฟล์แนบ
+    ระหว่างรอ เรื่องเดิมยังจัดและบันทึกได้ตามปกติ ไฟล์ใหม่มาเมื่อไหร่แทนที่ในงานเดิม (claim_phone_job)
+    """
+    with _lock:
+        if job.get("source") != "phone" or not job.get("book_id"):
+            raise JobStateError("เรื่องนี้ไม่ได้ส่งมาจากมือถือ")
+        if job.get("status") not in _REFETCH_OK:
+            raise JobStateError("เรื่องนี้ไม่ได้รอลงรับอยู่แล้ว", status=job.get("status", ""))
+        job["refetch"] = True
+        job.pop("refetched", None)      # ส่งมาใหม่รอบก่อนแล้ว — หน้าที่รออยู่ต้องรอฉบับที่ขอรอบนี้
+
+
+def refetch_ids() -> set:
+    """book_id ที่ขอให้มือถือดึงมาส่งใหม่ (request_refetch) และยังรอลงรับอยู่
+    มือถือถามประวัติแล้วไม่นับเรื่องพวกนี้ว่าลงรับ/อยู่ในคิวแล้ว รอบหน้าจึงดึงไปส่งใหม่พร้อมไฟล์แนบ"""
+    with _lock:
+        return {str(j["book_id"]) for j in _jobs.values()
+                if j.get("source") == "phone" and j.get("book_id") and j.get("refetch")
+                and j.get("status") in _REFETCH_OK}
+
+
 def reopen_phone(book_id: str, redo_no: str = None):
     """เปิดเรื่องจากมือถือที่ลงรับ/ข้ามไปแล้วขึ้นมาทำใหม่ จากต้นฉบับที่เก็บไว้ (ดู REDO_KEEP)
 
@@ -845,13 +894,9 @@ def reopen_phone(book_id: str, redo_no: str = None):
             return job              # กำลังทำอยู่ (เปิดค้างไว้ หรืออีกเครื่องกดไปก่อน) — เปิดงานเดิมต่อ
         if status not in ("done", "skipped", "error", "stored") or not _has_original(job):
             return None
-        fresh = {"status": "stored", "step": "รอเปิดอ่าน", "error": "",
-                 "redo_no": str(redo_no) if redo_no else None,
-                 "redo_of": job.get("result") if status == "done" else job.get("redo_of")}
-        # สถานะเปลี่ยนทีเดียวตอน update — หน้าที่ถามสถานะอยู่ (ไม่ได้ถือล็อก) ไม่เจองานที่ไม่มี status
-        for k in [k for k in job if k not in _PHONE_SEED and k not in fresh]:
-            del job[k]
-        job.update(fresh)
+        _reseed(job, status="stored", step="รอเปิดอ่าน", error="",
+                redo_no=str(redo_no) if redo_no else None,
+                redo_of=job.get("result") if status == "done" else job.get("redo_of"))
     # เซิร์ฟเวอร์เกิดใหม่มาแล้ว โฟลเดอร์งานไม่มี — ไฟล์ดึงจากไดร์ฟลงมาตอนผู้ใช้เปิดเรื่อง
     os.makedirs(job["dir"], exist_ok=True)
     return job
@@ -983,6 +1028,9 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
     if not created:
         return job, False
 
+    # ส่งเรื่องเดิมมาใหม่ (🔄 ดึงเรื่องนี้ใหม่ / ส่งซ้ำหลังพัง) — ภาพหน้าที่เรนเดอร์ไว้เป็นของไฟล์เก่า ทิ้งให้หมด
+    shutil.rmtree(job["dir"], ignore_errors=True)
+    os.makedirs(job["dir"], exist_ok=True)
     pdf = os.path.join(job["dir"], "doc.pdf")
     try:
         main_pages = _combine(source_path, list(extras), pdf)
@@ -1126,10 +1174,13 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     if total > len(pages):
         shown = {pg["index"] for pg in pages}
         sizes = core.page_sizes(pdf_path, DPI)  # w/h ที่ DPI เต็ม เพราะใช้คิดตำแหน่งเป็นซม.
+        # v = ฉบับของไฟล์ — มือถือส่งเรื่องเดิมมาใหม่ (🔄 ดึงเรื่องนี้ใหม่) หน้าเลขเดิมอาจเป็นคนละหน้า
+        # เบราว์เซอร์จำภาพหน้าไว้วันหนึ่ง ถ้าลิงก์ไม่เปลี่ยนจะเห็นภาพของไฟล์เก่า
+        ver = secrets.token_urlsafe(6)
         for n in range(1, min(total, MAX_REVIEW_PAGES) + 1):
             if n in shown:
                 continue
-            pages.append({"name": f"หน้า {n}", "png": f"/api/doc/{job['id']}/page/{n}",
+            pages.append({"name": f"หน้า {n}", "png": f"/api/doc/{job['id']}/page/{n}?v={ver}",
                           "w": sizes[n][0], "h": sizes[n][1], "index": n})
         pages.sort(key=lambda pg: pg["index"])
         all_pages = True
