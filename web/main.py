@@ -1307,6 +1307,8 @@ def api_doc_status(job_id: str, brief: bool = False, user: str = Depends(current
     if brief:
         return {"status": job["status"], "refetch": bool(job.get("refetch")),
                 "refetched": bool(job.get("refetched"))}
+    # เปิดค้างไว้/กลับมาเปิดใหม่หลังไปลงเรื่องอื่น — เลขที่จะได้เปลี่ยนไปแล้ว โชว์เลขจริงตอนนี้
+    docmode.refresh_receipt_no(job)
     # ส่งเฉพาะที่หน้าจอต้องใช้ (ตัด pdf_path และของภายในออก)
     # book_id บอกหน้าจอว่าเข้ามาจากทางไหน (มี = โหมด ๑ / ไม่มี = อัปโหลดเอง)
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
@@ -1324,6 +1326,26 @@ def api_doc_status(job_id: str, brief: bool = False, user: str = Depends(current
     out["missing_extras"] = docmode.missing_extras(job)   # ไฟล์แนบ PDF ที่ไม่ได้มาต่อท้าย
     out["refetch"] = bool(job.get("refetch"))             # ขอให้มือถือดึงเรื่องนี้ใหม่แล้ว รออยู่
     return out
+
+
+@app.get("/api/doc/{job_id}/receipt")
+def api_doc_receipt(job_id: str, user: str = Depends(current_user)):
+    """เลขรับที่จะได้จริงตอนนี้ — หน้าจัดเอกสารถามตอนกลับมาที่หน้านี้ (ไปลงเรื่องอื่นมาก่อน เลขเดิมถูกใช้แล้ว)"""
+    job = _job_or_404(job_id, user)
+    changed = docmode.refresh_receipt_no(job)
+    return {"receipt_no": job.get("receipt_no", ""), "changed": changed}
+
+
+@app.post("/api/doc/{job_id}/reread")
+def api_doc_reread(job_id: str, user: str = Depends(current_user)):
+    """🤖 ให้ AI อ่านใหม่ทั้งเรื่องจากไฟล์เดิม — หน้าจอโหลดเรื่องนี้ใหม่แล้วรอผลเหมือนตอนเปิดเรื่อง"""
+    try:
+        docmode.reread(_job_or_404(job_id, user))
+    except docmode.QueueFullError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except docmode.JobStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
 
 
 @app.post("/api/doc/{job_id}/refetch")

@@ -539,10 +539,134 @@ def send_line_with_image(text, image_url=None):
 # ==========================================
 # ๓. ฟังก์ชัน AI
 # ==========================================
+# รุ่นของ Gemini ที่ใช้อ่านหนังสือ — Google ปิดรุ่นเก่าเป็นระยะ ของเดิมเขียนตายตัวไว้ gemini-2.5-flash
+# พอ Google เริ่มปิดรุ่นนั้น (ต.ค. ๒๕๖๙) ทุกเรื่องขึ้น "AI ผิดพลาด: ไม่พบโมเดล" จึงลองตามลำดับ
+#   ๑. SARABAN_GEMINI_MODEL ถ้าตั้งไว้ (คั่นด้วย , ได้หลายรุ่น)
+#   ๒. gemini-flash-latest — ชื่อกลางที่ Google ชี้ไปรุ่น Flash ล่าสุดให้เอง  ๓. gemini-2.5-flash
+#   ๔. ถูกปิดหมดทุกตัว ถาม Google ว่าตอนนี้มีรุ่นไหนให้ใช้ แล้วเลือกรุ่น Flash ใหม่สุดเอง
+GEMINI_MODELS = ("gemini-flash-latest", "gemini-2.5-flash")
+_ai_model = None          # รุ่นที่ใช้ได้ล่าสุด เรื่องถัดไปลองตัวนี้ก่อน ไม่ต้องไล่ลองใหม่ทุกเรื่อง
+AI_RETRY_WAIT = (3, 8)    # วินาทีที่รอก่อนลองซ้ำ ตอน Google บอกว่าไม่ว่าง (503 คนใช้เยอะ)
+# รุ่นที่ไม่ได้ไว้อ่านเอกสารแล้วตอบเป็นข้อความ (ทำรูป เสียง คุยสด ฯลฯ) ไม่เลือกมาใช้
+_NOT_FOR_READING = ("lite", "image", "tts", "audio", "live", "embed", "thinking", "exp",
+                    "learnlm", "robotics", "computer", "native")
+
+
+def ai_error_kind(e) -> str:
+    """ชนิดความผิดพลาดจาก Gemini: gone (รุ่นถูกปิด) busy (ไม่ว่าง ลองใหม่ได้) quota auth other
+
+    ของเดิมเหมาว่าข้อความไหนมีคำว่า model คือ "ไม่พบโมเดล" ทั้งที่ 503
+    "The model is overloaded" (คนใช้เยอะ รอแป๊บเดียวก็หาย) ก็มีคำนั้น
+    """
+    code = getattr(e, "code", None)
+    status = str(getattr(e, "status", "") or "").upper()
+    text = str(e).lower()
+    if "no longer available" in text or (
+            "model" in text and ("not available" in text or "not supported" in text)):
+        return "gone"
+    by_code = {404: "gone", 429: "quota", 401: "auth", 403: "auth",
+               500: "busy", 502: "busy", 503: "busy", 504: "busy"}
+    if code in by_code:
+        return by_code[code]
+    by_status = {"NOT_FOUND": "gone", "RESOURCE_EXHAUSTED": "quota", "PERMISSION_DENIED": "auth",
+                 "UNAUTHENTICATED": "auth", "UNAVAILABLE": "busy", "INTERNAL": "busy",
+                 "DEADLINE_EXCEEDED": "busy"}
+    if status in by_status:
+        return by_status[status]
+    if "not found" in text:
+        return "gone"
+    if "quota" in text or "resource_exhausted" in text or "rate limit" in text:
+        return "quota"
+    if "api key" in text or "api_key" in text or "permission" in text or "unauthenticated" in text:
+        return "auth"
+    if any(w in text for w in ("overloaded", "unavailable", "timed out", "timeout", "connection")):
+        return "busy"
+    return "other"
+
+
+def _model_candidates() -> list:
+    env = [m.strip() for m in os.environ.get("SARABAN_GEMINI_MODEL", "").split(",") if m.strip()]
+    out = []
+    for m in [_ai_model] + env + list(GEMINI_MODELS):
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+def _discover_models(ai) -> list:
+    """ถาม Google ว่าตอนนี้มีรุ่นไหนให้ใช้ — ตระกูล Flash ที่ตอบเป็นข้อความได้ รุ่นจริงใหม่สุดก่อน รุ่นทดลองไว้ท้าย"""
+    found = set()
+    for m in ai.models.list():
+        name = str(getattr(m, "name", "") or "").split("/")[-1]
+        actions = getattr(m, "supported_actions", None) or []
+        if "generateContent" in actions and "flash" in name \
+                and not any(x in name for x in _NOT_FOR_READING):
+            found.add(name)
+
+    def rank(name):                    # รุ่นจริงก่อนรุ่นทดลอง (ทดลองถูกถอนเร็วกว่า) แล้วใหม่สุดก่อน
+        v = re.search(r"(\d+(?:\.\d+)?)", name)
+        return ("preview" in name, -(float(v.group(1)) if v else 0.0), len(name), name)
+    return sorted(found, key=rank)
+
+
+def _ai_call(fn):
+    """เรียก Google ซ้ำได้ตอนไม่ว่าง (503) — รอ AI_RETRY_WAIT แล้วลองใหม่ ยังไม่ว่างก็ส่งต่อให้คนเรียก"""
+    for wait in AI_RETRY_WAIT + (None,):
+        try:
+            return fn()
+        except Exception as e:
+            if wait is None or ai_error_kind(e) != "busy":
+                raise
+            time.sleep(wait)
+
+
+def _ai_generate(ai, contents):
+    """ให้ Gemini อ่าน — รุ่นที่ถูกปิด/ไม่ว่าง/โควต้าหมด ข้ามไปลองรุ่นถัดไป (คนละรุ่นคนละโควต้าคนละคิว)
+    ถูกปิดหมดทุกตัวก็ถาม Google ว่ามีรุ่นไหนเหลือ ส่วน API Key ผิดหรือไฟล์มีปัญหา ลองรุ่นอื่นก็ไม่หาย หยุดเลย"""
+    global _ai_model
+    queue_, tried, last, discovered = _model_candidates(), set(), None, False
+    while True:
+        if not queue_:
+            if discovered or last is None or ai_error_kind(last) != "gone":
+                raise last
+            discovered = True
+            try:
+                queue_ = [m for m in _discover_models(ai) if m not in tried][:4]
+            except Exception:
+                raise last
+            if not queue_:
+                raise last
+        model = queue_.pop(0)
+        if model in tried:
+            continue
+        tried.add(model)
+        try:
+            response = _ai_call(lambda: ai.models.generate_content(model=model, contents=contents))
+        except Exception as e:
+            last = e
+            if ai_error_kind(e) in ("auth", "other"):
+                raise
+            continue
+        if model != _ai_model:
+            print(f"AI อ่านหนังสือด้วยรุ่น {model}")
+        _ai_model = model
+        return response
+
+
+_AI_REASON = {
+    "gone": "รุ่น AI ที่ใช้ถูก Google ปิดแล้ว และหารุ่นอื่นแทนไม่ได้ — ตั้ง SARABAN_GEMINI_MODEL เป็นรุ่นที่ยังเปิดอยู่",
+    "busy": "AI ของ Google ไม่ว่าง (คนใช้เยอะ) — รอสักครู่แล้วให้ AI อ่านใหม่",
+    "quota": "โควต้า/วงเงินของ Gemini หมด — ตรวจสอบที่ Google AI Studio/Cloud Billing",
+    "auth": "API Key ไม่ถูกต้อง/ไม่มีสิทธิ์ — ตรวจสอบที่ ⚙️ ตั้งค่า",
+}
+
+
 def generate_kasien_text(pdf_path):
     try:
         ai = get_ai_client()
-        sample_file = ai.files.upload(file=pdf_path)
+        if ai is None:
+            raise RuntimeError("ยังไม่ได้ตั้ง API Key ของ Gemini")
+        sample_file = _ai_call(lambda: ai.files.upload(file=pdf_path))
         prompt = """
         อ่านหนังสือราชการฉบับนี้ แล้วทำหน้าที่เป็นผู้ช่วยธุรการโรงเรียน โดยต้องวิเคราะห์และสกัดข้อมูลดังนี้:
         
@@ -557,7 +681,7 @@ def generate_kasien_text(pdf_path):
         บรรทัดที่ 8: [สกัดชื่อหน่วยงานผู้ส่ง/จากใคร เช่น สพป.สกลนคร เขต 1 ถ้าหาไม่พบให้ตอบ -]
         บรรทัดที่ 9: [สกัดบรรทัด "เรียน" ของหนังสือต้นฉบับว่าส่งถึงใคร — ตอบเฉพาะข้อความผู้รับ ไม่ต้องมีคำว่า "เรียน" เช่น "ผู้อำนวยการโรงเรียนในสังกัดทุกแห่ง" หรือ "ผู้อำนวยการโรงเรียนในสังกัด (โรงเรียนมาตรฐานสากล)" หรือ "ผู้อำนวยการโรงเรียนในโครงการพระราชดำริฯ ทั้ง 27 โรงเรียน" ถ้าหาไม่พบให้ตอบ -]
         """
-        response = ai.models.generate_content(model='gemini-2.5-flash', contents=[sample_file, prompt])
+        response = _ai_generate(ai, [sample_file, prompt])
         lines = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
         
         sig_page = 1
@@ -595,18 +719,12 @@ def generate_kasien_text(pdf_path):
                 logf.write(traceback.format_exc())
         except Exception:
             pass
-        short = str(e).replace("\n", " ")
-        low = short.lower()
-        if ("429" in short) or ("resource_exhausted" in low) or ("quota" in low) or ("exceeded" in low):
-            reason = "โควต้า/วงเงินรายเดือนของ Gemini หมด — ตรวจสอบที่ Google AI Studio/Cloud Billing"
-        elif ("api key" in low) or ("api_key" in low) or ("401" in short) or ("403" in short) or ("permission" in low) or ("unauthenticated" in low):
-            reason = "API Key ไม่ถูกต้อง/ไม่มีสิทธิ์ — ตรวจสอบที่ ⚙️ ตั้งค่า"
-        elif ("404" in short) or ("not found" in low) or ("model" in low):
-            reason = "ไม่พบโมเดล — ตรวจสอบชื่อโมเดลในโค้ด"
-        else:
-            reason = short[:90]
-        return (f"เรียน ผอ.โรงเรียนบ้านโพนทองประชาอุทิศ\n(AI ผิดพลาด: {reason})\nเพื่อโปรดทราบ",
+        reason = _AI_REASON.get(ai_error_kind(e)) or str(e).replace("\n", " ")[:90]
+        return (f"เรียน ผอ.โรงเรียนบ้านโพนทองประชาอุทิศ\n({AI_FAILED} {reason})\nเพื่อโปรดทราบ",
                 1, "-", "-", "-", "-", "-")
+
+
+AI_FAILED = "AI ผิดพลาด:"      # ขึ้นต้นบรรทัดสองของคำเกษียณตอน AI อ่านไม่สำเร็จ (หน้าจัดเอกสารดูคำนี้)
 
 # =====================================================================
 # ๓.๑ ตรวจบรรทัด "เรียน" ในเครื่อง (ไม่ใช้ AI) เพื่อคัดกรองก่อนลงรับ

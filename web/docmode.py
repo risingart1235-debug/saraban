@@ -1408,6 +1408,60 @@ def render_stamp(job, size_pct: int, date_str: str, time_str: str) -> dict:
     return {"png": _png_uri(img), "w": img.width, "h": img.height}
 
 
+def refresh_receipt_no(job) -> bool:
+    """เลขรับที่จะได้จริงตอนนี้ — เปิดเรื่องค้างไว้ แล้วไปลงเรื่องอื่นก่อน เลขที่โชว์ตอนเปิดถูกใช้ไปแล้ว
+    (ตอนบันทึกจองเลขจริงใหม่อยู่แล้ว ไฟล์/ทะเบียนไม่ผิด แต่จอยังโชว์เลขที่เรื่องอื่นได้ไป ผู้ใช้ตกใจว่าเลขซ้ำ)
+    คืน True ถ้าเลขเปลี่ยน — ตรายางตัวอย่างวาดใหม่ด้วยเลขใหม่ให้แล้ว (วัน-เวลาตามจริงตอนนี้)
+    ลงรับใหม่ด้วยเลขเดิม (♻️) หรือจองเลขไปแล้ว (บันทึกไม่สำเร็จครึ่งทาง) เลขนั้นตายตัว ไม่ต้องดู"""
+    if job.get("status") != "ready" or job.get("redo_no") or job.get("reserved_receipt"):
+        return False
+    try:
+        now = str(get_next_receipt_no() or "").strip()
+    except Exception:
+        return False        # อ่านทะเบียนไม่ได้ตอนนี้ ใช้เลขเดิมไปก่อน ตอนบันทึกจองเลขจริงอยู่แล้ว
+    if not re.fullmatch(r"[0-9๐-๙]+", now) or now == str(job.get("receipt_no") or ""):
+        return False
+    stamp = dict(job.get("stamp") or {})
+    img = render_transparent_stamp(now, int(stamp.get("size_pct") or 100))
+    stamp.update(png=_png_uri(img), w=img.width, h=img.height)
+    _set(job, receipt_no=now, stamp=stamp)
+    return True
+
+
+def reread(job):
+    """🤖 ให้ AI อ่านใหม่ — อ่านไม่สำเร็จ (Google ไม่ว่าง/รุ่นถูกปิด) หรืออ่านแล้วไม่ตรง ส่งไฟล์เดิมให้อ่านใหม่
+    ทั้งเรื่อง ได้คำเกษียณ หน้าที่มีลายเซ็น การตรวจบรรทัด "เรียน" และเลขรับที่จะได้ใหม่หมด (จัดตำแหน่งใหม่)
+    ที่/เรื่อง/วันที่/จาก ของเรื่องจากเว็บ สพป./มือถือ ใช้ตามเว็บเหมือนเดิม — อัปโหลดเอง ให้ AI อ่านใหม่ด้วย"""
+    with _lock:
+        if job.get("status") != "ready" or job.get("reserved_receipt"):
+            raise JobStateError("ให้ AI อ่านใหม่ได้เฉพาะเรื่องที่เปิดจัดอยู่และยังไม่ได้บันทึก",
+                                status=job.get("status", ""))
+        pdf = job.get("pdf_path") or ""
+        if not os.path.exists(pdf):
+            raise JobStateError("ไม่พบไฟล์ของเรื่องนี้ในเซิร์ฟเวอร์แล้ว — เปิดเรื่องนี้ใหม่จากรายการ")
+        from_web = bool(job.get("book_id"))
+        args = {k: (job.get(k) or "-") if from_web else "-"
+                for k in ("doc_no", "doc_title", "doc_date", "sender")}
+        args.update(emoji=job.get("emoji") or "🔵", attach=job.get("attach") or "",
+                    book_id=job.get("book_id"), redo_no=job.get("redo_no"),
+                    main_pages=job.get("main_pages"))
+        job.pop("ocr", None)            # สแกนรอบก่อนเป็นของหน้าที่จัดไว้เดิม — เริ่มใหม่ด้วยกัน
+        job.update(status="queued", step="อยู่ในคิวรอให้ AI อ่านใหม่...")
+
+    def work():
+        try:
+            _set(job, status="analyzing", step="กำลังให้ AI อ่านใหม่ (ใช้เวลาสักครู่)...")
+            _prepare(job, pdf, **args)
+        except Exception as e:
+            _fail(job, e)
+
+    try:
+        _work_queue.put_nowait(work)
+    except queue.Full:
+        _set(job, status="ready", step="พร้อมแล้ว")      # ยังจัดต่อได้เหมือนเดิม แค่ยังอ่านใหม่ไม่ได้ตอนนี้
+        raise QueueFullError("เซิร์ฟเวอร์มีงานรอเต็ม กรุณารอสักครู่แล้วกดใหม่")
+
+
 # ==========================================================
 # บันทึก
 # ==========================================================

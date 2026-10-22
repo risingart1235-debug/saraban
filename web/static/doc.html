@@ -163,6 +163,12 @@
         <p class="tiny" id="refetchMsg" style="margin-top:6px; line-height:1.6"></p>
       </div>
       <div id="warn" class="err hidden" style="margin-top:8px"></div>
+      <!-- AI อ่านไม่สำเร็จ (Google ไม่ว่าง / รุ่นที่ใช้ถูกปิด / โควต้าหมด) คำเกษียณเป็นข้อความแจ้งเหตุ
+           ไม่ใช่สรุปหนังสือ — บอกให้ชัดตั้งแต่บนสุด แล้วกดให้อ่านใหม่ได้เลย -->
+      <div id="aiFail" class="err hidden" style="margin-top:8px">
+        🤖 <b>AI อ่านหนังสือไม่สำเร็จ</b> — <span id="aiFailWhy"></span>
+        <button class="btn small" id="aiAgain" style="margin-top:8px">🤖 ให้ AI อ่านใหม่</button>
+      </div>
       <p class="tiny hidden" id="knote" style="margin-top:8px; line-height:1.6"></p>
       <!-- โหมดไฮไลท์ชื่อโรงเรียน (เปิดในตั้งค่าบัญชี) — บอกว่าเจอชื่อหน้าไหน ปิดเฉพาะเรื่องนี้ได้ -->
       <div id="hlbox" class="hidden">
@@ -212,6 +218,8 @@
         ถ้าข้างลายเซ็นไม่มีที่ว่างอาจทับตัวหนังสือบ้าง ลากย้ายเองได้
         (ลายเซ็นผู้ลงรับที่อยู่ใต้กล่องย้ายตามไปด้วย)</p>
       <button class="btn grey small" id="badd" style="margin-top:10px">➕ เพิ่มกล่องข้อความ</button>
+      <!-- คำเกษียณที่ AI ร่างไม่ตรงเรื่อง — ให้อ่านใหม่ทั้งเรื่อง (ตำแหน่งที่จัดไว้เริ่มใหม่ตามหน้าที่มีลายเซ็นรอบใหม่) -->
+      <button class="btn grey small" id="aiRedo" style="margin-top:10px">🤖 ให้ AI อ่านใหม่</button>
     </div>
 
     <div class="card">
@@ -324,6 +332,7 @@ function backLabel() {
   return (D && D.book_id) ? '⬅️ ลงรับเรื่องต่อไป' : 'กลับหน้าแรก';
 }
 let D = null, sel = null;          // D = ข้อมูลงาน, sel = กล่องที่เลือกอยู่
+const AI_FAILED = 'AI ผิดพลาด:';    // ขึ้นต้นข้อความแจ้งเหตุในคำเกษียณตอน AI อ่านไม่สำเร็จ (core.AI_FAILED)
 let blankOn = false;               // แทรกหน้ากระดาษเปล่าไว้หรือยัง (กดแทรกเอง)
 
 function show(kind, html) {
@@ -387,6 +396,11 @@ function build() {
     $('warn').classList.remove('hidden');
   }
   showRefetch();
+  // บรรทัดแจ้งเหตุ "(AI ผิดพลาด: <เหตุ>)" — เหตุเองมีวงเล็บได้ จึงตัดเฉพาะวงเล็บปิดท้ายบรรทัด
+  const why = ((D.boxes || []).map(b => String(b.text || '')).join('\n').split('\n')
+                 .find(l => l.includes(AI_FAILED)) || '');
+  $('aiFail').classList.toggle('hidden', !why);
+  $('aiFailWhy').textContent = why.slice(why.indexOf(AI_FAILED) + AI_FAILED.length).replace(/\)\s*$/, '').trim();
   $('d').value = D.date; $('t').value = D.time;
   $('ssv').textContent = D.stamp.size_pct + '%';
   $('stampPrev').src = D.stamp.png;
@@ -1531,6 +1545,53 @@ $('skip').onclick = async () => {
   dropDraft();
   location.href = backUrl();
 };
+
+// ---------- 🤖 ให้ AI อ่านใหม่ ----------
+// AI อ่านไม่สำเร็จ (Google ไม่ว่าง / รุ่นที่ใช้ถูกปิด) หรือคำเกษียณที่ร่างมาไม่ตรงเรื่อง — ส่งไฟล์เดิมให้อ่านใหม่
+// ทั้งเรื่อง ได้คำเกษียณ หน้าที่มีลายเซ็น และการตรวจบรรทัด "เรียน" ใหม่ สิ่งที่จัดไว้เริ่มใหม่หมด
+// (ไม่ใส่คืนจากที่จัดไว้ ไม่งั้นคำเกษียณที่แจ้งว่า AI พลาดจะกลับมาทับของใหม่)
+async function aiReread(btn) {
+  const failed = !$('aiFail').classList.contains('hidden');
+  if (!failed && !confirm('ให้ AI อ่านเรื่องนี้ใหม่ใช่ไหม?\n\n' +
+                          'คำเกษียณและตำแหน่งที่จัดไว้จะเริ่มใหม่ตามที่ AI อ่านรอบนี้')) return;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'กำลังส่งให้ AI อ่าน...';
+  try {
+    const r = await fetch(`/api/doc/${JOB}/reread`, { method: 'POST' });
+    const d = await readJSON(r);
+    if (!r.ok) throw new Error(d.detail || 'ส่งไม่สำเร็จ');
+    dropDraft();
+    location.reload();                 // เปิดเรื่องเดิมใหม่ — รอ AI อ่านเหมือนตอนเปิดเรื่องครั้งแรก
+  } catch (e) {
+    btn.disabled = false; btn.textContent = label;
+    show('err', 'ให้ AI อ่านใหม่ไม่สำเร็จ: ' + esc(e.message));
+  }
+}
+$('aiAgain').onclick = () => aiReread($('aiAgain'));
+$('aiRedo').onclick = () => aiReread($('aiRedo'));
+
+// ---------- เลขรับที่จะลง ----------
+// เลขที่โชว์คือเลขถัดไปตอนเปิดเรื่อง — เปิดค้างไว้แล้วไปลงเรื่องอื่นก่อน เลขนั้นถูกใช้ไปแล้ว
+// ตอนบันทึกได้เลขที่ถูกต้องเสมอ (จองจริงตอนนั้น) แต่จอโชว์เลขเก่า ผู้ใช้ตกใจว่าจะได้เลขซ้ำ
+// กลับมาที่หน้านี้เมื่อไหร่ (สลับแอป/แท็บ กดย้อนกลับ) และทุกนาทีที่เปิดดูอยู่ ถามเลขจริงตอนนี้
+async function syncReceiptNo() {
+  if (!D || D.redo_no || $('app').classList.contains('hidden')) return;
+  try {
+    const r = await fetch(`/api/doc/${JOB}/receipt`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.receipt_no && d.receipt_no !== D.receipt_no) {
+      D.receipt_no = d.receipt_no;
+      $('rno').textContent = d.receipt_no;
+      reStamp();                       // ตรายางบนเอกสารใช้วัน-เวลา/ขนาดที่ตั้งไว้บนจอ
+    }
+  } catch (e) { /* เน็ตหลุดชั่วคราว รอบหน้าค่อยถามใหม่ */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') syncReceiptNo();
+});
+window.addEventListener('pageshow', (e) => { if (e.persisted) syncReceiptNo(); });
+setInterval(() => { if (document.visibilityState === 'visible') syncReceiptNo(); }, 60 * 1000);
 
 // ---------- กันเซิร์ฟเวอร์หลับระหว่างจัดเอกสาร ----------
 // Render ฟรีหลับเองเมื่อไม่มีใครเรียกครบ ๑๕ นาที ตื่นมาเรื่องที่เปิดค้างไว้หายหมด
