@@ -18,6 +18,7 @@ import os
 import re
 import io
 import json
+import time
 import threading
 
 import core
@@ -25,6 +26,9 @@ import core
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _lock = threading.Lock()
 _svc = None
+# หาโฟลเดอร์แล้วสร้างถ้าไม่มี ต้องทำรวดเดียว ไม่งั้นสองเธรดหาไม่เจอพร้อมกันแล้วต่างคนต่างสร้าง
+# (ไดร์ฟเคยมี "คิวรอลงรับ" สองอันที่สร้างนาทีเดียวกัน ๖ ต.ค. ๒๕๖๙)
+_folder_lock = threading.RLock()
 
 # ตัวเชื่อม _svc ใช้ร่วมกันทั้งโปรเซส แต่ httplib2 ที่อยู่ข้างใต้ใช้พร้อมกันหลายเธรดไม่ได้
 # (เอกสารของ google-api-python-client เขียนไว้เอง) สองเธรดยิงพร้อมกันบนการเชื่อมต่อเดียว
@@ -135,23 +139,34 @@ def _run(req, tries=3):
             time.sleep(1.5 * (i + 1))
 
 
-def ensure_subfolder(name: str, parent: str = None) -> str:
-    """หาโฟลเดอร์ย่อยตามชื่อ ถ้าไม่มีก็สร้าง (ใช้แยกตามวันที่เหมือนในเครื่อง)"""
-    svc = _service()
-    parent = parent or target_folder()
+def _find_subfolder(name: str, parent: str) -> str:
+    """id ของโฟลเดอร์ชื่อนี้ใต้ parent ที่โปรแกรมมองเห็น ("" ถ้าไม่มี)
+
+    ชื่อซ้ำกันหลายอันเลือกอันที่สร้างก่อนสุดเสมอ — เดิมเอาอันแรกที่ Drive ส่งมา ซึ่งไม่มีลำดับแน่นอน
+    ไฟล์คิวเลยกระจายไปอยู่คนละโฟลเดอร์ แล้วตอนกู้คิวอ่านแค่โฟลเดอร์เดียว ที่เหลือค้างอยู่อย่างนั้น
+    """
     safe = name.replace("'", "")
     q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
          f"and '{parent}' in parents and trashed = false")
-    res = _run(svc.files().list(q=q, fields="files(id,name)", pageSize=1,
-                                supportsAllDrives=True, includeItemsFromAllDrives=True))
+    res = _run(_service().files().list(q=q, fields="files(id,name)", pageSize=1, orderBy="createdTime",
+                                       supportsAllDrives=True, includeItemsFromAllDrives=True))
     files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-    made = _run(svc.files().create(
+    return files[0]["id"] if files else ""
+
+
+def _create_subfolder(name: str, parent: str) -> str:
+    made = _run(_service().files().create(
         body={"name": name, "mimeType": "application/vnd.google-apps.folder",
               "parents": [parent]},
         fields="id", supportsAllDrives=True))
     return made["id"]
+
+
+def ensure_subfolder(name: str, parent: str = None) -> str:
+    """หาโฟลเดอร์ย่อยตามชื่อ ถ้าไม่มีก็สร้าง (ใช้แยกตามวันที่เหมือนในเครื่อง)"""
+    parent = parent or target_folder()
+    with _folder_lock:
+        return _find_subfolder(name, parent) or _create_subfolder(name, parent)
 
 
 def ensure_path(path: str, parent: str = None) -> str:
@@ -169,6 +184,66 @@ def ensure_path(path: str, parent: str = None) -> str:
         if part:
             fid = ensure_subfolder(part, fid)
     return fid
+
+
+def premake(rel: str, wait: float = 0, root: str = None) -> bool:
+    """คอมที่ Drive for Desktop ซิงก์ OUTPUT_ROOT: ให้โปรแกรมสร้างโฟลเดอร์ผ่าน API ก่อนเขียนไฟล์ลงเครื่อง
+
+    สิทธิ์ drive.file มองเห็นเฉพาะโฟลเดอร์ที่โปรแกรมสร้างเอง โฟลเดอร์ที่คอมสร้าง (ซิงก์ขึ้นไปทีหลัง)
+    เซิร์ฟเวอร์จึงหาไม่เจอแล้วสร้างอีกอันชื่อเดียวกัน ไดร์ฟเลยมี "๒๕๖๙" กับ "๒๕๖๙ (1)" เดือนเดียวกัน
+    แยกอยู่สองที่ — ให้โปรแกรมสร้างแล้วรอซิงก์ลงมา คอมกับเซิร์ฟเวอร์จะใช้โฟลเดอร์เดียวกัน
+
+    rel เช่น "๒๕๖๙/๑๐ ตุลาคม/๒๙" (ใต้ root ซึ่งปกติคือ OUTPUT_ROOT) รอซิงก์ลงมาได้ไม่เกิน wait วินาที
+    คืน True ถ้าในเครื่องมีโฟลเดอร์นี้แล้ว — False ผู้เรียกก็สร้างในเครื่องเองเหมือนเดิม
+    ไม่ทำอะไรบน hosting (อัปผ่าน API อยู่แล้ว) เครื่องที่ไม่มีกุญแจ OAuth หรือไม่ได้ซิงก์ (_mirrored)
+    """
+    root = root or core.OUTPUT_ROOT
+    parts = [p.strip() for p in str(rel or "").split("/") if p.strip()]
+    local = os.path.join(root, *parts)
+    if os.path.isdir(local):
+        return True
+    if enabled() or not target_folder() or not _mirrored(root):
+        return False
+    try:
+        if not oauth_info() or not _premake_path(parts, root):
+            return False
+    except Exception as e:
+        print(f"สร้างโฟลเดอร์ผ่านไดร์ฟไม่สำเร็จ ({rel}): {type(e).__name__}: {e}")
+        return False
+    deadline = time.monotonic() + wait
+    while not os.path.isdir(local) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    return os.path.isdir(local)
+
+
+def _mirrored(root: str) -> bool:
+    """root ในเครื่องนี้คือโฟลเดอร์บนไดร์ฟที่ Drive for Desktop ซิงก์ลงมาหรือเปล่า
+
+    ดูจากโฟลเดอร์คิวที่เซิร์ฟเวอร์สร้างไว้บนไดร์ฟ ว่าซิงก์ลงมาอยู่ในเครื่องด้วยไหม — เครื่องที่ไม่ได้ซิงก์
+    (หรือตอนรันเทสต์ที่ใช้โฟลเดอร์ชั่วคราว แต่อ่าน config.json จริง) สร้างผ่าน API ไปก็ไม่มีวันโผล่ในเครื่อง
+    มีแต่จะไปงอกโฟลเดอร์ว่างบนไดร์ฟจริง
+    """
+    return os.path.isdir(os.path.join(root, QUEUE_FOLDER_NAME))
+
+
+def _premake_path(parts: list, root: str) -> bool:
+    """สร้างทีละชั้น — ชั้นที่มีในเครื่องแต่โปรแกรมมองไม่เห็น (คอมสร้างเอง) หยุดเลย
+    สร้างต่อก็ได้โฟลเดอร์ชื่อซ้ำแบบเดียวกับที่กำลังกันอยู่"""
+    fid, local = target_folder(), root
+    for part in parts:
+        local = os.path.join(local, part)
+        with _folder_lock:
+            found = _find_subfolder(part, fid)
+            if not found and os.path.isdir(local):
+                return False
+            fid = found or _create_subfolder(part, fid)
+    return True
+
+
+def premake_later(rel: str):
+    """premake เบื้องหลัง — เรียกตอนเปิดเรื่อง กว่าจะกดบันทึก โฟลเดอร์ก็ซิงก์ลงมารอแล้ว
+    (จำ OUTPUT_ROOT ตอนสั่งไว้ เธรดอาจได้ทำงานตอนที่ค่านั้นเปลี่ยนไปแล้ว)"""
+    threading.Thread(target=premake, args=(rel, 0, core.OUTPUT_ROOT), daemon=True).start()
 
 
 def upload(local_path: str, day: str = None, name: str = None) -> dict:
@@ -392,11 +467,13 @@ LINE_TOKEN_PROP = "line_token"
 
 
 def line_image_put(local_jpg: str, name: str, day: str = None, token: str = "") -> str:
-    """เก็บรูปไว้ในโฟลเดอร์ของวันนั้น (ที่เดียวกับไฟล์ PDF) คืน id ของไฟล์ ("" ถ้าไม่ได้เปิดใช้ไดร์ฟ)"""
+    """เก็บรูปไว้ในโฟลเดอร์ "รูปที่ส่ง LINE" ของวันนั้น (ข้างไฟล์ PDF) คืน id ของไฟล์ ("" ถ้าไม่ได้เปิดใช้ไดร์ฟ)
+    ย้ายโฟลเดอร์ได้ ลิงก์ในแชตไม่เสีย — line_image_get หาจากโทเคนที่ติดไว้กับไฟล์ ไม่ได้หาตามที่อยู่"""
     if not enabled():
         return ""
     from googleapiclient.http import MediaFileUpload
-    body = {"name": name, "parents": [ensure_path(day) if day else target_folder()]}
+    body = {"name": name, "parents": [ensure_path(f"{day}/{core.LINE_IMG_SUBDIR}") if day
+                                      else target_folder()]}
     if token:
         body["appProperties"] = {LINE_TOKEN_PROP: token}
     f = _run(_service().files().create(

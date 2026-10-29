@@ -344,7 +344,10 @@ class AutoScanOnTheSchoolComputerTests(unittest.TestCase):
         ai = ("เรียน ผอ.\nเพื่อโปรดทราบ", 1, "ศธ 1", "ประชุม", "-", "-", "-")
         job = {"id": "auto-%d" % id(self), "user": "ครูเอ", "source": "upload", "status": "analyzing",
                "dir": work}
-        with patch.object(docmode, "generate_kasien_text", return_value=ai), \
+        # an output folder of its own: the real one is Drive's synced copy, which opening a document
+        # gets Drive to add today's folder to
+        with patch.object(core, "OUTPUT_ROOT", os.path.join(work, "out")), \
+                patch.object(docmode, "generate_kasien_text", return_value=ai), \
                 patch.object(docmode, "get_next_receipt_no", return_value="๕๗"), \
                 patch.object(docmode, "OCR_AUTO", auto), \
                 patch.object(core, "tesseract_cmd", return_value="tesseract"), \

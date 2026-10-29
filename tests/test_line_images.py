@@ -168,7 +168,7 @@ class FakeDriveFiles:
                            "folder": folder, "props": props or {}}
         return fid
 
-    def list(self, q, fields=None, pageSize=100, **kw):
+    def list(self, q, fields=None, pageSize=100, orderBy=None, **kw):
         self.queries.append(q)
         parent = re.search(r"'([^']+)' in parents", q)
         name = re.search(r"name = '([^']*)'", q)
@@ -181,6 +181,8 @@ class FakeDriveFiles:
                     and (not parent or it["parent"] == parent.group(1))
                     and (not name or it["name"] == name.group(1))
                     and (not prop or it["props"].get(prop.group(1)) == prop.group(2))]
+            if orderBy != "createdTime":
+                hits.reverse()       # Drive promises no order unless asked: newest first here
             return {"files": hits[:pageSize]}
         return _Req(run)
 
@@ -228,7 +230,8 @@ class DriveStoreTests(unittest.TestCase):
 
     def test_put_into_the_day_folder_then_find_it_by_the_link_token(self):
         fid = self.drive.line_image_put(self.src, "เลขรับ_๕๗_หน้า๑.jpg", day=DAY, token="T" * 40)
-        self.assertEqual(self.path_of(fid), DAY + "/เลขรับ_๕๗_หน้า๑.jpg")   # same folder as the PDF
+        # beside the PDF, in a folder of its own: the day folder lists one file per letter
+        self.assertEqual(self.path_of(fid), DAY + "/รูปที่ส่ง LINE/เลขรับ_๕๗_หน้า๑.jpg")
         dest = os.path.join(self.work, "back.jpg")
         self.assertTrue(self.drive.line_image_get("T" * 40, dest))
         with open(dest, "rb") as f:

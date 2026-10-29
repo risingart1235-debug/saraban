@@ -371,7 +371,10 @@ class PrepareAndSaveTests(unittest.TestCase):
     def test_ticked_list_page_goes_to_line_with_the_mark(self):
         out, pictures = self.save(highlight=True, line_pages=[1, 2])
         self.assertEqual(pictures, {"หน้า๑.jpg", "หน้า๒.jpg"})
-        jpg = out[:-len(".pdf")] + "_หน้า๒.jpg"            # the picture kept next to the PDF
+        day, name = os.path.split(out)
+        # the day folder shows the letter only; its pictures sit in a folder of their own beside it
+        self.assertEqual(sorted(os.listdir(day)), sorted([name, core.LINE_IMG_SUBDIR]))
+        jpg = os.path.join(day, core.LINE_IMG_SUBDIR, name[:-len(".pdf")] + "_หน้า๒.jpg")
         with Image.open(jpg) as picture:
             self.assertGreater(yellow_share(picture, self.list_mark()), 0.4)
 

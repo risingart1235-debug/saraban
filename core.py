@@ -349,6 +349,33 @@ def day_folder(when=None) -> str:
         to_thai_digits(f"{now.day:02d}"),
     ))
 
+# รูปหน้าที่ส่ง LINE เก็บในโฟลเดอร์ย่อยของวันนั้น — เดิมวางข้างไฟล์ PDF โฟลเดอร์วันเดียวกัน
+# เรื่องหนึ่งเลยแตกเป็น PDF + รูปอีกหลายไฟล์ ไล่หาหนังสือในไดร์ฟลำบาก
+LINE_IMG_SUBDIR = "รูปที่ส่ง LINE"
+
+def make_output_dir(rel: str, wait: float = 20.0) -> str:
+    """สร้างโฟลเดอร์ใต้ OUTPUT_ROOT (เช่น day_folder()) แล้วคืนที่อยู่ในเครื่อง
+
+    คอมที่ Drive for Desktop ซิงก์โฟลเดอร์นี้ ให้ไดร์ฟสร้างก่อนแล้วรอซิงก์ลงมา (ดู drive.premake)
+    ไม่งั้นเซิร์ฟเวอร์มองไม่เห็นโฟลเดอร์ที่คอมสร้าง แล้วสร้างอีกอันชื่อเดียวกันซ้อนไว้
+    """
+    try:
+        import drive
+        drive.premake(rel, wait)
+    except Exception as e:      # ไม่มีแพ็กเกจ Google / เน็ตหลุด — สร้างในเครื่องเหมือนเดิม
+        print(f"เตรียมโฟลเดอร์บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+    path = os.path.join(OUTPUT_ROOT, *[p for p in rel.split("/") if p])
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def make_output_dir_later(rel: str):
+    """เปิดเรื่องแล้ว ให้ไดร์ฟเตรียมโฟลเดอร์ไว้ล่วงหน้า กดบันทึกจะได้ไม่ต้องรอซิงก์"""
+    try:
+        import drive
+        drive.premake_later(rel)
+    except Exception as e:
+        print(f"เตรียมโฟลเดอร์บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+
 def get_thai_date():
     now = now_th()
     thai_year = now.year + 543

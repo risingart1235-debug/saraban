@@ -139,8 +139,7 @@ class SarabanApp(tk.Tk):
     def open_output_folder(self):
         """เปิดโฟลเดอร์เก็บไฟล์ (ของวันนี้ถ้ามี) ใน File Explorer เพื่อสะดวกตอนปริ้น"""
         base = OUTPUT_ROOT
-        today_str = now_th().strftime("%Y-%m-%d")
-        target = os.path.join(base, today_str)
+        target = os.path.join(base, *day_folder().split("/"))
         folder = target if os.path.exists(target) else base
         try:
             if not os.path.exists(folder):
@@ -865,9 +864,8 @@ class SarabanApp(tk.Tk):
             f = info.get('fields', {})
 
             # เตรียมปลายทางก่อนจองเลข เพื่อลดโอกาสที่เลขถูกจองแล้วแต่สร้างไฟล์ไม่ได้
-            today_str = now_th().strftime("%Y-%m-%d")
-            save_folder = os.path.join(OUTPUT_ROOT, today_str)
-            os.makedirs(save_folder, exist_ok=True)
+            # ปี/เดือน/วัน เหมือนหน้าเว็บ (เดิม 2026-09-07 กองชั้นบนสุด แยกจากของที่ลงรับทางเว็บ)
+            save_folder = make_output_dir(day_folder())
             base = re.sub(
                 r'[<>:"/\\|?*]+', '_', (f.get('doc_no') or "").strip()).strip(' ._')
 
@@ -1158,6 +1156,8 @@ class SarabanApp(tk.Tk):
         sig_page = max(1, min(sig_page, main_pages or total_pages, total_pages))
 
         receipt_no_thai = get_next_receipt_no()
+        # ให้ไดร์ฟสร้างโฟลเดอร์ของวันนี้ไว้ระหว่างจัดเอกสาร กดบันทึกจะได้ไม่ต้องรอซิงก์ (ดู make_output_dir)
+        make_output_dir_later(f"{day_folder()}/{LINE_IMG_SUBDIR}")
 
         # ทุกหน้าในเอกสาร (ไม่เกิน PREVIEW_MAX_PAGES และหน้าที่มีลายเซ็นผู้ส่งเสมอ) เหมือนหน้าเว็บ
         # เห็นครบก่อนลงรับ วางตรายาง/คำเกษียณได้ทุกหน้า และเลือกได้ว่าจะส่งหน้าไหนเข้า LINE
@@ -2021,9 +2021,9 @@ class SarabanApp(tk.Tk):
                 if run:
                     merger.append(doc['pdf_path'], pages=run)
 
-                today_str = now_th().strftime("%Y-%m-%d")
-                save_folder = os.path.join(OUTPUT_ROOT, today_str)
-                os.makedirs(save_folder, exist_ok=True)
+                # ปี/เดือน/วัน เหมือนหน้าเว็บ (เดิม 2026-09-07 กองชั้นบนสุด แยกจากของที่ลงรับทางเว็บ)
+                today = day_folder()
+                save_folder = make_output_dir(today)
                 safe_name = re.sub(r'[<>:"/\\|?*]+', '_', str(doc['doc_no'])).strip(' ._')
                 if not safe_name or safe_name == "-":
                     safe_name = "เอกสารนำเข้า"
@@ -2039,6 +2039,7 @@ class SarabanApp(tk.Tk):
                 # หน้ากระดาษเปล่าส่งได้เฉพาะตอนแทรกไว้ (ตรงกับที่อยู่ในไฟล์ PDF จริง)
                 pages_to_send = chosen_line_pages(snapshot['line_pages'], total, has_blank_page, order)
                 pdf_stem = os.path.splitext(os.path.basename(final_pdf_path))[0]
+                pics = make_output_dir(f"{today}/{LINE_IMG_SUBDIR}") if pages_to_send else ""
                 img_urls = []
                 for n in pages_to_send:
                     img = page_imgs.get(n)
@@ -2046,9 +2047,9 @@ class SarabanApp(tk.Tk):
                         img = Image.open(self._page_file(n, doc))
                     elif img is None:          # หน้าเกินที่แสดงบนจอ (เอกสารหนามาก) ดึงจาก PDF
                         img = render_pdf_page(doc['pdf_path'], page_number=n, dpi=self.A4_DPI)
-                    # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน (Drive for Desktop
+                    # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์ย่อยของวันเดียวกัน (Drive for Desktop
                     # ซิงก์ขึ้นไดร์ฟให้) ชื่อตามไฟล์ PDF + เลขหน้าตามลำดับในไฟล์ เหมือนหน้าเว็บ
-                    jpg = os.path.join(save_folder,
+                    jpg = os.path.join(pics,
                                        f"{pdf_stem}_หน้า{to_thai_digits(order.index(n) + 1)}.jpg")
                     img.convert('RGB').save(jpg, "JPEG", quality=88)
                     url = upload_to_imgbb(jpg)

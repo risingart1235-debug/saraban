@@ -271,8 +271,8 @@ def _line_token_ok(token: str) -> bool:
 def publish_line_image(src_path: str, day: str = None) -> str:
     """รูปหน้าที่ส่งเข้า LINE: สำรองขึ้นไดร์ฟคู่กับไฟล์ PDF แล้วคืน URL ให้ LINE มาดึง
 
-    src_path คือรูปที่บันทึกไว้ข้างไฟล์ PDF แล้ว (ชื่อตามไฟล์ PDF) ส่วน day คือโฟลเดอร์ของวันนั้น
-    — ขึ้นไดร์ฟไปอยู่โฟลเดอร์เดียวกับ PDF ด้วยชื่อเดียวกัน (ทำเบื้องหลัง ไม่ให้ผู้ใช้รอ)
+    src_path คือรูปที่บันทึกไว้ใน "รูปที่ส่ง LINE" ของวันนั้นแล้ว (ชื่อตามไฟล์ PDF) ส่วน day คือโฟลเดอร์ของวัน
+    — ขึ้นไดร์ฟไปอยู่ที่เดียวกันด้วยชื่อเดียวกัน (ทำเบื้องหลัง ไม่ให้ผู้ใช้รอ)
     คืน "" ถ้ารันในเครื่อง (ผู้เรียกถอยไปใช้ imgbb) แต่ยังสำรองขึ้นไดร์ฟให้ถ้าเปิดใช้ไว้
 
     บน hosting คัดลอกไว้อีกชุดที่ชื่อเป็นโทเคน ให้ LINE มาดึงครั้งแรกได้ทันทีหลังส่ง
@@ -1193,6 +1193,7 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     # ชื่อโรงเรียนในเอกสาร — หาไว้ทุกเรื่อง (ไม่ถึงวินาที) ส่วนจะป้ายสีไหมขึ้นกับตั้งค่าบัญชีของคนที่เปิด
     # (เรื่องจากมือถือเตรียมไว้ก่อนมีใครเปิด จึงยังไม่รู้ว่าใครจะเป็นคนลงรับ)
     marks, scan_pages = _find_marks(pdf_path, pages)
+    core.make_output_dir_later(f"{core.day_folder()}/{core.LINE_IMG_SUBDIR}")
 
     _set(job,
          status="ready", step="พร้อมแล้ว",
@@ -1643,8 +1644,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
             merger.append(job["pdf_path"], pages=(n - 1, n))
 
     today = core.day_folder()          # "๒๕๖๙/๐๘ สิงหาคม/๒๘" — ซอยเป็น ปี/เดือน/วัน
-    folder = os.path.join(core.OUTPUT_ROOT, today)
-    os.makedirs(folder, exist_ok=True)
+    folder = core.make_output_dir(today)
     out = os.path.join(folder, safe_output_filename(job.get("doc_no", ""), receipt_no))
     merger.write(out)
     merger.close()
@@ -1675,6 +1675,7 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
         else:                                   # หน้าเว็บรุ่นเก่าไม่ได้ส่งมา ใช้กติกาเดิม
             pages = auto_line_pages(used, order)
         urls = []
+        pics = core.make_output_dir(f"{today}/{core.LINE_IMG_SUBDIR}") if pages else ""
         for n in pages:
             if n > total:                       # หน้ากระดาษเปล่าที่ลงเกษียณไว้
                 img = blank
@@ -1682,10 +1683,10 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
                 img = layer(pi_of[n])
             else:                               # หน้าที่อยู่ระหว่างกลาง ไม่มีอะไรวาง
                 img = _render_pdf_page(job["pdf_path"], n, DPI)[0]
-            # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์เดียวกัน ชื่อตามไฟล์ PDF + เลขหน้า
+            # เก็บรูปหน้าที่ส่ง LINE ไว้คู่กับไฟล์ PDF — โฟลเดอร์ย่อยของวันเดียวกัน ชื่อตามไฟล์ PDF + เลขหน้า
             # (เลขหน้าตามลำดับใน PDF ที่บันทึก หน้ากระดาษเปล่าอยู่ต่อจากหน้าลายเซ็น)
-            p = os.path.join(folder, f"{os.path.splitext(os.path.basename(out))[0]}"
-                                     f"_หน้า{to_thai_digits(order.index(n) + 1)}.jpg")
+            p = os.path.join(pics, f"{os.path.splitext(os.path.basename(out))[0]}"
+                                   f"_หน้า{to_thai_digits(order.index(n) + 1)}.jpg")
             img.convert("RGB").save(p, "JPEG", quality=88)
             # บน hosting ให้ LINE มาดึงจากเราเอง; ในเครื่องถอยไปใช้ imgbb เหมือนเดิม
             url = publish_line_image(p, day=today) or upload_to_imgbb(p)
