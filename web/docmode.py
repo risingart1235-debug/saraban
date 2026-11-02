@@ -188,6 +188,8 @@ def sanitize_phone_meta(meta: dict) -> dict:
         "emoji": _clean_text(meta.get("emoji"), "🔵", 16),
         "attach": _clean_text(meta.get("attach"), "", 4000),
         "redo_no": _clean_text(meta.get("redo_no"), "", 50) or None,
+        # มือถือรุ่นที่เลือกไฟล์ "หนังสือราชการ" เป็นไฟล์หลักแล้ว (ดู letter_misplaced)
+        "letter_first": str(meta.get("letter_first") or "").strip().lower() in ("1", "true", "yes"),
     }
 
 
@@ -370,7 +372,7 @@ def _backup_to_drive(job: dict, pdf: str):
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
                                             "sender", "emoji", "attach", "redo_no", "user",
-                                            "main_pages", "extras_got")}
+                                            "main_pages", "extras_got", "letter_first")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             old = job.get("drive_file_id")
@@ -524,6 +526,7 @@ def _restore_from_drive() -> int:
                                   book_id=bid, redo_no=meta.get("redo_no") or None,
                                   main_pages=meta.get("main_pages") or None,
                                   extras_got=meta.get("extras_got"),
+                                  letter_first=bool(meta.get("letter_first")),
                                   drive_file_id=item["id"], **fields)
             try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
                 job["created"] = datetime.fromisoformat(meta["created"])
@@ -687,8 +690,10 @@ def claim_phone_job(user: str, meta: dict, retry_failed: bool = False):
                 raise AlreadyHandledError(
                     "registered" if status == "done" else "skipped",
                     existing.get("reserved_receipt") or existing.get("receipt_no", ""))
-            if existing.get("refetch") and status in _REFETCH_OK:
+            if status in _REFETCH_OK and (existing.get("refetch") or (
+                    clean["letter_first"] and letter_misplaced(existing))):
                 # 🔄 ดึงเรื่องนี้ใหม่ — ไฟล์ที่มือถือเพิ่งดึงมาใช้แทนของเดิม ในงานเดิม (หน้าที่เปิดค้างไว้ยังหางานเจอ)
+                # หรือเรื่องที่หนังสือราชการไม่ได้อยู่หน้าแรก มือถือรุ่นใหม่ดึงมาให้เอง (letter_misplaced)
                 # ลงรับใหม่ด้วยเลขเดิม (♻️) ยังเป็นเลขเดิม มือถือไม่ได้ส่งเลขนั้นมาด้วย
                 _reseed(existing, **{k: v for k, v in clean.items() if k != "redo_no"},
                         user=user, status="uploading", step="กำลังรับไฟล์จากมือถือ...", error="",
@@ -809,6 +814,7 @@ def _phone_row(j: dict) -> dict:
         "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
         "source": "phone",
         "refetch": bool(j.get("refetch")) and j.get("status") in _REFETCH_OK,   # รอมือถือดึงมาใหม่
+        "misplaced": j.get("status") in _REFETCH_OK and letter_misplaced(j),   # หน้าแรกไม่ใช่หนังสือราชการ
     }
 
 
@@ -834,7 +840,7 @@ def holds_original(book_id: str) -> bool:
 # ล้างทิ้งให้หมด โดยเฉพาะ reserved_receipt: ถ้าค้างไว้ ตอนบันทึกจะข้ามการเขียนทับแถวในทะเบียน
 _PHONE_SEED = ("id", "user", "created", "dir", "source", "book_id", "doc_no", "doc_title",
                "doc_date", "sender", "emoji", "attach", "main_pages", "extras_got",
-               "drive_file_id", "finished_at")
+               "drive_file_id", "finished_at", "letter_first")
 
 
 def _reseed(job: dict, **fresh):
@@ -872,6 +878,32 @@ def refetch_ids() -> set:
         return {str(j["book_id"]) for j in _jobs.values()
                 if j.get("source") == "phone" and j.get("book_id") and j.get("refetch")
                 and j.get("status") in _REFETCH_OK}
+
+
+# รายการไฟล์แนบในข้อความ LINE: "📥 ๑. ชื่อไฟล์ 👉 ลิงก์" ต่อกันตามลำดับบนเว็บ
+# (ของที่มือถือส่งมาถูกยุบตัวขึ้นบรรทัดเป็นช่องว่างตอนรับ จึงไม่อิงตัวขึ้นบรรทัด)
+_ATTACH_ITEM = re.compile(r"📥\s*[๐-๙0-9]+\.\s*(.*?)\s*👉\s*(\S+)", re.S)
+
+
+def letter_misplaced(job: dict) -> bool:
+    """หน้าแรกของเรื่องจากมือถือไม่ใช่หนังสือราชการ — มือถือรุ่นก่อนใช้ PDF ไฟล์แรกบนเว็บเป็นไฟล์หลัก
+    ทั้งที่เว็บวางไฟล์ "หนังสือราชการ" ไว้ลำดับหลัง (เช่นไฟล์ที่ ๓) ดูจากรายการไฟล์แนบที่มือถือส่งมา (attach)
+    ด้วยกติกาเดียวกับ sppweb — มือถือรุ่นใหม่ส่ง letter_first มาด้วย เรื่องที่ส่งมาแบบนั้นถูกอยู่แล้ว"""
+    if job.get("source") != "phone" or job.get("letter_first"):
+        return False
+    items = [{"name": name, "url": url, "ext": sppweb._attachment_ext(url)}
+             for name, url in _ATTACH_ITEM.findall(job.get("attach") or "")]
+    pdfs = [a["url"] for a in items if a["ext"] == ".pdf"]
+    return bool(pdfs) and sppweb._main_pdf(items) != pdfs[0]
+
+
+def misplaced_ids() -> set:
+    """book_id ที่หนังสือราชการไม่ได้อยู่หน้าแรกและยังรอลงรับ — มือถือรุ่นใหม่ถามประวัติแล้วไม่นับเรื่องพวกนี้
+    ว่าอยู่ในคิว รอบนั้นจึงดึงมาส่งใหม่ (หนังสือราชการขึ้นหน้าแรก) แทนที่ในงานเดิมให้เอง (claim_phone_job)
+    มือถือรุ่นก่อนไม่ได้ขอ จึงไม่ได้รายการนี้ — ดึงไปก็ได้ลำดับเดิม วนดึงซ้ำทุกรอบเปล่าๆ"""
+    with _lock:
+        return {str(j["book_id"]) for j in _jobs.values()
+                if j.get("book_id") and j.get("status") in _REFETCH_OK and letter_misplaced(j)}
 
 
 def reopen_phone(book_id: str, redo_no: str = None):

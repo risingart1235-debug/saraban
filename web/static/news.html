@@ -251,7 +251,8 @@ function card(d) {
     </div>
     <div class="meta">${esc(d.doc_no)} · ลงวันที่ ${esc(d.doc_date)} · ${esc(d.sender)}<br>
       ${d.source === 'phone' ? 'มือถือส่งเข้ามา' : 'เว็บอัปโหลด'} ${esc(d.sent_date)} ${esc(d.sent_time)} น.${no}
-      ${d.refetch ? '<br><span class="refetch">📲 รอมือถือดึงเรื่องนี้ใหม่พร้อมไฟล์แนบ — รัน phone_fetch.py ในมือถือ</span>' : ''}</div>
+      ${d.refetch ? '<br><span class="refetch">📲 รอมือถือดึงเรื่องนี้ใหม่พร้อมไฟล์แนบ — รัน phone_fetch.py ในมือถือ</span>' : ''}
+      ${d.misplaced ? '<br><span class="refetch">📄 หน้าแรกยังไม่ใช่หนังสือราชการ — อัปเดตไฟล์ในมือถือแล้วรัน phone_fetch.py จะดึงเรื่องนี้มาใหม่ให้เอง</span>' : ''}</div>
     ${acts}</div>`;
 }
 

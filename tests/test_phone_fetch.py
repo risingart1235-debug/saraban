@@ -55,10 +55,12 @@ class FakePost:
         self.answers = list(answers)
         self.sent = []
         self.extras = []
+        self.fields = []
 
     def __call__(self, url, headers=None, files=None, data=None, timeout=None):
         parts = list(files.items()) if isinstance(files, dict) else list(files)
         self.sent.append(dict(parts)["file"][1].read())
+        self.fields.append(dict(data or {}))
         self.extras.append([(f[0], f[1].read(), f[2]) for name, f in parts if name == "extra"])
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
@@ -114,6 +116,12 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(self.submit_with(post)["job_id"], "j2")
         self.assertEqual(self.clock.sleeps, [30])
 
+    def test_says_the_main_file_is_the_letter(self):
+        """ไฟล์หลักคือไฟล์ "หนังสือราชการ" (sppweb เลือก) — เซิร์ฟเวอร์รู้ว่าเรื่องนี้เรียงถูกแล้ว"""
+        post = FakePost(response(200, {"ok": True, "created": True, "job_id": "j4"}))
+        self.submit_with(post)
+        self.assertEqual(post.fields[0]["letter_first"], "1")
+
     def test_dropped_connection_is_retried(self):
         post = FakePost(requests.ConnectionError("reset"),
                         response(200, {"ok": True, "created": False, "job_id": "j3"}))
@@ -154,6 +162,19 @@ class HistoryTests(unittest.TestCase):
                    response(200, {"ok": True, "done": ["1", "2"], "queued": ["3"]})]
         with patch.object(phone_fetch.requests, "get", lambda *a, **k: answers.pop(0)):
             self.assertEqual(phone_fetch.fetch_history(), ({"1", "2"}, {"3"}))
+
+    def test_queued_documents_without_the_letter_first_are_fetched_again(self):
+        """เรื่องที่ค้างคิวมาจากสคริปต์รุ่นก่อน (หน้าแรกเป็นสิ่งที่ส่งมาด้วย) — ขอเซิร์ฟเวอร์ แล้วบอกว่าดึงใหม่กี่เรื่อง"""
+        asked = {}
+
+        def get(url, **kw):
+            asked.update(kw)
+            return response(200, {"ok": True, "done": ["1"], "queued": ["3"], "reorder": ["5", "6"]})
+
+        with patch.object(phone_fetch.requests, "get", get), patch("builtins.print") as out:
+            self.assertEqual(phone_fetch.fetch_history(), ({"1"}, {"3"}))
+        self.assertEqual(asked["params"], {"letter_first": "1"})
+        self.assertTrue(any("2 เรื่อง" in " ".join(map(str, c.args)) for c in out.call_args_list))
 
     def test_older_server_without_a_queue_list_still_works(self):
         old = response(200, {"ok": True, "done": ["1"]})

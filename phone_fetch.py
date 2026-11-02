@@ -184,7 +184,9 @@ def fetch_history():
     """
     try:
         # ๑๒๐ วิ: ปลุกเครื่องที่หลับ ~๖๐-๙๐ วิ + เซิร์ฟเวอร์รอกู้คิวจากไดร์ฟอีกไม่เกิน ๔๕ วิ
-        r = _call(lambda: requests.get(RENDER + "/api/phone/history",
+        # letter_first = สคริปต์ชุดนี้ใช้ไฟล์ "หนังสือราชการ" เป็นไฟล์หลัก (sppweb) — เรื่องที่ค้างคิว
+        # มาจากสคริปต์รุ่นก่อนแล้วหน้าแรกเป็นสิ่งที่ส่งมาด้วย เซิร์ฟเวอร์จะไม่นับว่าอยู่ในคิว รอบนี้ดึงไปส่งใหม่ให้
+        r = _call(lambda: requests.get(RENDER + "/api/phone/history", params={"letter_first": "1"},
                                        headers=_headers(), timeout=120))
     except ServerDown as e:
         die("ต่อ Render ไม่ได้นานเกิน %d นาที (%s)\n"
@@ -202,6 +204,8 @@ def fetch_history():
     d = r.json()
     if d.get("queue_ready") is False:
         print("   (เซิร์ฟเวอร์เพิ่งตื่น ยังกู้คิวไม่ครบ — บางเรื่องอาจถูกส่งซ้ำ แต่ระบบกันซ้ำให้แล้ว)")
+    if d.get("reorder"):
+        print("   เรื่องในคิว %d เรื่อง หน้าแรกยังไม่ใช่หนังสือราชการ — รอบนี้ดึงไปส่งใหม่ให้" % len(d["reorder"]))
     # เซิร์ฟเวอร์รุ่นเก่าไม่มี "queued" ก็ได้ชุดว่าง = ดึงแบบเดิม (เซิร์ฟเวอร์กันซ้ำอยู่ดี)
     return ({str(x) for x in d.get("done", [])},
             {str(x) for x in d.get("queued", [])})
@@ -215,6 +219,8 @@ def submit(pdf_path, meta, extras=()):
     # เป็นคำสั่ง retry ที่ชัดเจน: ถ้า job เดิมล้มให้ใช้ job เดิมส่งใหม่;
     # แต่ถ้ายังทำอยู่ เซิร์ฟเวอร์จะคืน job เดิมและไม่เริ่มซ้ำ
     fields["retry_failed"] = "true"
+    # ไฟล์หลักคือไฟล์ "หนังสือราชการ" (sppweb เลือกให้) — เซิร์ฟเวอร์จะได้รู้ว่าเรื่องนี้เรียงถูกแล้ว
+    fields["letter_first"] = "1"
     types = {".pdf": "application/pdf", ".png": "image/png"}
 
     def send():

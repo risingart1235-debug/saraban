@@ -943,6 +943,7 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         if bid in jobs:                    # ไฟล์อยู่บนเซิร์ฟเวอร์แล้ว เปิดได้เลย
             d["job_id"] = jobs[bid]["job_id"]
             d["refetch"] = jobs[bid]["refetch"]
+            d["misplaced"] = jobs[bid]["misplaced"]
         docs.append(d)
     for bid, r in list(jobs.items()) + list(kept.items()):
         if bid in seen:
@@ -954,6 +955,7 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
         if bid in jobs:
             doc["job_id"] = r["job_id"]
             doc["refetch"] = r["refetch"]  # 🔄 ขอให้มือถือดึงเรื่องนี้ใหม่ (พร้อมไฟล์แนบ) รออยู่
+            doc["misplaced"] = r["misplaced"]   # หน้าแรกไม่ใช่หนังสือราชการ มือถือรุ่นใหม่ดึงมาให้เอง
         docs.append(doc)
 
     # ถูกเว็บ สพป. ปิดกั้น + คิวว่าง = "ยังไม่มีเรื่องรอลงรับ" ไม่ใช่ความผิดพลาด
@@ -1130,13 +1132,18 @@ def api_phone_history(request: Request):
     # 🔄 ดึงเรื่องนี้ใหม่ (หน้าจัดเอกสาร) — ไม่นับว่าลงรับแล้วหรืออยู่ในคิว มือถือจะได้ดึงมาส่งใหม่พร้อมไฟล์แนบ
     # (ลงรับใหม่ด้วยเลขเดิม ♻️ เรื่องนั้นมีบันทึกลงรับอยู่ ก็ต้องเอาออกจาก done ด้วย)
     again = docmode.refetch_ids()
+    # มือถือรุ่นที่เลือกไฟล์ "หนังสือราชการ" ขึ้นหน้าแรก (letter_first=1) — เรื่องที่ค้างคิวมาจากมือถือรุ่นก่อน
+    # แล้วหน้าแรกเป็นสิ่งที่ส่งมาด้วย ให้ดึงมาส่งใหม่ด้วย มือถือรุ่นก่อนไม่ได้ขอ ดึงไปก็ได้ลำดับเดิม
+    reorder = docmode.misplaced_ids() if request.query_params.get("letter_first") == "1" else set()
+    again |= reorder
     try:
         done = sorted(_s.get_store().history_ids() - again)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"อ่านประวัติไม่ได้: {e}")
     # เรื่องในคิวที่ไปลงรับ/ข้ามจากที่อื่นแล้ว อยู่ใน done แล้ว ไม่ต้องนับซ้ำว่า "อยู่ในคิว"
     held = docmode.phone_held_ids() - set(done) - again
-    return {"ok": True, "done": done, "queued": sorted(held), "queue_ready": ready}
+    return {"ok": True, "done": done, "queued": sorted(held), "queue_ready": ready,
+            "reorder": sorted(reorder)}
 
 
 @app.post("/api/phone/submit")
@@ -1159,7 +1166,7 @@ async def api_phone_submit(request: Request):
     meta = {key: form.get(key, default) for key, default in (
         ("book_id", ""), ("doc_no", "-"), ("doc_title", "-"),
         ("doc_date", "-"), ("sender", "-"), ("emoji", "🔵"), ("attach", ""),
-        ("redo_no", ""))}
+        ("redo_no", ""), ("letter_first", ""))}
     retry_failed = str(form.get("retry_failed", "")).strip().lower() in ("1", "true", "yes")
     incoming = _new_incoming_path()
     try:
