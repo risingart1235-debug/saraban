@@ -20,13 +20,15 @@
   ๒. วางไฟล์ ๓ ตัวไว้โฟลเดอร์เดียวกัน:  core.py, sppweb.py, phone_fetch.py
   ๓. สร้าง phone_config.json ข้างไฟล์นี้ (ดูตัวอย่างที่ phone_config.example.json)
 ใช้งานทุกครั้ง:  python phone_fetch.py   (หรือแตะไอคอนที่ทำไว้บนหน้าจอ)
-อัปเดต: เอา core.py, sppweb.py, phone_fetch.py ชุดใหม่จาก GitHub ทับของเดิม (phone_config.json คงไว้)
-  ใน a-Shell  cd  ไปโฟลเดอร์ที่มีไฟล์นี้ แล้ววางคำสั่งนี้บรรทัดเดียว:
-  curl -fsSL -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/phone_fetch.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/sppweb.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/core.py
+อัปเดต:  python $HOME/Documents/phone_fetch.py update
+  เอา core.py, sppweb.py, phone_fetch.py ชุดใหม่จาก GitHub มาทับในโฟลเดอร์ของไฟล์นี้เอง (phone_config.json คงไว้)
   รันแล้วบรรทัดแรกบอกรุ่นสคริปต์ (SCRIPT_VERSION) — ตรงกับรุ่นล่าสุดแปลว่าอัปเดตแล้วจริง
+  สคริปต์รุ่นที่ยังไม่มีคำสั่ง update: เอาไฟล์นี้มาก่อนด้วย curl (ระบุที่วางไฟล์ตรงๆ ไม่ขึ้นกับโฟลเดอร์ที่ยืนอยู่)
+  curl -fL -o $HOME/Documents/phone_fetch.py https://raw.githubusercontent.com/risingart1235-debug/saraban/main/phone_fetch.py
 """
 import contextlib
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -58,7 +60,11 @@ WAIT_SERVER_SEC  = 180                           # เซิร์ฟเวอ�
 
 # บอกตอนรันว่ามือถือใช้สคริปต์รุ่นไหน — อัปเดตแล้วยังได้ผลแบบเดิม ดูบรรทัดนี้ก่อน
 # (เปลี่ยนทุกครั้งที่แก้สคริปต์ฝั่งมือถือ: phone_fetch.py / sppweb.py / core.py)
-SCRIPT_VERSION = "๒ พ.ย. ๒๕๖๙ — หนังสือราชการขึ้นหน้าแรก"
+SCRIPT_VERSION = "๒ พ.ย. ๒๕๖๙ (๒) — หนังสือราชการขึ้นหน้าแรก · อัปเดตด้วยคำสั่ง update"
+
+# python phone_fetch.py update — เอาไฟล์ชุดนี้จาก GitHub (repo สาธารณะ ไม่ต้องล็อกอิน)
+GITHUB_RAW = "https://raw.githubusercontent.com/risingart1235-debug/saraban/main/"
+PHONE_FILES = ("phone_fetch.py", "sppweb.py", "core.py")
 
 # บังคับจอมือถือให้แสดงภาษาไทยไม่เพี้ยน
 try:
@@ -266,6 +272,30 @@ def ask_credentials():
     return user, pwd
 
 
+def self_update():
+    """python phone_fetch.py update — เอาสคริปต์มือถือชุดล่าสุดจาก GitHub มาทับในโฟลเดอร์ของไฟล์นี้เอง
+    (ที่ Shortcut รันอยู่) ไม่ต้อง cd ให้ถูกที่ — เคยใช้ curl ในโฟลเดอร์อื่น ไฟล์ใหม่ไปอยู่ผิดที่ รันกี่รอบก็รุ่นเก่า
+    โหลดครบ ๓ ไฟล์และตรวจว่าเป็นโค้ด Python จริงก่อนค่อยเขียนทับ — เน็ตหลุดกลางทาง/ได้หน้า error มา
+    ไฟล์เดิมยังอยู่ครบ ไม่เหลือครึ่งเก่าครึ่งใหม่ (phone_config.json ไม่แตะ)"""
+    got = {}
+    for name in PHONE_FILES:
+        try:
+            r = requests.get(GITHUB_RAW + name, timeout=60)
+            r.raise_for_status()
+            compile(r.content, name, "exec")
+        except (requests.RequestException, SyntaxError, ValueError) as e:
+            die("โหลด %s ไม่สำเร็จ — ไฟล์เดิมยังอยู่ครบ ลองใหม่อีกครั้ง (%s)" % (name, e))
+        got[name] = r.content
+    for name, data in got.items():
+        path = os.path.join(HERE, name)
+        with open(path + ".new", "wb") as f:
+            f.write(data)
+        os.replace(path + ".new", path)
+    m = re.search(r'SCRIPT_VERSION = "([^"]*)"', got["phone_fetch.py"].decode("utf-8", "replace"))
+    print("✅ อัปเดตสคริปต์มือถือแล้ว — รุ่น %s" % (m.group(1) if m else "?"))
+    print("   ไฟล์อยู่ที่ %s" % HERE)
+
+
 def main():
     print("📱 สคริปต์มือถือรุ่น " + SCRIPT_VERSION)
     if not TOKEN:
@@ -369,7 +399,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:2] == ["update"]:
+            self_update()
+        else:
+            main()
     except sppweb.LoginError as e:
         die("ล็อกอินเว็บ สพป. ไม่ผ่าน: %s" % e)
     except KeyboardInterrupt:

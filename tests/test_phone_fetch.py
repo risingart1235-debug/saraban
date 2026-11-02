@@ -191,6 +191,54 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.clock.sleeps, [])
 
 
+class SelfUpdateTests(unittest.TestCase):
+    """python phone_fetch.py update — ไฟล์ชุดใหม่ลงโฟลเดอร์ของสคริปต์เอง ไม่ใช่โฟลเดอร์ที่ยืนอยู่
+
+    เคยให้ curl ในโฟลเดอร์ที่ยืนอยู่ (~group) แต่ Shortcut รันไฟล์ใน ~/Documents ไฟล์ใหม่เลยไปอยู่ผิดที่
+    """
+
+    def setUp(self):
+        self.here = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.here, True)
+        for name in phone_fetch.PHONE_FILES:
+            with open(os.path.join(self.here, name), "w", encoding="utf-8") as f:
+                f.write("OLD = 1\n")
+        for p in (patch.object(phone_fetch, "HERE", self.here), patch("builtins.print")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def files(self):
+        out = {}
+        for name in phone_fetch.PHONE_FILES:
+            with open(os.path.join(self.here, name), encoding="utf-8") as f:
+                out[name] = f.read()
+        return out
+
+    def update_with(self, get):
+        with patch.object(phone_fetch.requests, "get", get), \
+                patch.object(phone_fetch, "die", side_effect=SystemExit):
+            phone_fetch.self_update()
+
+    def test_all_three_land_next_to_the_script(self):
+        new = {n: 'SCRIPT_VERSION = "ใหม่ %s"\nimport os\n' % n for n in phone_fetch.PHONE_FILES}
+        self.update_with(lambda url, **kw: response(200, new[url.rsplit("/", 1)[1]].encode("utf-8")))
+        self.assertEqual(self.files(), new)
+        self.assertEqual(sorted(os.listdir(self.here)), sorted(phone_fetch.PHONE_FILES))   # no leftovers
+
+    def test_a_failed_download_leaves_every_old_file_in_place(self):
+        def get(url, **kw):
+            return response(404, b"404: Not Found") if url.endswith("core.py") else response(200, b"NEW = 1\n")
+
+        with self.assertRaises(SystemExit):
+            self.update_with(get)
+        self.assertEqual(set(self.files().values()), {"OLD = 1\n"})
+
+    def test_an_error_page_is_not_taken_for_the_script(self):
+        with self.assertRaises(SystemExit):
+            self.update_with(lambda url, **kw: response(200, b"<html><body>rate limited</body></html>"))
+        self.assertEqual(set(self.files().values()), {"OLD = 1\n"})
+
+
 class RunTests(unittest.TestCase):
     """What a whole run pulls from SPP and sends, given what the server already has."""
 

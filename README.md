@@ -62,13 +62,21 @@ pinned: false
 `phone_fetch.py` รอบเดียว มือถือดึงเรื่องพวกนั้นมาส่งใหม่ให้เอง ใส่แทนในงานเดิม (ลงรับไปแล้ว กด ♻️ ลงรับใหม่ก่อน
 แล้วค่อยรัน ได้เลขเดิม) — มือถือรุ่นก่อนไม่ถูกขอให้ดึงซ้ำ เพราะดึงไปก็ได้ลำดับเดิม
 
-**อัปเดตสคริปต์ในมือถือ** — ใน a-Shell `cd` ไปโฟลเดอร์ที่มี `phone_fetch.py` แล้ววางคำสั่งนี้บรรทัดเดียว
-(`phone_config.json` ไม่ถูกแตะ):
+**อัปเดตสคริปต์ในมือถือ** — ใน a-Shell พิมพ์ (ที่อยู่เดียวกับที่ Shortcut ใช้รัน ไม่ต้อง `cd`)
 
 ```
-curl -fsSL -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/phone_fetch.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/sppweb.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/core.py
+python $HOME/Documents/phone_fetch.py update
 ```
 
+เอา `phone_fetch.py` `sppweb.py` `core.py` ชุดล่าสุดจาก GitHub มาทับในโฟลเดอร์ของสคริปต์เอง (`phone_config.json`
+ไม่ถูกแตะ) โหลดไม่ครบหรือได้หน้า error มา ไฟล์เดิมยังอยู่ครบ — สคริปต์รุ่นที่ยังไม่มีคำสั่ง `update`
+ให้เอา `phone_fetch.py` มาก่อนครั้งเดียว แล้วค่อยสั่ง `update`:
+
+```
+curl -fL -o $HOME/Documents/phone_fetch.py https://raw.githubusercontent.com/risingart1235-debug/saraban/main/phone_fetch.py
+```
+
+(เคยให้ curl ลงโฟลเดอร์ที่ยืนอยู่ — a-Shell เปิดมาที่ `~group` ไม่ใช่ `~/Documents` ที่ Shortcut รัน ไฟล์ใหม่เลยไปอยู่ผิดที่)
 รัน `phone_fetch.py` แล้วบรรทัดแรกต้องขึ้น "📱 สคริปต์มือถือรุ่น …" ตรงกับ `SCRIPT_VERSION` ใน `phone_fetch.py` บน GitHub
 ไม่ขึ้นบรรทัดนี้เลย = มือถือยังใช้รุ่นเก่า (ดึงเรื่องมาใหม่กี่รอบ หน้าแรกก็ยังเป็นไฟล์แรกบนเว็บเหมือนเดิม)
 ไฟล์แนบ PDF ที่ไม่ได้มาด้วย หน้าจัดเอกสารขึ้นเตือนว่ากี่ไฟล์ — ส่วนใหญ่เพราะมือถือยังใช้สคริปต์รุ่นก่อน
