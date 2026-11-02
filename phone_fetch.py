@@ -20,7 +20,10 @@
   ๒. วางไฟล์ ๓ ตัวไว้โฟลเดอร์เดียวกัน:  core.py, sppweb.py, phone_fetch.py
   ๓. สร้าง phone_config.json ข้างไฟล์นี้ (ดูตัวอย่างที่ phone_config.example.json)
 ใช้งานทุกครั้ง:  python phone_fetch.py   (หรือแตะไอคอนที่ทำไว้บนหน้าจอ)
-อัปเดต: คัดลอก core.py, sppweb.py, phone_fetch.py ชุดใหม่จาก GitHub ทับของเดิม (phone_config.json คงไว้)
+อัปเดต: เอา core.py, sppweb.py, phone_fetch.py ชุดใหม่จาก GitHub ทับของเดิม (phone_config.json คงไว้)
+  ใน a-Shell  cd  ไปโฟลเดอร์ที่มีไฟล์นี้ แล้ววางคำสั่งนี้บรรทัดเดียว:
+  curl -fsSL -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/phone_fetch.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/sppweb.py -O https://raw.githubusercontent.com/risingart1235-debug/saraban/main/core.py
+  รันแล้วบรรทัดแรกบอกรุ่นสคริปต์ (SCRIPT_VERSION) — ตรงกับรุ่นล่าสุดแปลว่าอัปเดตแล้วจริง
 """
 import contextlib
 import os
@@ -52,6 +55,10 @@ MAX_FETCH   = 20                                 # เท่าคิวรอ�
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024              # ต้องตรงกับเพดานฝั่งเซิร์ฟเวอร์
 WAIT_SERVER_SEC  = 180                           # เซิร์ฟเวอร์รีสตาร์ท/ตื่น รอได้นานสุดกี่วินาที
 # ==================================
+
+# บอกตอนรันว่ามือถือใช้สคริปต์รุ่นไหน — อัปเดตแล้วยังได้ผลแบบเดิม ดูบรรทัดนี้ก่อน
+# (เปลี่ยนทุกครั้งที่แก้สคริปต์ฝั่งมือถือ: phone_fetch.py / sppweb.py / core.py)
+SCRIPT_VERSION = "๒ พ.ย. ๒๕๖๙ — หนังสือราชการขึ้นหน้าแรก"
 
 # บังคับจอมือถือให้แสดงภาษาไทยไม่เพี้ยน
 try:
@@ -260,6 +267,7 @@ def ask_credentials():
 
 
 def main():
+    print("📱 สคริปต์มือถือรุ่น " + SCRIPT_VERSION)
     if not TOKEN:
         die("ยังไม่มีโทเคน — ใส่ในไฟล์ phone_config.json (คีย์ \"token\") "
             "หรือดูตัวอย่างที่ phone_config.example.json")
