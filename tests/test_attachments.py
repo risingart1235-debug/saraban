@@ -148,6 +148,53 @@ class PageAttachmentTests(unittest.TestCase):
             self.fetch(fail={"u/list.pdf": sppweb.SessionExpiredError("หมดอายุ")})
 
 
+class LetterFirstTests(unittest.TestCase):
+    """the file named หนังสือราชการ is the letter: it leads, wherever the site lists it
+
+    The site does not always put the letter first - one news item listed 1.-2. สิ่งที่ส่งมาด้วย,
+    3. หนังสือราชการ+สิ่งที่ส่งมาด้วย, 4. สิ่งที่ส่งมาด้วย.  Taking the first PDF put an enclosure
+    on page 1: the AI read the wrong paper and the stamp landed on the wrong page.
+    """
+
+    def detail(self, links):
+        detail_url = sppweb.DETAIL_URL.format("88")
+        html = "<html><body><h2>รายละเอียดหนังสือ</h2>" + "".join(
+            f'<a href="/files/{href}">{n}. {name}</a>' for n, (href, name) in enumerate(links, 1)
+        ) + "</body></html>"
+        return sppweb.fetch_detail(FakeSession().add("GET", detail_url, FakeResponse(text=html)), "88")
+
+    @staticmethod
+    def files(items):
+        return [a["url"].rsplit("/", 1)[1] for a in items]
+
+    def test_the_letter_leads_even_when_the_site_lists_it_third(self):
+        d = self.detail([("a1.pdf", "สิ่งที่ส่งมาด้วย"), ("a2.pdf", "สิ่งที่ส่งมาด้วย"),
+                         ("letter.pdf", "หนังสือราชการ+สิ่งที่ส่งมาด้วย"), ("a4.pdf", "สิ่งที่ส่งมาด้วย")])
+        self.assertTrue(d["main_pdf"].endswith("/files/letter.pdf"))
+        self.assertEqual(self.files(sppweb.page_attachments(d)), ["a1.pdf", "a2.pdf", "a4.pdf"])
+        # the LINE message still lists the files the way the site does
+        self.assertEqual(self.files(d["attachments"]), ["a1.pdf", "a2.pdf", "letter.pdf", "a4.pdf"])
+
+    def test_without_a_file_named_so_the_first_pdf_leads_as_before(self):
+        d = self.detail([("form.docx", "แบบฟอร์ม"), ("first.pdf", "หนังสือนำ"),
+                         ("list.pdf", "บัญชีรายชื่อ")])
+        self.assertTrue(d["main_pdf"].endswith("/files/first.pdf"))
+        self.assertEqual(self.files(sppweb.page_attachments(d)), ["list.pdf"])
+
+    def test_the_first_of_several_letters_leads(self):
+        self.assertEqual(sppweb._main_pdf([
+            {"name": "สิ่งที่ส่งมาด้วย", "url": "u/a.pdf", "ext": ".pdf"},
+            {"name": "หนังสือ ราชการ", "url": "u/letter.pdf", "ext": ".pdf"},       # spacing ignored
+            {"name": "หนังสือราชการ (ฉบับแก้ไข)", "url": "u/letter2.pdf", "ext": ".pdf"}]),
+            "u/letter.pdf")
+
+    def test_a_letter_that_is_not_a_pdf_cannot_lead(self):
+        attachments = [{"name": "หนังสือราชการ", "url": "u/letter.docx", "ext": ".docx"},
+                       {"name": "สิ่งที่ส่งมาด้วย", "url": "u/a.pdf", "ext": ".pdf"}]
+        self.assertEqual(sppweb._main_pdf(attachments), "u/a.pdf")
+        self.assertEqual(sppweb._main_pdf(attachments[:1]), "")
+
+
 @unittest.skipIf(pymupdf is None, "ต้องลง pymupdf ก่อน (pip install -r requirements.txt)")
 class CombineTests(unittest.TestCase):
     def setUp(self):

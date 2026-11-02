@@ -85,9 +85,10 @@ async function readJSON(r) {
 }
 
 const LBL = { registered: 'รับแล้ว', skipped: 'ข้าม', new: 'ยังไม่ลงรับ' };
-// จำวันที่/ตัวกรองที่เลือกไว้ เพราะพอลงรับเสร็จจะเด้งกลับมาหน้านี้
+// จำวันที่ที่เลือกไว้ เพราะพอลงรับเสร็จจะเด้งกลับมาหน้านี้
 // ถ้ารีเซ็ตเป็น "ทุกวัน" ทุกครั้ง ต้องมาเลือกใหม่ทุกเรื่อง
 // ใช้ sessionStorage — จำเฉพาะแท็บนี้ ปิดแท็บแล้วเริ่มใหม่
+// ตัวกรองสถานะไม่จำ — เปิดหน้านี้เมื่อไหร่เริ่มที่ "ยังไม่ลงรับ" เสมอ (งานที่ค้างอยู่ ผู้ใช้ขอ)
 function remembered(k, dflt) {
   try { return sessionStorage.getItem('news.' + k) || dflt; } catch (e) { return dflt; }
 }
@@ -95,7 +96,7 @@ function remember(k, v) {
   try { sessionStorage.setItem('news.' + k, v); } catch (e) { }
 }
 
-let DATA = null, filter = remembered('filter', 'all'), day = remembered('day', 'all');
+let DATA = null, filter = 'new', day = remembered('day', 'all');
 
 function show(kind, html) {
   const m = $('msg'); m.className = kind; m.innerHTML = html;
@@ -192,7 +193,7 @@ function render() {
        · ข้ามผิด กด "📥 ลงรับเรื่องนี้" ได้
        ${DATA.redo_days ? `(เรื่องจากมือถือเก็บไว้ให้ ${thaiNum(DATA.redo_days)} วันหลังลงรับ/ข้าม)` : ''}
      </p>`;
-  for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; remember('filter', filter); render(); };
+  for (const el of $('sum').querySelectorAll('[data-f]')) el.onclick = () => { filter = el.dataset.f; render(); };
 
   $('tabs').innerHTML =
     `<button class="${day === 'all' ? 'on' : ''}" data-d="all">ทุกวัน</button>` +
@@ -210,7 +211,10 @@ function render() {
         <span class="sub">${docs.length} เรื่อง · รับแล้ว ${g.registered} · ข้าม ${g.skipped} · ยังไม่ลงรับ ${g.new}</span></h3>`;
     html += docs.map(card).join('') + '</div>';
   }
-  $('list').innerHTML = shown ? html
+  // เปิดมาที่ "ยังไม่ลงรับ" เสมอ ลงรับครบแล้วต้องบอกให้ชัด ไม่ใช่หน้าว่างเหมือนหาเรื่องไม่เจอ
+  $('list').innerHTML = shown ? html : filter === 'new'
+    ? `<div class="card"><p class="tiny" style="margin:0">✅ ไม่มีเรื่องที่ยังไม่ลงรับ${day === 'all' ? '' : 'ในวันที่เลือก'}
+         — ดูเรื่องที่รับแล้ว/ข้ามไว้ กด "ทั้งหมด" ด้านบน</p></div>`
     : '<div class="card"><p class="tiny" style="margin:0">ไม่มีเรื่องที่ตรงกับตัวกรองนี้</p></div>';
 }
 

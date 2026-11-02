@@ -1091,7 +1091,7 @@ def missing_extras(job) -> int:
              if sppweb._attachment_ext(u) in sppweb.PAGE_EXTENSIONS]
     if not any(sppweb._attachment_ext(u) == ".pdf" for u in links):
         return 0                                   # อัปโหลดเอง / ไม่มีรายการไฟล์แนบ
-    expected = min(len(links) - 1, sppweb.MAX_EXTRA_FILES)     # ไฟล์ PDF แรก = หนังสือนำ
+    expected = min(len(links) - 1, sppweb.MAX_EXTRA_FILES)     # หนังสือนำ ๑ ไฟล์ (ชื่อ "หนังสือราชการ" หรือ PDF แรก)
     got = job.get("extras_got")
     if got is None:          # กู้จากไดร์ฟที่ฝากไว้ก่อนมีตัวนับ: รู้แค่ว่ามีไฟล์แนบต่อท้ายหรือไม่
         got = expected if job.get("main_pages") else 0

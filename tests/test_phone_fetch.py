@@ -17,6 +17,7 @@ from unittest.mock import patch
 import requests
 
 import phone_fetch
+from tests.test_sppweb import FakeResponse, FakeSession
 
 PDF = b"%PDF-1.4 fake document body"
 RENDER_PAGE = b"<html><body>Service Unavailable</body></html>"   # Render's page, not our JSON
@@ -239,6 +240,39 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.extras_sent, [["extra1.pdf"]])
         self.assertEqual(downloads, 3)                      # main + list + bad - not the picture
         self.assertTrue(any("ส่งแล้ว (พร้อมไฟล์แนบ 1 ไฟล์)" in line for line in self.printed))
+
+    def test_the_letter_goes_as_the_main_file_even_when_the_site_lists_it_third(self):
+        """๑.–๒. สิ่งที่ส่งมาด้วย ๓. หนังสือราชการ+สิ่งที่ส่งมาด้วย ๔. สิ่งที่ส่งมาด้วย — หนังสือราชการ
+        เป็นไฟล์หลัก (เซิร์ฟเวอร์ต่อไฟล์แนบท้ายไฟล์หลัก จึงขึ้นหน้าแรก) ที่เหลือเป็นไฟล์แนบตามลำดับเว็บ"""
+        sppweb = phone_fetch.sppweb
+        links = [("a1.pdf", "สิ่งที่ส่งมาด้วย"), ("a2.pdf", "สิ่งที่ส่งมาด้วย"),
+                 ("letter.pdf", "หนังสือราชการ+สิ่งที่ส่งมาด้วย"), ("a4.pdf", "สิ่งที่ส่งมาด้วย")]
+        sess = FakeSession().add("GET", sppweb.DETAIL_URL.format("186769"), FakeResponse(
+            text="<h2>รายละเอียดหนังสือ</h2>" + "".join(
+                f'<a href="/files/{f}">{n}. {name}</a>' for n, (f, name) in enumerate(links, 1))))
+        saved, posted = {}, []
+
+        def download(sess, url, dest, expected_type=None):
+            saved[os.path.basename(dest)] = url.rsplit("/", 1)[1]
+            with open(dest, "wb") as f:
+                f.write(PDF)
+
+        def submit(path, meta, extras=()):
+            posted.append((saved[os.path.basename(path)],
+                           [saved[os.path.basename(p)] for p in extras]))
+            return {"ok": True, "created": True, "job_id": "j186769"}
+
+        with patch.object(phone_fetch, "TOKEN", "t"), \
+                patch.object(phone_fetch, "ask_credentials", return_value=("u", "p")), \
+                patch.object(phone_fetch, "fetch_history", return_value=(set(), set())), \
+                patch.object(phone_fetch, "submit", submit), \
+                patch.object(sppweb, "login", return_value=sess), \
+                patch.object(sppweb, "list_documents",
+                             return_value=[{"book_id": "186769", "doc_title": "จัดสรรงบประมาณ"}]), \
+                patch.object(sppweb, "download", side_effect=download), \
+                patch("builtins.print"):
+            phone_fetch.main()
+        self.assertEqual(posted, [("letter.pdf", ["a1.pdf", "a2.pdf", "a4.pdf"])])
 
     def test_stops_downloading_after_the_server_stays_down(self):
         docs = [{"book_id": str(i), "doc_title": "เรื่อง %d" % i} for i in range(1, 9)]

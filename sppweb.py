@@ -852,6 +852,19 @@ def _pick_attachment_url(sess, candidates: list[tuple[str, str]], *,
     return None
 
 
+# ไฟล์ที่ผู้ส่งตั้งชื่อว่า "หนังสือราชการ" คือตัวหนังสือ ต้องขึ้นหน้าแรกเสมอ
+# เว็บไม่ได้วางไว้ลำดับแรกทุกเรื่อง เช่น ๑.–๒. สิ่งที่ส่งมาด้วย ๓. หนังสือราชการ+สิ่งที่ส่งมาด้วย
+# เดิมใช้ PDF ไฟล์แรก หน้าแรกเลยเป็นสิ่งที่ส่งมาด้วย AI อ่านผิดฉบับ ตรายางลงผิดหน้า
+LETTER_NAME = "หนังสือราชการ"
+
+
+def _main_pdf(attachments: list) -> str:
+    """ไฟล์ PDF ที่เป็นตัวหนังสือ — ชื่อมีคำว่า "หนังสือราชการ" ก่อน ไม่มีก็ใช้ PDF ไฟล์แรกเหมือนเดิม"""
+    pdfs = [a for a in attachments if a["ext"] == ".pdf"]
+    named = [a for a in pdfs if LETTER_NAME in re.sub(r"\s+", "", a["name"])]
+    return (named or pdfs)[0]["url"] if pdfs else ""
+
+
 def fetch_detail(sess, book_id: str) -> dict:
     detail_url = DETAIL_URL.format(str(book_id))
     _, soup = _request_html(
@@ -866,7 +879,7 @@ def fetch_detail(sess, book_id: str) -> dict:
         raise UnexpectedPageError(
             "เว็บตอบกลับมาแต่ไม่ใช่หน้ารายละเอียดหนังสือ (หน้าเว็บอาจเปลี่ยนรูปแบบ)")
 
-    attachments, main_pdf, seen = [], "", set()
+    attachments, seen = [], set()
     for tag in soup.find_all("a", href=lambda value: value and _attachment_ext(value) in FILE_EXTENSIONS):
         ext = _attachment_ext(tag.get("href", ""))
         final_url = _pick_attachment_url(
@@ -877,13 +890,11 @@ def fetch_detail(sess, book_id: str) -> dict:
         seen.add(final_url)
         name = re.sub(r"^\d+\.\s*", "", tag.text.strip()) or "เอกสารแนบ"
         attachments.append({"name": name, "url": final_url, "ext": ext})
-        if not main_pdf and ext == ".pdf":
-            main_pdf = final_url
     return {
         "book_id": str(book_id),
         "emoji": _urgency_emoji(soup.text),
-        "attachments": attachments,
-        "main_pdf": main_pdf,
+        "attachments": attachments,           # ลำดับตามเว็บ (ข้อความ LINE เรียงตามนี้)
+        "main_pdf": _main_pdf(attachments),   # ตัวหนังสือ — ขึ้นหน้าแรก ที่เหลือต่อท้ายตามลำดับเว็บ
     }
 
 
