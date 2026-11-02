@@ -34,7 +34,7 @@ from core import (
     generate_kasien_text, extract_recipient_line, classify_recipient,
     get_thai_date, get_thai_time_rounded, normalize_typed_date, to_thai_digits,
     format_scraped_date, get_next_receipt_no, page_order, auto_line_pages, chosen_line_pages,
-    upload_to_imgbb, send_line_with_image, PdfMerger,
+    upload_to_imgbb, send_line_with_image,
 )
 
 DPI = 200                      # ความละเอียดที่ใช้ทำงานจริง (เท่ากับเวอร์ชันเดสก์ท็อป)
@@ -1666,20 +1666,26 @@ def _finalize_claimed(job, payload: dict, reserve_fn, signature_png: bytes = Non
     # หน้ากระดาษเปล่าแทรกต่อจากหน้าที่มีลายเซ็น คำเกษียณจะได้อยู่ติดลายเซ็น
     # (เดิมต่อท้ายเล่ม ไปอยู่หลังสิ่งที่ส่งมาด้วยทั้งหมด)
     order = page_order(total, (job.get("sig_page") or 1) if blank_pdf else None)
-    merger = PdfMerger()
+    # หน้าจากเล่มเดิมเอามาจาก reader ตัวเดียว — ฟอนต์/รูปที่หลายหน้าใช้ร่วมกันมีชุดเดียวในไฟล์
+    # ของเดิม PdfMerger.append ทีละหน้า = เปิดเล่มใหม่ทุกหน้า ทรัพยากรถูกคัดลอกซ้ำทุกหน้า
+    # เรื่องที่ไฟล์แนบมาครบ ๘๐ หน้า (2.6 MB) ได้ไฟล์ 39 MB กินหน่วยความจำเพิ่ม 120 MB นาน 8 วินาที
+    # เครื่องฟรีของ Render (512 MB) บันทึกไม่สำเร็จ — แบบนี้ได้ 2.6 MB ไม่ถึงวินาที
+    from PyPDF2 import PdfReader, PdfWriter
+    source = PdfReader(job["pdf_path"])
+    writer = PdfWriter()
     for n in order:
         if n > total:
-            merger.append(blank_pdf)
+            writer.add_page(PdfReader(blank_pdf).pages[0])
         elif n in made:
-            merger.append(made[n])                       # หน้าที่วางของแล้ว
+            writer.add_page(PdfReader(made[n]).pages[0])          # หน้าที่วางของแล้ว
         else:
-            merger.append(job["pdf_path"], pages=(n - 1, n))
+            writer.add_page(source.pages[n - 1])
 
     today = core.day_folder()          # "๒๕๖๙/๐๘ สิงหาคม/๒๘" — ซอยเป็น ปี/เดือน/วัน
     folder = core.make_output_dir(today)
     out = os.path.join(folder, safe_output_filename(job.get("doc_no", ""), receipt_no))
-    merger.write(out)
-    merger.close()
+    with open(out, "wb") as f:
+        writer.write(f)
 
     # บน hosting ดิสก์ถูกล้างเมื่อรีสตาร์ท จึงต้องส่งขึ้น Drive ให้อยู่ถาวร
     # (บนคอมที่มี Drive for Desktop ซิงก์อยู่แล้ว ตัวนี้จะถูกปิดไว้ ไม่ทำงานซ้ำซ้อน)

@@ -327,6 +327,29 @@ class ServerFlowTests(unittest.TestCase):
         sent_pages = sorted(u.rsplit("_", 1)[1] for u in sent.call_args.args[1])
         self.assertEqual(sent_pages, ["หน้า๑.jpg", "หน้า๒.jpg"])
 
+    def test_a_long_document_is_saved_without_a_copy_of_its_fonts_on_every_page(self):
+        """เรื่องที่ไฟล์แนบมาครบหลายสิบหน้า — ของเดิมต่อทีละหน้าด้วย PdfMerger ฟอนต์ถูกคัดลอกซ้ำทุกหน้า
+        ๘๐ หน้า (2.6 MB) ได้ไฟล์ 39 MB กินหน่วยความจำเพิ่ม 120 MB: บนเครื่องฟรีของ Render ยืนยันแล้วบันทึกไม่สำเร็จ"""
+        self.files["u/list.pdf"] = text_pdf(os.path.join(self.work, "long.pdf"),
+                                            [[f"บัญชีรายชื่อ หน้า {n}", "โรงเรียนบ้านโพนทองประชาอุทิศ"]
+                                             for n in range(1, 41)])
+        job = self.opened_from_the_news_list()
+        self.assertEqual(job["total_pages"], 42)
+        payload = {"stamp": job["stamp"], "boxes": job["boxes"], "date": "", "time": "", "blank": True}
+        with patch.object(docmode, "publish_line_image", return_value="https://x/p.jpg"), \
+                patch.object(docmode, "send_line_with_image", return_value=True):
+            result = docmode._finalize_claimed(job, payload, lambda **kw: "๕๗")
+        out = os.path.join(core.OUTPUT_ROOT, core.day_folder(), result["filename"])
+        text = pages_of(out)
+        self.assertEqual(len(text), 43)                                  # 42 + the blank page
+        # pages 1-2 carry the stamp and the notes (drawn again as pictures), the blank page
+        # follows the signature page, then the list in order to its last page
+        self.assertIn("บัญชีรายชื่อ หน้า 1\n", text[3])
+        self.assertIn("บัญชีรายชื่อ หน้า 40", text[-1])
+        source = os.path.getsize(job["pdf_path"])
+        self.assertLess(os.path.getsize(out), 2 * source,
+                        f"saved {os.path.getsize(out)} bytes from a {source}-byte document")
+
     def test_line_message_still_links_every_attachment(self):
         """only PDF files go behind the letter, but the LINE message keeps a link to every
         attachment as before - the letter, the list, the Word form and the picture"""

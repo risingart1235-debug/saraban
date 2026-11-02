@@ -512,6 +512,21 @@ class RedoOnTheWebTests(RedoBase):
         self.assertEqual(r.json(), {"job_id": "x"})
         spp.assert_called_once()
 
+    def test_a_save_that_breaks_half_way_says_why_and_keeps_its_number(self):
+        """ยืนยัน & สร้างไฟล์ พังกลางทาง — เดิมได้แค่ "Internal Server Error" ไม่รู้ว่าเพราะอะไร เลขถูกจองไปหรือยัง"""
+        job = self.from_phone()
+        self.assertTrue(docmode.prepare_stored(job))
+        self.assertEqual(settle(job), "ready", job.get("error"))
+        payload = {"stamp": job["stamp"], "boxes": job["boxes"], "date": "", "time": ""}
+        with patch.object(core, "make_output_dir", side_effect=OSError("No space left on device")):
+            r = self.web.post(f"/api/doc/{job['id']}/save", json=payload)
+        self.assertEqual(r.status_code, 500)
+        self.assertIn("OSError: No space left on device", r.json()["detail"])
+        self.assertIn("เลขรับ ๕๗ จองไว้แล้ว", r.json()["detail"])
+        r = self.web.post(f"/api/doc/{job['id']}/save", json=payload)           # กดยืนยันใหม่
+        self.assertEqual((r.status_code, r.json()["receipt_no"]), (200, "๕๗"))
+        self.assertEqual(len(self.store.rows), 1)                                # ไม่กินเลขใหม่
+
     def withdraw(self, book_id="88"):
         self.store.records.pop(book_id, None)
         self.store.history.discard(book_id)

@@ -1485,6 +1485,12 @@ async def api_doc_save(job_id: str, request: Request, user: str = Depends(curren
         raise HTTPException(status_code=503, detail=str(e))
     except docmode.JobStateError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        # พังกลางทาง (สร้างไฟล์/ทะเบียน) — บอกเหตุจริง ไม่ใช่ "Internal Server Error" เฉยๆ ที่หาสาเหตุไม่ได้
+        # จองเลขไปแล้วก็บอกด้วย กดบันทึกใหม่ได้ ใช้เลขเดิม ไม่กินเลขใหม่ (ดู docmode._reserve_for_job)
+        no = job.get("reserved_receipt")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}"[:300] + (
+            f" — เลขรับ {no} จองไว้แล้ว กดยืนยันใหม่ได้ จะใช้เลขเดิม" if no else ""))
 
 
 @app.post("/api/doc/{job_id}/skip")
