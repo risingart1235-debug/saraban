@@ -1097,7 +1097,8 @@ class SarabanApp(tk.Tk):
                             *, job, book_id=None, extras=()):
         ext = filepath.lower().split('.')[-1]
         temp_pdf = self._job_path(job, "temp_work.pdf")
-        if ext in ['jpg', 'jpeg', 'png']: Image.open(filepath).convert('RGB').save(temp_pdf)
+        # รูปเป็นหน้า A4 เสมอ — เดิมเซฟที่ 72 DPI รูปจากมือถือได้หน้ากว้างเป็นเมตร ตรายาง/คำเกษียณเล็กจิ๋ว
+        if ext in ['jpg', 'jpeg', 'png']: image_to_a4_pdf(filepath, temp_pdf, self.A4_DPI)
         else: shutil.copy(filepath, temp_pdf)
         # ไฟล์แนบอื่นของเรื่องเดียวกันต่อท้ายหนังสือนำเป็นเล่มเดียว (เห็นครบ ไฟล์ที่บันทึกก็ครบ)
         # AI กับการคัดกรองบรรทัด "เรียน" ยังอ่านแค่หนังสือนำเหมือนเดิม

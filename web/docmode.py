@@ -1003,7 +1003,7 @@ def start_from_upload(user: str, filename: str, data: bytes) -> dict:
             pdf = os.path.join(job["dir"], "doc.pdf")
             ext = filename.lower().rsplit(".", 1)[-1]
             if ext in ("jpg", "jpeg", "png"):
-                Image.open(io.BytesIO(data)).convert("RGB").save(pdf)
+                core.image_to_a4_pdf(io.BytesIO(data), pdf, DPI)      # รูปเป็นหน้า A4 เสมอ
             else:
                 with open(pdf, "wb") as f:
                     f.write(data)
@@ -1034,8 +1034,9 @@ def start_from_upload_path(user: str, filename: str, source_path: str,
             _set(job, status="analyzing", step="กำลังเตรียมไฟล์...")
             ext = (filename or "").lower().rsplit(".", 1)[-1]
             if ext in ("jpg", "jpeg", "png"):
+                # รูปเป็นหน้า A4 เสมอ ตรายาง/คำเกษียณจะได้ขนาดเท่าบนหนังสือ PDF (ดู core.image_to_a4_pdf)
                 converted = os.path.join(job["dir"], "converted.pdf")
-                Image.open(pdf).convert("RGB").save(converted, "PDF", resolution=float(DPI))
+                core.image_to_a4_pdf(pdf, converted, DPI)
                 os.replace(converted, pdf)
             _prepare(job, pdf, doc_no="-", doc_title="-", doc_date="-", sender="-",
                      emoji="🔵", attach="📥 นำเข้าไฟล์โดยผู้ใช้งาน (Manual Import)",

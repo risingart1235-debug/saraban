@@ -931,6 +931,38 @@ def save_image_as_pdf(pil_image, output_path, dpi=PDF_RENDER_DPI):
         raise ValueError("dpi must be greater than zero")
     pil_image.convert("RGB").save(output_path, "PDF", resolution=float(dpi))
 
+
+def image_to_a4_pdf(src, dest, dpi=PDF_RENDER_DPI):
+    """รูปที่นำเข้า (JPG/PNG) -> PDF หน้า A4 หน้าเดียว คืน dest
+
+    ตรายางกับคำเกษียณวาดขนาดจริงบนกระดาษ A4 (ตัวอักษร ๔๖ จุดที่ 200 DPI) — เดิมรูปกลายเป็นหน้ากระดาษ
+    ใหญ่ตามจำนวนจุดของรูป รูปจากกล้องมือถือกว้าง ๓๐๒๔ จุดได้หน้ากว้าง ๓๘ ซม. ตรายาง/คำเกษียณเลยเล็กจิ๋ว
+    (โปรแกรมบนคอมเซฟที่ 72 DPI หน้ากว้างเป็นเมตร) รูปเล็กกลับกัน ตัวโตล้นหน้า
+    รูปตั้งได้ A4 แนวตั้ง รูปนอนได้ A4 แนวนอน ย่อ/ขยายเต็มหน้าโดยไม่บิดสัดส่วน วางกลางหน้า ที่เหลือ
+    (และส่วนที่โปร่งใส) เป็นกระดาษขาว — รูปจากกล้องที่เก็บตะแคงแล้วบอกทิศไว้ใน EXIF หมุนให้ตั้งก่อน
+    ไม่งั้นได้หน้าแนวนอนที่ตัวหนังสือนอน
+    """
+    from PIL import ImageOps
+    a4_w, a4_h = (round(mm / 25.4 * dpi) for mm in (210, 297))      # ๑๖๕๔ x ๒๓๓๙ จุดที่ 200 DPI
+    with Image.open(src) as img:
+        turned = img.getexif().get(0x0112, 1) in (5, 6, 7, 8)       # EXIF Orientation: หมุน ๙๐° ตอนแสดง
+        w0, h0 = (img.height, img.width) if turned else img.size
+        page_w, page_h = (a4_h, a4_w) if w0 > h0 else (a4_w, a4_h)
+        scale = min(page_w / w0, page_h / h0)
+        w, h = max(1, round(w0 * scale)), max(1, round(h0 * scale))
+        size = (h, w) if turned else (w, h)                          # ขนาดก่อนหมุนตาม EXIF
+        img.draft("RGB", size)            # JPEG ใหญ่ถอดรหัสแบบย่อมาเลย ไม่กินแรมเต็มรูป
+        alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+        if img.mode not in ("RGB", "RGBA", "L", "LA"):              # พาเลต/ขาวดำ ๑ บิต/CMYK แปลงก่อนย่อ
+            img = img.convert("RGBA" if alpha else "RGB")
+        # ย่อก่อนแล้วค่อยหมุนรูปเล็ก ไม่ต้องสำเนารูปเต็มขนาด (เครื่องฟรีบน Render มีแรม 512 MB)
+        img = img.resize(size, Image.LANCZOS)
+    img = ImageOps.exif_transpose(img).convert("RGBA" if alpha else "RGB")
+    page = Image.new("RGB", (page_w, page_h), "white")
+    page.paste(img, ((page_w - w) // 2, (page_h - h) // 2), img if alpha else None)
+    page.save(dest, "PDF", resolution=float(dpi))
+    return dest
+
 # =====================================================================
 # ๔. ระบบสแกนอัจฉริยะ (Auto-Scan Functions)
 # =====================================================================
