@@ -39,3 +39,23 @@ class ReleaseLayoutTests(RedoBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadChunkTests(unittest.TestCase):
+    """big files go up to Drive in chunks: sent in one go, a 40 MB PDF took ~230 MB of memory"""
+
+    def test_big_files_are_resumable_and_small_ones_are_not(self):
+        import os
+        import tempfile
+        import drive
+        with tempfile.TemporaryDirectory() as tmp:
+            big, small = os.path.join(tmp, "big.pdf"), os.path.join(tmp, "small.jpg")
+            with open(big, "wb") as f:
+                f.truncate(drive.UPLOAD_CHUNK * 3)
+            with open(small, "wb") as f:
+                f.write(b"x" * 1000)
+            m = drive._media(big, "application/pdf")
+            self.assertTrue(m.resumable())
+            self.assertEqual(m.chunksize(), drive.UPLOAD_CHUNK)
+            self.assertEqual(drive.UPLOAD_CHUNK % (256 * 1024), 0)
+            self.assertFalse(drive._media(small, "image/jpeg").resumable())

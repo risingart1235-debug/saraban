@@ -122,6 +122,20 @@ def reset():
         _svc = None
 
 
+# อัปแบบส่งทีเดียว (resumable=False) googleapiclient ประกอบทั้งไฟล์เป็นก้อน multipart ในหน่วยความจำ
+# วัดจริง: ไฟล์ ๔๐ MB หน่วยความจำพุ่ง ~๒๓๐ MB (เกือบ ๖ เท่า) — เรื่องที่ไฟล์แนบเยอะบน Render ฟรี
+# (512 MB) พุ่งทีเดียวก็ถูกฆ่าแล้วบูตใหม่ ไฟล์ใหญ่จึงส่งทีละก้อน ใช้หน่วยความจำไม่เกินขนาดก้อน
+# ไฟล์เล็ก (รูป LINE ไฟล์ทดสอบ) ยังส่งทีเดียว — ทีละก้อนต้องยิงอย่างน้อยสองครั้ง เสียเวลาเปล่า
+UPLOAD_CHUNK = 4 * 1024 * 1024          # ต้องเป็นทวีคูณของ 256 KB ตามข้อกำหนดของ Google
+
+
+def _media(path: str, mimetype: str):
+    from googleapiclient.http import MediaFileUpload
+    big = os.path.getsize(path) > UPLOAD_CHUNK
+    return MediaFileUpload(path, mimetype=mimetype, resumable=big,
+                           chunksize=UPLOAD_CHUNK if big else -1)
+
+
 def _run(req, tries=3):
     """ยิงคำสั่งพร้อมลองซ้ำเมื่อเน็ตสะดุด (เหมือนฝั่ง Sheets)"""
     import time
@@ -250,13 +264,11 @@ def upload(local_path: str, day: str = None, name: str = None) -> dict:
     """ส่งไฟล์ขึ้น Drive คืน {'id','link'} — ถ้าไม่ได้เปิดใช้จะคืน {} เฉยๆ"""
     if not enabled():
         return {}
-    from googleapiclient.http import MediaFileUpload
-
     svc = _service()
     name = name or os.path.basename(local_path)
     parent = ensure_path(day) if day else target_folder()
 
-    media = MediaFileUpload(local_path, mimetype="application/pdf", resumable=False)
+    media = _media(local_path, "application/pdf")
     f = _run(svc.files().create(
         body={"name": name, "parents": [parent]},
         media_body=media, fields="id, webViewLink", supportsAllDrives=True))
@@ -394,13 +406,12 @@ def queue_put(local_pdf: str, meta: dict) -> str:
     """ฝากไฟล์ + ข้อมูลหนังสือไว้ คืน id ของไฟล์ (คืน "" ถ้าไม่ได้เปิดใช้ไดร์ฟ)"""
     if not enabled():
         return ""
-    from googleapiclient.http import MediaFileUpload
     svc = _service()
     name = re.sub(r"[^0-9A-Za-z_.-]", "", str(meta.get("book_id") or "")) or "ไม่ทราบเลข"
     f = _run(svc.files().create(
         body={"name": name + ".pdf", "parents": [_queue_folder()],
               "description": json.dumps(meta, ensure_ascii=False)},
-        media_body=MediaFileUpload(local_pdf, mimetype="application/pdf", resumable=False),
+        media_body=_media(local_pdf, "application/pdf"),
         fields="id", supportsAllDrives=True))
     return f.get("id", "")
 
@@ -471,14 +482,13 @@ def line_image_put(local_jpg: str, name: str, day: str = None, token: str = "") 
     ย้ายโฟลเดอร์ได้ ลิงก์ในแชตไม่เสีย — line_image_get หาจากโทเคนที่ติดไว้กับไฟล์ ไม่ได้หาตามที่อยู่"""
     if not enabled():
         return ""
-    from googleapiclient.http import MediaFileUpload
     body = {"name": name, "parents": [ensure_path(f"{day}/{core.LINE_IMG_SUBDIR}") if day
                                       else target_folder()]}
     if token:
         body["appProperties"] = {LINE_TOKEN_PROP: token}
     f = _run(_service().files().create(
         body=body,
-        media_body=MediaFileUpload(local_jpg, mimetype="image/jpeg", resumable=False),
+        media_body=_media(local_jpg, "image/jpeg"),
         fields="id", supportsAllDrives=True))
     return f.get("id", "")
 
