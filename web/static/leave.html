@@ -20,6 +20,16 @@
     width: 100%; min-height: 46px; padding: 10px 12px; border: 1px solid #c9ced6;
     border-radius: 8px; font-size: 16px; font-family: inherit; background: #fff;
   }
+  /* ช่องเลือกชื่อ — กดแล้วค่อยกางรายชื่อ เลือกแล้วพับเก็บ */
+  .picker {
+    width: 100%; min-height: 50px; padding: 10px 12px; border: 1px solid #c9ced6; border-radius: 10px;
+    background: #fff; font-size: 17px; font-family: inherit; color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between; cursor: pointer; text-align: left;
+  }
+  .picker.picked { color: var(--purple); font-weight: 700; border-color: var(--purple); }
+  .picker .arrow { transition: transform .15s; color: var(--muted); }
+  .picker[aria-expanded="true"] .arrow { transform: rotate(180deg); }
+  #teachers { margin-top: 8px; }
   #big { font-size: 30px; font-weight: 700; color: var(--purple); }
 
   /* ผลลัพธ์ — ตัวโตไว้ลอกลงกรอบลงรับบนใบลา */
@@ -64,7 +74,10 @@
 
     <div class="card">
       <h2>👤 ชื่อผู้ลา</h2>
-      <div class="chips" id="teachers"></div>
+      <button type="button" class="picker" id="pickTeacher" aria-expanded="false" aria-controls="teachers">
+        <span id="teacherLabel">แตะเพื่อเลือกชื่อ</span><span class="arrow">▾</span>
+      </button>
+      <div class="chips hidden" id="teachers"></div>
     </div>
 
     <div class="card">
@@ -125,6 +138,12 @@ function chips(box, items, onPick) {
   }
 }
 
+function openTeachers(open) {
+  $('teachers').classList.toggle('hidden', !open);
+  $('pickTeacher').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+$('pickTeacher').onclick = () => openTeachers($('teachers').classList.contains('hidden'));
+
 async function start() {
   try {
     const r = await fetch('/api/leave/new');
@@ -132,7 +151,12 @@ async function start() {
     const S = await readJSON(r);
     $('big').textContent = S.receipt_no;
     $('doc_date').value = S.today;
-    chips($('teachers'), S.teachers, (v) => { teacher = v; });
+    chips($('teachers'), S.teachers, (v) => {
+      teacher = v;
+      $('teacherLabel').textContent = v;
+      $('pickTeacher').classList.add('picked');
+      openTeachers(false);
+    });
     chips($('types'), S.types, (v) => { leaveType = v; });
     $('app').classList.remove('hidden');
     $('savebar').classList.remove('hidden');
@@ -142,7 +166,7 @@ async function start() {
 }
 
 $('save').onclick = async () => {
-  if (!teacher) { show('err', 'กรุณาเลือกชื่อผู้ลา'); return; }
+  if (!teacher) { show('err', 'กรุณาเลือกชื่อผู้ลา'); openTeachers(true); return; }
   if (!leaveType) { show('err', 'กรุณาเลือกประเภทการลา'); return; }
   const btn = $('save');
   btn.disabled = true;
