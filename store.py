@@ -648,6 +648,27 @@ class LocalStore(StatusMixin, UsersMixin):
 # ==========================================================
 # แบบที่ ๒ — Google Sheets (ใช้ร่วมกันได้ทุกเครื่อง)
 # ==========================================================
+def thread_request_builder(creds):
+    """ให้แต่ละเธรดยิง Google API ผ่านการเชื่อมต่อของตัวเอง (googleapiclient แนะนำไว้เอง)
+
+    ของเดิมทุกเธรดใช้ httplib2.Http ตัวเดียวกัน ซึ่งใช้พร้อมกันหลายเธรดไม่ได้ — เว็บอ่านชีตจากหลายเธรด
+    พร้อมกันตลอด (เลขรับถัดไป รายชื่อผู้ใช้ รายการเรื่อง) แถมงานเบื้องหลังเขียนชีตตอนบันทึก
+    SSL ที่ถูกสองเธรดใช้พร้อมกันทำหน่วยความจำเสีย บน Render เซิร์ฟเวอร์ตายด้วย Segmentation fault
+    (exit 139) / abort (exit 134) ไม่กี่วินาทีหลังกดบันทึกเรื่องหนึ่งแล้วเปิดเรื่องถัดไป
+    การเชื่อมต่อของแต่ละเธรดยังใช้ซ้ำได้ ไม่ต้องเปิดใหม่ทุกครั้ง (ไม่ช้าลงแบบล็อกทีละคำสั่ง)"""
+    import httplib2
+    import google_auth_httplib2
+    from googleapiclient.http import HttpRequest
+    local = threading.local()
+
+    def build_request(_shared_http, *args, **kwargs):
+        http = getattr(local, "http", None)
+        if http is None:
+            http = local.http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=60))
+        return HttpRequest(http, *args, **kwargs)
+    return build_request
+
+
 class SheetsStore(StatusMixin, UsersMixin):
     """เก็บบน Google Sheets — ทุกเครื่องอ่านเขียนที่เดียวกันจริงๆ
 
@@ -701,7 +722,8 @@ class SheetsStore(StatusMixin, UsersMixin):
         self.client_email = info.get("client_email", "")
 
         creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
-        self._api = build("sheets", "v4", credentials=creds, cache_discovery=False).spreadsheets()
+        self._api = build("sheets", "v4", credentials=creds, cache_discovery=False,
+                          requestBuilder=thread_request_builder(creds)).spreadsheets()
         self._hist_cache = None
         self._hist_at = 0
         self._cache = {}
