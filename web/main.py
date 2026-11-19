@@ -826,6 +826,63 @@ async def api_stamp_save(request: Request, user: str = Depends(current_user)):
     }
 
 
+# ==========================================================
+# โหมดที่ ๓ — ลงรับใบลา (ขอเลข/วันที่/เวลาไปเขียนบนกรอบลงรับของใบลาเอง)
+# ==========================================================
+# ใช้เลขรับเดียวกับทะเบียนรับหนังสือ ไม่พิมพ์อะไรลงกระดาษ ไม่สร้างไฟล์ ไม่ส่ง LINE
+LEAVE_TEACHERS = [
+    "นางวัฒนา คำโสมศรี",
+    "นางสาวกฤษณี โฮมวงศ์",
+    "นางสาวพรทิวา แก้วมะ",
+    "นางนิตยา ยางธิสาร",
+    "นางสาวอรประภา แนบโนนสูง",
+    "นางสาววนิดา แสงวงค์",
+    "นายอิทธิพล ยาทองไชย",
+    "นางสาวจิราพร วงค์ไชยสิทธิ์",
+    "นางสาวกนกขวัญ พรหมเมือง",
+    "นายอนุชา มีภูคำ",
+]
+LEAVE_TYPES = ["ป่วย", "กิจส่วนตัว", "คลอดบุตร"]
+
+
+@app.get("/leave", response_class=HTMLResponse)
+def leave_page(session: str = Cookie(default=None)):
+    if not signed_in(session):
+        return RedirectResponse("/login", status_code=302)
+    return _page("leave.html")
+
+
+@app.get("/api/leave/new")
+def api_leave_new(user: str = Depends(current_user)):
+    """รายชื่อครู ประเภทการลา และเลขรับถัดไป (ยังไม่จองเลข จนกว่าจะกดขอเลข)"""
+    return {
+        "receipt_no": peek_receipt_no(),
+        "teachers": LEAVE_TEACHERS,
+        "types": LEAVE_TYPES,
+        "today": now_th().strftime("%Y-%m-%d"),
+    }
+
+
+@app.post("/api/leave/save")
+async def api_leave_save(request: Request, user: str = Depends(current_user)):
+    """จองเลขรับ + ลงทะเบียน คืนเลขรับ วันที่ เวลา ไว้เขียนลงใบลา"""
+    d = await request.json()
+    teacher = str(d.get("teacher", "")).strip()
+    leave_type = str(d.get("leave_type", "")).strip()
+    if teacher not in LEAVE_TEACHERS:
+        raise HTTPException(status_code=400, detail="กรุณาเลือกชื่อผู้ลา")
+    if leave_type not in LEAVE_TYPES:
+        raise HTTPException(status_code=400, detail="กรุณาเลือกประเภทการลา")
+    doc_date = normalize_typed_date(d.get("doc_date", "")) or get_thai_date()
+    date_str, time_str = get_thai_date(), get_thai_time_rounded()
+    receipt_no = reserve_receipt_no(
+        doc_no="-", doc_date=doc_date, sender=teacher,
+        doc_title="ขออนุญาตลา" + leave_type, receive_date=date_str,
+    )
+    return {"ok": True, "receipt_no": receipt_no, "date": date_str, "time": time_str,
+            "teacher": teacher, "leave_type": leave_type, "doc_date": doc_date}
+
+
 @app.get("/api/stamp/download/{day:path}/{name}")
 def api_stamp_download(day: str, name: str, user: str = Depends(current_user)):
     """ดาวน์โหลด PDF ที่เพิ่งสร้าง (กันเรียกไฟล์นอกโฟลเดอร์ด้วยการเช็ก path)"""

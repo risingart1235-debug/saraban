@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ลงรับใบลา</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* ปุ่มเลือก (ชื่อครู / ประเภทการลา) — กดเลือกได้ด้วยนิ้วเดียว */
+  .chips { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .chips.three { grid-template-columns: repeat(3, 1fr); }
+  .chip {
+    min-height: 46px; padding: 10px 12px; border: 1px solid #c9ced6; border-radius: 10px;
+    background: #fff; font-size: 16px; font-family: inherit; color: var(--text);
+    text-align: left; cursor: pointer;
+  }
+  .chips.three .chip { text-align: center; }
+  .chip.on { background: var(--purple); border-color: var(--purple); color: #fff; font-weight: 700; }
+  input[type=date] {
+    width: 100%; min-height: 46px; padding: 10px 12px; border: 1px solid #c9ced6;
+    border-radius: 8px; font-size: 16px; font-family: inherit; background: #fff;
+  }
+  #big { font-size: 30px; font-weight: 700; color: var(--purple); }
+
+  /* ผลลัพธ์ — ตัวโตไว้ลอกลงกรอบลงรับบนใบลา */
+  .result { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: baseline; margin: 10px 0 4px; }
+  .result dt { color: #374151; font-size: 16px; }
+  .result dd { margin: 0; font-size: 28px; font-weight: 700; color: var(--blue); }
+
+  #savebar {
+    position: sticky; bottom: 0;
+    background: rgba(240,242,245,.97);
+    border-top: 1px solid var(--line);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    margin: 0 -16px;
+  }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a href="/">‹ กลับ</a>
+  <h1>ลงรับใบลา</h1>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="hidden"></div>
+
+  <div id="done" class="card hidden">
+    <h2>✅ ลงรับแล้ว — เขียนลงกรอบลงรับบนใบลา</h2>
+    <dl class="result">
+      <dt>เลขที่รับ</dt><dd id="r_no"></dd>
+      <dt>วันที่</dt><dd id="r_date"></dd>
+      <dt>เวลา</dt><dd id="r_time"></dd>
+    </dl>
+    <p class="hint" id="r_who"></p>
+    <a class="btn grey" href="/leave" style="text-decoration:none;text-align:center;line-height:24px">ลงรับใบลาใบถัดไป</a>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <div class="tiny">เลขรับที่จะได้ (ใช้เลขเดียวกับทะเบียนรับหนังสือ)</div>
+      <div id="big">—</div>
+    </div>
+
+    <div class="card">
+      <h2>👤 ชื่อผู้ลา</h2>
+      <div class="chips" id="teachers"></div>
+    </div>
+
+    <div class="card">
+      <h2>📋 ประเภทการลา</h2>
+      <div class="chips three" id="types"></div>
+    </div>
+
+    <div class="card">
+      <h2>📅 ลงวันที่ (วันที่เขียนใบลา)</h2>
+      <input id="doc_date" type="date">
+      <p class="tiny">ที่ = "-" · เรื่อง = ขออนุญาตลา… ลงทะเบียนให้เอง</p>
+    </div>
+  </div>
+
+  <div id="savebar" class="hidden">
+    <button class="btn purple" id="save">🔢 ขอเลขรับ</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+// เซิร์ฟเวอร์พังแล้วส่ง HTML มา r.json() จะขึ้นข้อความที่อ่านไม่รู้เรื่องบน Safari จึงดักเอง
+async function readJSON(r) {
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch (e) {
+    const brief = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`เซิร์ฟเวอร์ผิดพลาด (${r.status})${brief ? ': ' + brief : ''}`);
+  }
+}
+function show(kind, html) {
+  const m = $('msg');
+  m.className = kind;
+  m.innerHTML = html;
+  m.classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+let teacher = '', leaveType = '';
+
+function chips(box, items, onPick) {
+  box.innerHTML = '';
+  for (const it of items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip';
+    b.textContent = it;
+    b.onclick = () => {
+      for (const c of box.children) c.classList.toggle('on', c === b);
+      onPick(it);
+    };
+    box.appendChild(b);
+  }
+}
+
+async function start() {
+  try {
+    const r = await fetch('/api/leave/new');
+    if (r.status === 401) { location.href = '/login'; return; }
+    const S = await readJSON(r);
+    $('big').textContent = S.receipt_no;
+    $('doc_date').value = S.today;
+    chips($('teachers'), S.teachers, (v) => { teacher = v; });
+    chips($('types'), S.types, (v) => { leaveType = v; });
+    $('app').classList.remove('hidden');
+    $('savebar').classList.remove('hidden');
+  } catch (e) {
+    show('err', 'เปิดหน้าไม่สำเร็จ: ' + esc(e.message));
+  }
+}
+
+$('save').onclick = async () => {
+  if (!teacher) { show('err', 'กรุณาเลือกชื่อผู้ลา'); return; }
+  if (!leaveType) { show('err', 'กรุณาเลือกประเภทการลา'); return; }
+  const btn = $('save');
+  btn.disabled = true;
+  btn.textContent = 'กำลังลงรับ...';
+  try {
+    const r = await fetch('/api/leave/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teacher, leave_type: leaveType, doc_date: $('doc_date').value }),
+    });
+    const d = await readJSON(r);
+    if (!r.ok || !d.ok) throw new Error(d.detail || 'ลงรับไม่สำเร็จ');
+    $('msg').classList.add('hidden');
+    $('app').classList.add('hidden');
+    $('savebar').classList.add('hidden');
+    $('r_no').textContent = d.receipt_no;
+    $('r_date').textContent = d.date;
+    $('r_time').textContent = d.time + ' น.';
+    $('r_who').textContent = `${d.teacher} · ขออนุญาตลา${d.leave_type} · ลงวันที่ ${d.doc_date}`;
+    $('done').classList.remove('hidden');
+    window.scrollTo({ top: 0 });
+  } catch (e) {
+    show('err', 'ลงรับไม่สำเร็จ: ' + esc(e.message));
+    btn.disabled = false;
+    btn.textContent = '🔢 ขอเลขรับ';
+  }
+};
+
+start();
+</script>
+</body>
+</html>
