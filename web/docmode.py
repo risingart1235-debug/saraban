@@ -9,6 +9,9 @@ import os
 import io
 import re
 import base64
+import ctypes
+import gc
+import glob
 import hashlib
 import hmac
 import queue
@@ -147,6 +150,36 @@ threading.Thread(target=_worker_loop, args=(_ocr_tasks,),
 # ==========================================================
 # เครื่องมือช่วย
 # ==========================================================
+# ของหนักที่ใช้แค่ตอนจัดหน้า (ภาพหน้าเอกสาร/ตรายาง/คำเกษียณเป็น data-uri ตำแหน่งชื่อโรงเรียน สแกน)
+# เรื่องที่ลงรับ/ข้ามแล้วยังอยู่ใน _jobs อีก REDO_DAYS วัน (ไว้กด ♻️) — ของเดิมคาทั้งหมดไว้ด้วย
+# เรื่องละ ~๔ MB ลงรับรวด ๑๕ เรื่อง (สแกน) เครื่องโตจาก ๑๐๐ เป็น ~๔๔๐ MB เกิน 512 MB ของ Render
+# ฟรีเมื่อไหร่ถูกฆ่าแล้วบูตใหม่ งานที่เปิดค้างหายหมด — ♻️ เปิดใหม่ก็อ่านจากต้นฉบับใหม่ทั้งหมดอยู่แล้ว
+_LAYOUT_KEYS = ("pages", "stamp", "boxes", "marks", "scan_pages", "ocr")
+
+
+def _trim_memory():
+    """คืนหน่วยความจำที่ว่างแล้วให้เครื่อง — ภาพหน้า 200 DPI (~๑๕ MB ต่อหน้า) พอใช้เสร็จ
+    Python/glibc ยังกันพื้นที่ไว้เอง ตัวเลขหน่วยความจำของ Render จึงไม่ลดลงเลยหลังทำแต่ละเรื่อง"""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):          # Windows/macOS ไม่มีตัวนี้ ไม่เป็นไร
+        pass
+
+
+def _release_layout(job: dict):
+    """เรื่องจบแล้ว (ลงรับ/ข้าม) — ทิ้งของที่ใช้แค่ตอนจัดหน้า เหลือข้อมูลเรื่องกับผลลัพธ์ไว้"""
+    with _lock:
+        for k in _LAYOUT_KEYS:
+            job.pop(k, None)
+    for f in glob.glob(os.path.join(job.get("dir") or "", "preview*.jpg")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    _trim_memory()
+
+
 def _png_uri(img) -> str:
     buf = io.BytesIO()
     img.save(buf, "PNG")
@@ -1245,6 +1278,8 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
                  "left_cm": round(kx / CM, 2), "top_cm": round(ky / CM, 2),
                  "fitted": kclear,             # False = ทับตัวหนังสืออยู่ หน้าจอบอกให้ลากย้าย
                  "png": _png_uri(kbox), "w": kbox.width, "h": kbox.height}])
+    del p1, psig, target, stamp, kbox      # ภาพ 200 DPI ของหน้าแรก/หน้าลายเซ็น ใช้เสร็จแล้ว
+    _trim_memory()
 
     # เปิดเว็บบนคอมเอง — สแกนหน้าภาพทุกหน้าเบื้องหลังเลย ไม่ต้องกดปุ่ม (หน้าจอแสดงความคืบหน้าที่ปุ่ม 🔎)
     if OCR_AUTO and scan_pages:
@@ -1571,6 +1606,7 @@ def finalize(job, payload: dict, reserve_fn, signature_png: bytes = None) -> dic
         raise
     _set(job, status="done", step="บันทึกเรียบร้อย", error="", result=result,
          finished_at=now_th())
+    _release_layout(job)
     # เรื่องจากมือถือเก็บต้นฉบับไว้อีก REDO_DAYS วัน ลงรับผิดจะได้กด ♻️ ลงรับใหม่ได้
     if not _keeps_original(job):
         _drop_backup(job)
@@ -1783,6 +1819,7 @@ def skip(job):
         raise
     result = {"ok": True}
     _set(job, status="skipped", step="ข้ามเอกสารแล้ว", result=result, finished_at=now_th())
+    _release_layout(job)
     if not _keeps_original(job):
         _drop_backup(job)
     return result

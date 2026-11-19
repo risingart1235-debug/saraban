@@ -360,6 +360,13 @@ async function poll() {
   }
   if (d.status === 'analyzing') { $('step').textContent = d.step || '...'; setTimeout(poll, 1500); return; }
   if (d.status === 'error') { $('loading').classList.add('hidden'); show('err', 'เปิดเอกสารไม่สำเร็จ: ' + d.error); return; }
+  if (d.finished) {        // ลงรับ/ข้ามไปแล้ว (เช่น กดย้อนกลับมาหน้านี้) — ลงรับใหม่ใช้ ♻️ จากรายการ
+    $('loading').classList.add('hidden');
+    D = d;
+    show('ok', (d.status === 'done' ? `เรื่องนี้ลงรับแล้ว (เลขรับ ${esc(d.receipt_no)})` : 'เรื่องนี้ข้ามไปแล้ว') +
+      `<br><a href="${esc(backUrl())}">‹ กลับไปที่รายการ</a>`);
+    return;
+  }
   D = d; build();
 }
 

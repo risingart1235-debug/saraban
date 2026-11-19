@@ -24,6 +24,10 @@ COPY --chown=app:app thai_words.txt ./
 COPY --chown=app:app web/ ./web/
 
 # ที่เขียนไฟล์ชั่วคราว/log และที่พักไฟล์ PDF ก่อนส่งขึ้น Drive
+# glibc ให้แต่ละเธรดกันพื้นที่หน่วยความจำของตัวเอง (เว็บมีหลายสิบเธรด) ภาพหน้าเอกสารใหญ่ๆ
+# พอทิ้งแล้วก็ยังไม่คืนเครื่อง ลงรับรวดหลายเรื่องแล้วเกิน 512 MB ของ Render จำกัดไว้ ๒ ก้อน
+ENV MALLOC_ARENA_MAX=2
+
 ENV SARABAN_WORK=/tmp \
     SARABAN_OUTPUT=/tmp/out
 RUN mkdir -p /tmp/out && chown -R app:app /tmp/out

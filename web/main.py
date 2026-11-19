@@ -1368,6 +1368,10 @@ def api_doc_status(job_id: str, brief: bool = False, user: str = Depends(current
     if job["status"] in ("error", "save_error"):
         return {"status": "error", "error": job.get("error", ""),
                 "receipt_no": job.get("reserved_receipt", "")}
+    if job["status"] in ("done", "skipped") and not job.get("pages"):
+        # จบแล้ว ภาพที่ใช้จัดหน้าถูกทิ้งไปคืนหน่วยความจำ — บอกแค่ผล (ลงรับใหม่ต้องกด ♻️ จากรายการ)
+        return {"status": job["status"], "receipt_no": job.get("receipt_no", ""),
+                "book_id": job.get("book_id"), "finished": True}
     if brief:
         return {"status": job["status"], "refetch": bool(job.get("refetch")),
                 "refetched": bool(job.get("refetched"))}
