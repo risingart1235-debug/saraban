@@ -1209,10 +1209,9 @@ def _screen(job: dict, pdf: str):
     if job.get("screen") or job.get("status") != "stored" or not os.path.exists(pdf):
         return                       # เปิดอ่านไปแล้ว (_prepare อ่านเอง) หรือไฟล์ถูกแทนที่แล้ว
     try:
-        ai_pdf = pdf
-        if job.get("main_pages"):
-            ai_pdf = core.pdf_head(pdf, job["main_pages"], os.path.join(job["dir"], "ai.pdf"))
-        result = screen_recipient(pdf, ai_pdf)
+        # "เรียน" อยู่หน้าแรกเสมอ ไม่ต้องแยกหนังสือนำออกเป็นไฟล์ (ไม่เขียนอะไรลงโฟลเดอร์งาน —
+        # มือถือส่งเรื่องเดิมมาใหม่ระหว่างนี้ โฟลเดอร์ถูกล้างทิ้ง ไฟล์ค้างจะปนกับของใหม่)
+        result = screen_recipient(pdf)
     except Exception as e:
         print(f"อ่านบรรทัดเรียนของเรื่องในคิวไม่สำเร็จ: {type(e).__name__}: {e}")
         return
