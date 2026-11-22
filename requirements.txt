@@ -14,6 +14,12 @@ requests
 beautifulsoup4
 google-genai       # Gemini อ่านหนังสือ + เกษียณ
 
+# อ่านบรรทัด "เรียน" ของหนังสือสแกนในเครื่อง (thaiocr.py) — ไม่ลงก็ได้ ระบบใช้บรรทัดเรียนจาก AI แทน
+onnxruntime
+opencv-python-headless
+pyclipper
+numpy
+
 # ===== เก็บข้อมูลบน Google Sheets / Drive =====
 google-api-python-client   # คุยกับ Sheets และ Drive
 google-auth                # ยืนยันตัวตนด้วย service account

@@ -17,6 +17,11 @@ WORKDIR /app
 COPY --chown=app:app requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ตัวอ่านบรรทัด "เรียน" ของหนังสือสแกน (OpenThai2.1-OCR-Text ~๖.๖ MB รุ่นตรึงไว้ ตรวจ sha256 ทุกไฟล์)
+# โหลดตอน build ครั้งเดียว เซิร์ฟเวอร์ไม่ต้องต่อ Hugging Face ตอนใช้งาน
+COPY --chown=app:app thaiocr.py ./
+RUN python thaiocr.py fetch && chown -R app:app ocr_model
+
 # ฟอนต์สารบรรณต้องขนไปด้วย ไม่งั้นตรายางจะเป็นสี่เหลี่ยม
 COPY --chown=app:app *.ttf ./
 COPY --chown=app:app core.py store.py sppweb.py drive.py thaiwords.py ./

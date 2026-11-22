@@ -1190,10 +1190,25 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     # คัดกรองผู้รับก่อน — ถ้าอ่านในเครื่องได้และไม่ใช่ของเรา จะได้ไม่เปลือง AI
     _set(job, step="กำลังตรวจบรรทัด 'เรียน' ในไฟล์...")
     recipient = extract_recipient_line(ai_pdf)
-    category = classify_recipient(recipient)
+    ocr = None
+    if not recipient:
+        # ไฟล์สแกน (ส่วนใหญ่ของ สพป.) ไม่มีตัวหนังสือในไฟล์ — อ่านภาพหน้าแรกเองด้วย OCR ในเครื่อง
+        # ไม่ต้องเชื่อบรรทัดเรียนจาก Gemini อ่านไม่ได้ค่อยใช้ของ AI ข้างล่างเหมือนเดิม
+        # อ่านพร้อมกับตอนรอ AI (รอเน็ตอยู่แล้ว ๕–๑๕ วินาที) — Render ฟรีช้า OCR อย่างเดียวหลายวินาที
+        import thaiocr
+        ocr = {}
+        ocr_thread = threading.Thread(
+            target=lambda: ocr.update(line=thaiocr.read_recipient(ai_pdf)), name="saraban-ocr-recipient")
+        ocr_thread.start()
 
     _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
-    ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
+    try:
+        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
+    finally:
+        if ocr is not None:
+            ocr_thread.join()
+            recipient = ocr.get("line")
+    category = classify_recipient(recipient)
 
     if category == "unknown":
         # ไฟล์สแกนอ่านเองไม่ได้ ใช้บรรทัด "เรียน" ที่ AI อ่านมาแทน (ไม่เปลือง API เพิ่ม)
