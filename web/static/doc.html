@@ -169,6 +169,17 @@
         🤖 <b>AI อ่านหนังสือไม่สำเร็จ</b> — <span id="aiFailWhy"></span>
         <button class="btn small" id="aiAgain" style="margin-top:8px">🤖 ให้ AI อ่านใหม่</button>
       </div>
+      <!-- "เรียน" ถึงเฉพาะบางโรงเรียน/บางกลุ่ม และไม่เจอชื่อโรงเรียนเราในไฟล์ — ยังไม่ส่ง AI (ประหยัดโควตา)
+           ดูเอกสารแล้วตัดสินใจ: ข้าม หรือให้ AI อ่านแล้วลงรับตามปกติ -->
+      <div id="aiSkip" class="hidden" style="margin-top:8px; background:#fff7ed; border:1px solid #fdba74;
+           border-radius:8px; padding:10px 12px; font-size:14px; line-height:1.6">
+        💡 <b>ยังไม่ได้ให้ AI อ่านเรื่องนี้</b> เพราะ "เรียน" ไม่ใช่ทุกโรงเรียน และไม่เจอชื่อโรงเรียนเราในตัวหนังสือของไฟล์
+        (บัญชีรายชื่อที่เป็นภาพสแกนหาไม่ได้ — ดูเองหรือกด 🔎 สแกน)
+        <div style="display:flex; gap:8px; margin-top:8px">
+          <button class="btn small" id="aiSkipRead" style="flex:1">🤖 ให้ AI อ่าน แล้วลงรับ</button>
+          <button class="btn grey small" id="aiSkipNo" style="flex:1">🚫 ไม่รับ</button>
+        </div>
+      </div>
       <p class="tiny hidden" id="knote" style="margin-top:8px; line-height:1.6"></p>
       <!-- โหมดไฮไลท์ชื่อโรงเรียน (เปิดในตั้งค่าบัญชี) — บอกว่าเจอชื่อหน้าไหน ปิดเฉพาะเรื่องนี้ได้ -->
       <div id="hlbox" class="hidden">
@@ -407,6 +418,7 @@ function build() {
   const why = ((D.boxes || []).map(b => String(b.text || '')).join('\n').split('\n')
                  .find(l => l.includes(AI_FAILED)) || '');
   $('aiFail').classList.toggle('hidden', !why);
+  $('aiSkip').classList.toggle('hidden', !D.ai_skipped);
   $('aiFailWhy').textContent = why.slice(why.indexOf(AI_FAILED) + AI_FAILED.length).replace(/\)\s*$/, '').trim();
   $('d').value = D.date; $('t').value = D.time;
   $('ssv').textContent = D.stamp.size_pct + '%';
@@ -1558,7 +1570,7 @@ $('skip').onclick = async () => {
 // ทั้งเรื่อง ได้คำเกษียณ หน้าที่มีลายเซ็น และการตรวจบรรทัด "เรียน" ใหม่ สิ่งที่จัดไว้เริ่มใหม่หมด
 // (ไม่ใส่คืนจากที่จัดไว้ ไม่งั้นคำเกษียณที่แจ้งว่า AI พลาดจะกลับมาทับของใหม่)
 async function aiReread(btn) {
-  const failed = !$('aiFail').classList.contains('hidden');
+  const failed = !$('aiFail').classList.contains('hidden') || !$('aiSkip').classList.contains('hidden');
   if (!failed && !confirm('ให้ AI อ่านเรื่องนี้ใหม่ใช่ไหม?\n\n' +
                           'คำเกษียณและตำแหน่งที่จัดไว้จะเริ่มใหม่ตามที่ AI อ่านรอบนี้')) return;
   const label = btn.textContent;
@@ -1575,6 +1587,8 @@ async function aiReread(btn) {
   }
 }
 $('aiAgain').onclick = () => aiReread($('aiAgain'));
+$('aiSkipRead').onclick = () => aiReread($('aiSkipRead'));
+$('aiSkipNo').onclick = () => $('skip').click();
 $('aiRedo').onclick = () => aiReread($('aiRedo'));
 
 // ---------- เลขรับที่จะลง ----------

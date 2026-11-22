@@ -1381,7 +1381,7 @@ def api_doc_status(job_id: str, brief: bool = False, user: str = Depends(current
     # book_id บอกหน้าจอว่าเข้ามาจากทางไหน (มี = โหมด ๑ / ไม่มี = อัปโหลดเอง)
     # เพื่อให้ทำเสร็จแล้วกลับไปที่เดิม ไม่ใช่เด้งหน้าแรกทุกครั้ง
     keys = ("status", "receipt_no", "doc_no", "doc_title", "doc_date", "sender",
-            "emoji", "recipient", "category", "pages", "stamp", "boxes",
+            "emoji", "recipient", "category", "ai_skipped", "pages", "stamp", "boxes",
             "total_pages", "sig_page", "redo_no", "book_id", "source", "all_pages",
             "marks", "scan_pages", "main_pages")
     out = {k: job.get(k) for k in keys}

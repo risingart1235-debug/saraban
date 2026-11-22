@@ -108,6 +108,39 @@ class PrepareUsesOcrTests(RedoBase):
         ocr.assert_called_once()
         self.assertEqual((job["recipient"], job["category"]), ("เรียน ผู้อำนวยการโรงเรียนในสังกัด", "auto"))
 
+    def ai_calls(self):
+        return _docmode.generate_kasien_text.call_count
+
+    def test_addressed_to_all_schools_goes_to_the_ai(self):
+        with patch.object(thaiocr, "read_recipient", return_value="เรียน ผู้อำนวยการโรงเรียนในสังกัดทุกโรงเรียน"):
+            job = self.opened()
+        self.assertEqual(self.ai_calls(), 1)
+        self.assertFalse(job["ai_skipped"])
+
+    def test_not_ours_is_not_sent_to_the_ai_until_asked(self):
+        """addressed to one other school, our name nowhere in the file: no Gemini call, a person decides"""
+        with patch.object(thaiocr, "read_recipient",
+                          return_value="เรียน ผู้อำนวยการโรงเรียนบ้านหนองกอมป่าขาว"):
+            job = self.opened()
+            self.assertEqual(self.ai_calls(), 0)
+            self.assertTrue(job["ai_skipped"])
+            self.assertEqual(job["category"], "check")
+            self.assertEqual(job["status"], "ready")          # still opens: pages, skip, or ask the AI
+            _docmode.reread(job)                               # 🤖 ให้ AI อ่าน แล้วลงรับ
+            self.assertEqual(settle(job), "ready", job.get("error"))
+        self.assertEqual(self.ai_calls(), 1)
+        self.assertFalse(job["ai_skipped"])
+
+    def test_our_name_in_the_attached_list_goes_to_the_ai(self):
+        from tests.test_redo import text_pdf
+        self.letter = text_pdf(os.path.join(self.work, "list.pdf"),
+                               [["เรียน ผู้อำนวยการโรงเรียนตามบัญชีรายชื่อแนบท้าย"],
+                                ["บัญชีรายชื่อโรงเรียน", "๑. " + core.SCHOOL]])
+        job = self.opened()
+        self.assertEqual(job["category"], "check")
+        self.assertEqual(self.ai_calls(), 1)
+        self.assertFalse(job["ai_skipped"])
+
     def test_ocr_finds_nothing_so_gemini_reading_is_used(self):
         with patch.object(thaiocr, "read_recipient", return_value=None):
             job = self.opened()

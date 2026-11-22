@@ -1177,7 +1177,7 @@ def _combine(main: str, extras: list, pdf: str):
 
 
 def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attach, book_id, redo_no=None,
-             main_pages=None):
+             main_pages=None, force_ai=False):
     # มีไฟล์แนบต่อท้าย (main_pages = จำนวนหน้าหนังสือนำ) — AI อ่านแค่หนังสือนำเหมือนเดิม
     # ไม่เปลืองโควตากับสิ่งที่ส่งมาด้วย และไม่หลงไปเอาลายเซ็นในไฟล์แนบเป็นหน้าลายเซ็นผู้ส่ง
     ai_pdf = pdf_path
@@ -1190,25 +1190,25 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
     # คัดกรองผู้รับก่อน — ถ้าอ่านในเครื่องได้และไม่ใช่ของเรา จะได้ไม่เปลือง AI
     _set(job, step="กำลังตรวจบรรทัด 'เรียน' ในไฟล์...")
     recipient = extract_recipient_line(ai_pdf)
-    ocr = None
     if not recipient:
         # ไฟล์สแกน (ส่วนใหญ่ของ สพป.) ไม่มีตัวหนังสือในไฟล์ — อ่านภาพหน้าแรกเองด้วย OCR ในเครื่อง
-        # ไม่ต้องเชื่อบรรทัดเรียนจาก Gemini อ่านไม่ได้ค่อยใช้ของ AI ข้างล่างเหมือนเดิม
-        # อ่านพร้อมกับตอนรอ AI (รอเน็ตอยู่แล้ว ๕–๑๕ วินาที) — Render ฟรีช้า OCR อย่างเดียวหลายวินาที
+        # อ่านไม่ได้ค่อยใช้บรรทัดเรียนที่ AI อ่านมา (ข้างล่าง) เหมือนเดิม
+        _set(job, step="กำลังอ่านบรรทัด 'เรียน' จากภาพหน้าแรก...")
         import thaiocr
-        ocr = {}
-        ocr_thread = threading.Thread(
-            target=lambda: ocr.update(line=thaiocr.read_recipient(ai_pdf)), name="saraban-ocr-recipient")
-        ocr_thread.start()
-
-    _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
-    try:
-        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
-    finally:
-        if ocr is not None:
-            ocr_thread.join()
-            recipient = ocr.get("line")
+        recipient = thaiocr.read_recipient(ai_pdf)
     category = classify_recipient(recipient)
+
+    # ไม่ใช่ของโรงเรียนเรา -> ยังไม่ส่ง AI (ประหยัดโควตา) เปิดให้คนดูก่อน กด 🤖 ให้ AI อ่าน หรือ 🚫 ข้าม
+    # เฉพาะเรื่องจากเว็บ สพป./มือถือ ที่ "เรียน" ถึงเฉพาะบางโรงเรียน/บางกลุ่ม/มีรายชื่อแนบท้าย
+    # แล้วหาชื่อโรงเรียนเราในตัวหนังสือของไฟล์ไม่เจอ (หน้าสแกนหาไม่ได้ จึงให้คนดู ไม่ข้ามเอง)
+    # อัปโหลดเอง (โหมด ๒) ตั้งใจจะลงรับอยู่แล้ว ส่ง AI เสมอ · กด 🤖 ให้ AI อ่าน มาแล้ว (force_ai) ไม่ถามซ้ำ
+    ai_skipped = bool(book_id) and not force_ai and category == "check" and not _mentions_school(pdf_path)
+    if ai_skipped:
+        ai_text = "เรียน ผอ.โรงเรียนบ้านโพนทองประชาอุทิศ\nเพื่อโปรดทราบ"
+        sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = 1, "-", "-", "-", "-", "-"
+    else:
+        _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
+        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
 
     if category == "unknown":
         # ไฟล์สแกนอ่านเองไม่ได้ ใช้บรรทัด "เรียน" ที่ AI อ่านมาแทน (ไม่เปลือง API เพิ่ม)
@@ -1281,7 +1281,7 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
          pdf_path=pdf_path, book_id=book_id, total_pages=total, sig_page=sig_page,
          redo_no=(str(redo_no) if redo_no else None),
          doc_no=doc_no, doc_title=doc_title, doc_date=doc_date, sender=sender,
-         emoji=emoji, attach=attach, recipient=recipient, category=category,
+         emoji=emoji, attach=attach, recipient=recipient, category=category, ai_skipped=ai_skipped,
          all_pages=all_pages, marks=marks, scan_pages=scan_pages, main_pages=main_pages,
          receipt_no=receipt_no, pages=pages,
          stamp={"size_pct": 100, "page": 0,
@@ -1302,6 +1302,17 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
             start_ocr(job, scan_pages[0], scan_pages[-1], only=set(scan_pages), limit=MAX_REVIEW_PAGES, auto=True)
         except Exception as e:                 # ไม่มี Tesseract ฯลฯ — ยังกดปุ่มเองได้ หน้าจอบอกเหตุ
             print(f"สแกนหน้าภาพเองไม่ได้: {type(e).__name__}: {e}")
+
+
+def _mentions_school(pdf_path: str) -> bool:
+    """มีชื่อโรงเรียนเราในตัวหนังสือของไฟล์ไหม (ทุกหน้า รวมบัญชีรายชื่อแนบท้าย) — หน้าสแกนหาไม่ได้"""
+    try:
+        total = len(core.page_sizes(pdf_path, DPI))
+        found, _ = find_name_marks(pdf_path, range(1, min(total, MAX_REVIEW_PAGES) + 1), DPI)
+        return any(found.values())
+    except Exception as e:
+        print(f"หาชื่อโรงเรียนในไฟล์ไม่สำเร็จ ส่ง AI อ่านตามปกติ: {type(e).__name__}: {e}")
+        return True
 
 
 def _find_marks(pdf_path: str, pages: list) -> tuple:
@@ -1528,7 +1539,7 @@ def reread(job):
                 for k in ("doc_no", "doc_title", "doc_date", "sender")}
         args.update(emoji=job.get("emoji") or "🔵", attach=job.get("attach") or "",
                     book_id=job.get("book_id"), redo_no=job.get("redo_no"),
-                    main_pages=job.get("main_pages"))
+                    main_pages=job.get("main_pages"), force_ai=True)
         job.pop("ocr", None)            # สแกนรอบก่อนเป็นของหน้าที่จัดไว้เดิม — เริ่มใหม่ด้วยกัน
         job.update(status="queued", step="อยู่ในคิวรอให้ AI อ่านใหม่...")
 
