@@ -1704,4 +1704,52 @@ def _warm_up():
     threading.Thread(target=work, name="saraban-warmup", daemon=True).start()
 
 
+# ==========================================================
+# กันเซิร์ฟเวอร์หลับในเวลาทำงาน
+# ==========================================================
+# Render ฟรีพักเครื่องเมื่อไม่มีคนเข้า ๑๕ นาที งานที่เปิดจัดค้างไว้ (เก็บในหน่วยความจำ) หายหมด
+# ๑๙–๒๐ พ.ย. ๒๕๖๙ หลับกลางวัน ๑๑ ครั้ง · ตัวปลุกบน GitHub Actions ช้ากว่าที่ตั้ง ๕–๘ ชั่วโมงทุกวัน ใช้ไม่ได้
+# จึงให้เซิร์ฟเวอร์ยิง /healthz ของตัวเองผ่าน URL สาธารณะ (ผ่านหน้าบ้านของ Render = นับว่ามีคนเข้า)
+# ปลุกตัวเองจากหลับไม่ได้ — ตื่นครั้งแรกของวันมาจาก cron-job.org หรือคนแรกที่เปิดเว็บ
+# ทำเฉพาะบน Render (มี RENDER_EXTERNAL_URL) เครื่องคอมโรงเรียนไม่หลับอยู่แล้ว
+AWAKE_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+AWAKE_EVERY_SEC = 10 * 60          # ต้องน้อยกว่า ๑๕ นาที
+AWAKE_DAYS = range(0, 5)           # จันทร์–ศุกร์ (weekday() 0–4)
+
+
+def _awake_hours():
+    """ช่วงเวลาทำงาน (นาทีของวัน) ตั้งได้ด้วย SARABAN_AWAKE_HOURS เช่น 07:00-17:00"""
+    raw = os.environ.get("SARABAN_AWAKE_HOURS", "07:00-17:00")
+    try:
+        a, b = (int(h) * 60 + int(m) for h, m in (p.strip().split(":") for p in raw.split("-")))
+        return a, b
+    except ValueError:
+        return 7 * 60, 17 * 60
+
+
+def in_work_hours(now=None) -> bool:
+    now = now or now_th()
+    start, end = _awake_hours()
+    return now.weekday() in AWAKE_DAYS and start <= now.hour * 60 + now.minute < end
+
+
+@app.on_event("startup")
+def _keep_awake():
+    if not AWAKE_URL:
+        return
+
+    def loop():
+        import requests as _rq
+        while True:
+            time.sleep(AWAKE_EVERY_SEC)
+            if not in_work_hours():
+                continue        # นอกเวลาปล่อยให้หลับ ประหยัดชั่วโมงฟรีของ Render
+            try:
+                _rq.get(AWAKE_URL + "/healthz", timeout=30)
+            except Exception as e:
+                print(f"ปลุกตัวเองไม่สำเร็จ: {type(e).__name__}: {e}")
+
+    threading.Thread(target=loop, name="saraban-keep-awake", daemon=True).start()
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
