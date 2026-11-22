@@ -416,6 +416,22 @@ def queue_put(local_pdf: str, meta: dict) -> str:
     return f.get("id", "")
 
 
+def queue_update_meta(file_id: str, changes: dict) -> bool:
+    """เพิ่ม/แก้ข้อมูลหนังสือของไฟล์ที่ฝากไว้ (เช่น ผลอ่านบรรทัดเรียนที่ได้ทีหลัง) — ของเดิมคงไว้"""
+    if not enabled() or not file_id:
+        return False
+    svc = _service()
+    cur = _run(svc.files().get(fileId=file_id, fields="description", supportsAllDrives=True))
+    try:
+        meta = json.loads(cur.get("description") or "{}")
+    except ValueError:
+        meta = {}
+    meta.update(changes)
+    _run(svc.files().update(fileId=file_id, body={"description": json.dumps(meta, ensure_ascii=False)},
+                            supportsAllDrives=True))
+    return True
+
+
 def queue_list() -> list:
     """รายการที่ฝากไว้ทั้งหมด — ใช้ตอนเซิร์ฟเวอร์เปิดใหม่
 

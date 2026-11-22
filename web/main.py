@@ -1001,6 +1001,8 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
             d["job_id"] = jobs[bid]["job_id"]
             d["refetch"] = jobs[bid]["refetch"]
             d["misplaced"] = jobs[bid]["misplaced"]
+            for k in ("recipient", "not_ours", "screening"):
+                d[k] = jobs[bid][k]
         docs.append(d)
     for bid, r in list(jobs.items()) + list(kept.items()):
         if bid in seen:
@@ -1013,6 +1015,8 @@ def api_spp_list(pages: int = 3, user: str = Depends(current_user)):
             doc["job_id"] = r["job_id"]
             doc["refetch"] = r["refetch"]  # 🔄 ขอให้มือถือดึงเรื่องนี้ใหม่ (พร้อมไฟล์แนบ) รออยู่
             doc["misplaced"] = r["misplaced"]   # หน้าแรกไม่ใช่หนังสือราชการ มือถือรุ่นใหม่ดึงมาให้เอง
+        for k in ("recipient", "not_ours", "screening"):    # บรรทัด "เรียน" ที่อ่านไว้ตอนรับไฟล์
+            doc[k] = r.get(k)
         docs.append(doc)
 
     # ถูกเว็บ สพป. ปิดกั้น + คิวว่าง = "ยังไม่มีเรื่องรอลงรับ" ไม่ใช่ความผิดพลาด

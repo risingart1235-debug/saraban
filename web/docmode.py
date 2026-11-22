@@ -91,6 +91,10 @@ _ocr_sec = [15.0]              # วินาทีต่อหน้าที�
 # ตอนเปิดเรื่องเหมือนโปรแกรมบนคอม — บน Render ฟรีช้า จึงยังให้กดปุ่ม 🔎 สแกน เลือกหน้าเอง
 OCR_AUTO = os.environ.get("SARABAN_OCR_AUTO", "").strip().lower() in ("1", "on", "true", "yes")
 
+# อ่านบรรทัด "เรียน" ของเรื่องที่มือถือส่งเข้ามา ทันทีที่รับไฟล์ (ทีละเรื่อง เธรดเดียว — OCR กินหน่วยความจำ)
+# การ์ดในคิวลงรับจะได้บอกว่า "เรียน" อะไร และขึ้นเตือนสีแดงถ้าไม่เกี่ยวกับโรงเรียน ก่อนจะมีใครเปิด
+_screen_tasks = queue.Queue()
+
 # กู้คิวจากไดร์ฟเสร็จหรือยัง — เซิร์ฟเวอร์เพิ่งตื่น/บูตใหม่ คิวในหน่วยความจำยังว่างอยู่
 # จนกว่า restore_queue จะทำเสร็จ ใครจะถามว่า "อะไรอยู่ในคิวแล้ว" ต้องรอตัวนี้ก่อน
 _queue_restored = threading.Event()
@@ -137,6 +141,8 @@ def _worker_loop(tasks):
         finally:
             tasks.task_done()
 
+
+threading.Thread(target=_worker_loop, args=(_screen_tasks,), name="saraban-screen", daemon=True).start()
 
 for _worker_no in range(JOB_WORKERS):
     threading.Thread(target=_worker_loop, args=(_work_queue,),
@@ -405,7 +411,7 @@ def _backup_to_drive(job: dict, pdf: str):
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
                                             "sender", "emoji", "attach", "redo_no", "user",
-                                            "main_pages", "extras_got", "letter_first")}
+                                            "main_pages", "extras_got", "letter_first", "screen")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             old = job.get("drive_file_id")
@@ -560,6 +566,7 @@ def _restore_from_drive() -> int:
                                   main_pages=meta.get("main_pages") or None,
                                   extras_got=meta.get("extras_got"),
                                   letter_first=bool(meta.get("letter_first")),
+                                  screen=meta.get("screen") if isinstance(meta.get("screen"), dict) else None,
                                   drive_file_id=item["id"], **fields)
             try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
                 job["created"] = datetime.fromisoformat(meta["created"])
@@ -846,6 +853,10 @@ def _phone_row(j: dict) -> dict:
         "sent_date": _sent_thai(j.get("created")),
         "sent_time": j["created"].strftime("%H:%M") if j.get("created") else "",
         "source": "phone",
+        # บรรทัด "เรียน" ที่อ่านไว้ตอนรับไฟล์ — การ์ดในคิวโชว์ ไม่เกี่ยวกับโรงเรียนขึ้นเตือนสีแดง (ไม่ส่ง AI)
+        "recipient": (j.get("screen") or {}).get("recipient", ""),
+        "not_ours": bool((j.get("screen") or {}).get("not_ours")),
+        "screening": j.get("status") == "stored" and not j.get("screen"),
         "refetch": bool(j.get("refetch")) and j.get("status") in _REFETCH_OK,   # รอมือถือดึงมาใหม่
         "misplaced": j.get("status") in _REFETCH_OK and letter_misplaced(j),   # หน้าแรกไม่ใช่หนังสือราชการ
     }
@@ -873,7 +884,7 @@ def holds_original(book_id: str) -> bool:
 # ล้างทิ้งให้หมด โดยเฉพาะ reserved_receipt: ถ้าค้างไว้ ตอนบันทึกจะข้ามการเขียนทับแถวในทะเบียน
 _PHONE_SEED = ("id", "user", "created", "dir", "source", "book_id", "doc_no", "doc_title",
                "doc_date", "sender", "emoji", "attach", "main_pages", "extras_got",
-               "drive_file_id", "finished_at", "letter_first")
+               "drive_file_id", "finished_at", "letter_first", "screen")
 
 
 def _reseed(job: dict, **fresh):
@@ -1107,8 +1118,9 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
 
     # เก็บไฟล์ไว้เฉยๆ ยังไม่เข้าคิวประมวลผล — รอผู้ใช้แตะเปิดเรื่องนี้ก่อน
     # (ดูเหตุผลที่ prepare_stored)
-    _set(job, status="stored", step="รอเปิดอ่าน")
+    _set(job, status="stored", step="รอเปิดอ่าน", screen=None)
     _backup_to_drive(job, pdf)
+    _screen_tasks.put(lambda: _screen(job, pdf))
     return job, True
 
 
@@ -1176,6 +1188,53 @@ def _combine(main: str, extras: list, pdf: str):
     return None
 
 
+def screen_recipient(pdf_path: str, ai_pdf: str = None) -> dict:
+    """อ่านบรรทัด "เรียน" (ตัวหนังสือในไฟล์ก่อน ไม่มีค่อย OCR) แล้วตัดสินว่าเกี่ยวกับโรงเรียนเราไหม
+
+    not_ours = "เรียน" ถึงเฉพาะบางโรงเรียน/บางกลุ่ม/มีรายชื่อแนบท้าย และไม่เจอชื่อโรงเรียนเรา
+    ในตัวหนังสือของไฟล์ (หน้าสแกนหาไม่ได้) — เรื่องแบบนี้ไม่ส่ง AI จนกว่าคนจะกดเอง
+    """
+    ai_pdf = ai_pdf or pdf_path
+    recipient = extract_recipient_line(ai_pdf)
+    if not recipient:
+        import thaiocr
+        recipient = thaiocr.read_recipient(ai_pdf)
+    category = classify_recipient(recipient)
+    return {"recipient": recipient or "", "category": category,
+            "not_ours": category == "check" and not _mentions_school(pdf_path)}
+
+
+def _screen(job: dict, pdf: str):
+    """งานเบื้องหลังหลังรับไฟล์จากมือถือ — เก็บผลไว้กับงาน และฝากผลไว้บนไดร์ฟด้วย (กู้คิวแล้วไม่ต้องอ่านซ้ำ)"""
+    if job.get("screen") or job.get("status") != "stored" or not os.path.exists(pdf):
+        return                       # เปิดอ่านไปแล้ว (_prepare อ่านเอง) หรือไฟล์ถูกแทนที่แล้ว
+    try:
+        ai_pdf = pdf
+        if job.get("main_pages"):
+            ai_pdf = core.pdf_head(pdf, job["main_pages"], os.path.join(job["dir"], "ai.pdf"))
+        result = screen_recipient(pdf, ai_pdf)
+    except Exception as e:
+        print(f"อ่านบรรทัดเรียนของเรื่องในคิวไม่สำเร็จ: {type(e).__name__}: {e}")
+        return
+    _set(job, screen=result)
+    _update_backup_meta(job)
+
+
+def _update_backup_meta(job: dict):
+    """ผลอ่านบรรทัดเรียนมาถึงหลังฝากไฟล์ไปแล้ว — เขียนเพิ่มในข้อมูลของไฟล์บนไดร์ฟ
+    (ถ้ายังฝากไม่เสร็จ งานฝากที่อยู่ก่อนในแถวเดียวกันจะเอาผลนี้ไปด้วยเอง)"""
+    def work():
+        fid = job.get("drive_file_id")
+        if not fid:
+            return
+        try:
+            import drive as _dr
+            _dr.queue_update_meta(fid, {"screen": job.get("screen")})
+        except Exception as e:
+            print(f"บันทึกผลอ่านบรรทัดเรียนบนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+    _drive_tasks.put(work)
+
+
 def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attach, book_id, redo_no=None,
              main_pages=None, force_ai=False):
     # มีไฟล์แนบต่อท้าย (main_pages = จำนวนหน้าหนังสือนำ) — AI อ่านแค่หนังสือนำเหมือนเดิม
@@ -1189,20 +1248,24 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
 
     # คัดกรองผู้รับก่อน — ถ้าอ่านในเครื่องได้และไม่ใช่ของเรา จะได้ไม่เปลือง AI
     _set(job, step="กำลังตรวจบรรทัด 'เรียน' ในไฟล์...")
-    recipient = extract_recipient_line(ai_pdf)
-    if not recipient:
-        # ไฟล์สแกน (ส่วนใหญ่ของ สพป.) ไม่มีตัวหนังสือในไฟล์ — อ่านภาพหน้าแรกเองด้วย OCR ในเครื่อง
-        # อ่านไม่ได้ค่อยใช้บรรทัดเรียนที่ AI อ่านมา (ข้างล่าง) เหมือนเดิม
-        _set(job, step="กำลังอ่านบรรทัด 'เรียน' จากภาพหน้าแรก...")
-        import thaiocr
-        recipient = thaiocr.read_recipient(ai_pdf)
-    category = classify_recipient(recipient)
+    # อ่านบรรทัด "เรียน" ไว้แล้วตอนรับไฟล์ (การ์ดในคิวโชว์อยู่) ใช้ผลนั้นเลย ไม่ต้องอ่านซ้ำ
+    # ไฟล์สแกน (ส่วนใหญ่ของ สพป.) ไม่มีตัวหนังสือในไฟล์ — อ่านภาพหน้าแรกด้วย OCR ในเครื่อง
+    # อ่านไม่ได้ค่อยใช้บรรทัดเรียนที่ AI อ่านมา (ข้างล่าง) เหมือนเดิม
+    scr = job.get("screen")
+    if not scr:
+        _set(job, step="กำลังอ่านบรรทัด 'เรียน' ของหนังสือ...")
+        scr = screen_recipient(pdf_path, ai_pdf) if book_id else None
+    if scr:
+        recipient, category = scr["recipient"] or None, scr["category"]
+    else:
+        recipient = extract_recipient_line(ai_pdf)
+        category = classify_recipient(recipient)
 
     # ไม่ใช่ของโรงเรียนเรา -> ยังไม่ส่ง AI (ประหยัดโควตา) เปิดให้คนดูก่อน กด 🤖 ให้ AI อ่าน หรือ 🚫 ข้าม
     # เฉพาะเรื่องจากเว็บ สพป./มือถือ ที่ "เรียน" ถึงเฉพาะบางโรงเรียน/บางกลุ่ม/มีรายชื่อแนบท้าย
     # แล้วหาชื่อโรงเรียนเราในตัวหนังสือของไฟล์ไม่เจอ (หน้าสแกนหาไม่ได้ จึงให้คนดู ไม่ข้ามเอง)
     # อัปโหลดเอง (โหมด ๒) ตั้งใจจะลงรับอยู่แล้ว ส่ง AI เสมอ · กด 🤖 ให้ AI อ่าน มาแล้ว (force_ai) ไม่ถามซ้ำ
-    ai_skipped = bool(book_id) and not force_ai and category == "check" and not _mentions_school(pdf_path)
+    ai_skipped = bool(book_id) and not force_ai and bool(scr and scr["not_ours"])
     if ai_skipped:
         ai_text = "เรียน ผอ.โรงเรียนบ้านโพนทองประชาอุทิศ\nเพื่อโปรดทราบ"
         sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = 1, "-", "-", "-", "-", "-"

@@ -98,6 +98,7 @@ class PrepareUsesOcrTests(RedoBase):
 
     def opened(self):
         job = self.from_phone("77")
+        _docmode._screen_tasks.join()              # อ่านบรรทัดเรียนตอนรับไฟล์ (เบื้องหลัง) เสร็จก่อน
         self.assertTrue(_docmode.prepare_stored(job))
         self.assertEqual(settle(job), "ready", job.get("error"))
         return job
@@ -145,6 +146,67 @@ class PrepareUsesOcrTests(RedoBase):
         with patch.object(thaiocr, "read_recipient", return_value=None):
             job = self.opened()
         self.assertEqual(job["category"], "unknown")    # the fake AI answers "-" for the recipient
+
+
+
+try:
+    from fastapi.testclient import TestClient
+    from web import main as webmain
+    import sppweb
+except (ImportError, RuntimeError):
+    webmain = None
+
+
+@unittest.skipIf(_docmode is None or pymupdf is None or webmain is None, "server packages not installed")
+class QueueCardTests(PrepareUsesOcrTests):
+    """the queue card tells what "เรียน" says as soon as the phone sends the letter, before anyone opens it"""
+
+    USERS = {"ครูเอ": {"status": "approved", "salt": "a"}}
+
+    def setUp(self):
+        super().setUp()
+        for p in (patch.object(webmain, "load_users", return_value=self.USERS),
+                  patch.object(webmain, "_with_spp_session",
+                               side_effect=sppweb.LoginError("Cloudflare 403"))):
+            p.start()
+            self.addCleanup(p.stop)
+        _docmode._queue_restored.set()
+        self.web = TestClient(webmain.app, cookies={
+            "session": webmain.make_session("ครูเอ", self.USERS["ครูเอ"])})
+
+    def card(self, book_id="77"):
+        r = self.web.get("/api/spp/list")
+        self.assertEqual(r.status_code, 200, r.text)
+        return {d["book_id"]: d for g in r.json()["days"] for d in g["docs"]}[book_id]
+
+    def sent(self, recipient):
+        with patch.object(thaiocr, "read_recipient", return_value=recipient):
+            job = self.from_phone("77")
+            _docmode._screen_tasks.join()
+        return job
+
+    def test_card_shows_the_recipient(self):
+        self.sent("เรียน ผู้อำนวยการโรงเรียนในสังกัด")
+        card = self.card()
+        self.assertEqual((card["recipient"], card["not_ours"], card["screening"]),
+                         ("เรียน ผู้อำนวยการโรงเรียนในสังกัด", False, False))
+
+    def test_card_warns_when_not_ours_and_opening_does_not_call_the_ai(self):
+        job = self.sent("เรียน ผู้อำนวยการโรงเรียนบ้านหนองกอมป่าขาว")
+        self.assertTrue(self.card()["not_ours"])
+        with patch.object(thaiocr, "read_recipient", side_effect=AssertionError("read again")):
+            self.assertTrue(_docmode.prepare_stored(job))    # uses what was read on arrival
+            self.assertEqual(settle(job), "ready", job.get("error"))
+        self.assertEqual(self.ai_calls(), 0)
+        self.assertTrue(job["ai_skipped"])
+
+    def test_the_result_is_kept_on_drive_for_a_restart(self):
+        job = self.sent("เรียน ผู้อำนวยการโรงเรียนบ้านหนองกอมป่าขาว")
+        _docmode._drive_tasks.join()
+        saved = [c for c in self.drive.queue_update_meta.call_args_list
+                 if c.args and c.args[0] == job["drive_file_id"]] or \
+                [c for c in self.drive.queue_put.call_args_list if (c.args[1] or {}).get("screen")]
+        self.assertTrue(saved, "screen result never reached Drive")
 
 
 if __name__ == "__main__":
