@@ -19,6 +19,7 @@
 """
 import os
 import re
+import threading
 
 _DICT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thai_words.txt")
 
@@ -30,22 +31,36 @@ _by_first = None          # อักษรตัวแรก -> ความย
 _NON_STARTER = set("ะัาำิีึืุู็่้๊๋์ๆฯๅ")
 
 
+_load_lock = threading.Lock()
+
+
 def _load():
+    """โหลดคลังคำครั้งแรกที่ใช้ — สร้างในตัวแปรท้องถิ่นให้เสร็จ แล้วค่อยตั้งค่าทั้งชุดในล็อก
+
+    ของเดิมตั้ง _words ก่อนแล้วค่อยสร้าง _by_first ทีละขั้น เว็บเปิดสองเรื่องพร้อมกันหลังเซิร์ฟเวอร์เพิ่งเริ่ม
+    เธรดที่สองเห็น _words แล้วเลยใช้ _by_first ที่ยังสร้างไม่เสร็จ (ยังเป็น set) เรื่องนั้นพังทั้งเรื่อง:
+    AttributeError: 'list' object has no attribute 'add' / 'NoneType' object has no attribute 'get'
+    """
     global _words, _maxlen, _by_first
     if _words is not None:
         return
-    try:
-        with open(_DICT_FILE, encoding="utf-8") as f:
-            _words = {w.strip() for w in f if w.strip()}
-    except Exception:
-        _words = set()
-
-    if _words:
-        _maxlen = max(len(w) for w in _words)
-        _by_first = {}
-        for w in _words:
-            _by_first.setdefault(w[0], set()).add(len(w))
-        _by_first = {k: sorted(v, reverse=True) for k, v in _by_first.items()}
+    with _load_lock:
+        if _words is not None:
+            return
+        try:
+            with open(_DICT_FILE, encoding="utf-8") as f:
+                words = {w.strip() for w in f if w.strip()}
+        except Exception:
+            words = set()
+        maxlen, by_first = 1, None
+        if words:
+            maxlen = max(len(w) for w in words)
+            lens = {}
+            for w in words:
+                lens.setdefault(w[0], set()).add(len(w))
+            by_first = {k: sorted(v, reverse=True) for k, v in lens.items()}
+        _maxlen, _by_first = maxlen, by_first
+        _words = words              # ตั้งท้ายสุด — เห็นตัวนี้แล้วแปลว่าของอื่นพร้อมหมด
 
 
 def available() -> bool:

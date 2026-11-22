@@ -1204,8 +1204,23 @@ def screen_recipient(pdf_path: str, ai_pdf: str = None) -> dict:
             "not_ours": category == "check" and not _mentions_school(pdf_path)}
 
 
+SCREEN_WAIT_MAX = 600              # รอได้นานสุด (วินาที) เผื่อมีงานค้างสถานะผิด ไม่ให้คิวอ่านติดตาย
+
+
+def _busy() -> bool:
+    """มีเรื่องกำลังเปิด (AI/OCR) หรือกำลังบันทึกอยู่ไหม"""
+    with _lock:
+        return any(j.get("status") in ("analyzing", "saving") for j in _jobs.values())
+
+
 def _screen(job: dict, pdf: str):
     """งานเบื้องหลังหลังรับไฟล์จากมือถือ — เก็บผลไว้กับงาน และฝากผลไว้บนไดร์ฟด้วย (กู้คิวแล้วไม่ต้องอ่านซ้ำ)"""
+    # รอให้ไม่มีใครกำลังเปิด/บันทึกเรื่องอยู่ก่อน — OCR (+~๑๔๐ MB) ซ้อนกับเปิดสองเรื่องพร้อมกัน
+    # วัดได้สูงสุด ๔๕๔ MB เกือบเต็ม 512 MB ของ Render ฟรี (ทีละอย่าง ~๓๒๐ MB) ปกติมือถือส่งตอนไม่มีใครลงรับอยู่แล้ว
+    waited = 0
+    while waited < SCREEN_WAIT_MAX and _busy():
+        time.sleep(1)
+        waited += 1
     if job.get("screen") or job.get("status") != "stored" or not os.path.exists(pdf):
         return                       # เปิดอ่านไปแล้ว (_prepare อ่านเอง) หรือไฟล์ถูกแทนที่แล้ว
     try:
