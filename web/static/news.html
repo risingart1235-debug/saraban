@@ -265,7 +265,11 @@ function rcpt(d) {
   if (d.screening) return '<div class="rcpt">🔎 กำลังอ่านบรรทัด "เรียน"...</div>';
   if (d.not_ours) return `<div class="rcpt no">⛔ ${esc(d.recipient || 'เรียน (อ่านไม่ออก)')}<br>` +
     'ไม่เกี่ยวกับโรงเรียนเรา (ไม่เจอชื่อโรงเรียนในไฟล์) — จะไม่ส่งให้ AI อ่าน เปิดดูแล้วข้ามได้</div>';
-  if (d.recipient) return `<div class="rcpt">📨 ${esc(d.recipient)}</div>`;
+  // ผ่านแล้วส่ง AI เกษียณรอไว้เลย (หลายเรื่องพร้อมกัน) กดเปิดแล้วไม่ต้องรอ AI
+  const ai = d.ai === 'done' ? '<br>🤖 AI เกษียณรอไว้แล้ว — เปิดลงรับได้เลย'
+    : d.ai === 'reading' ? '<br>🤖 AI กำลังเกษียณรอไว้...' : '';
+  if (d.recipient) return `<div class="rcpt">📨 ${esc(d.recipient)}${ai}</div>`;
+  if (ai) return `<div class="rcpt">${ai.slice(4)}</div>`;
   return '';
 }
 

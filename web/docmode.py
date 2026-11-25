@@ -17,6 +17,7 @@ import hmac
 import queue
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -95,6 +96,17 @@ OCR_AUTO = os.environ.get("SARABAN_OCR_AUTO", "").strip().lower() in ("1", "on",
 # การ์ดในคิวลงรับจะได้บอกว่า "เรียน" อะไร และขึ้นเตือนสีแดงถ้าไม่เกี่ยวกับโรงเรียน ก่อนจะมีใครเปิด
 _screen_tasks = queue.Queue()
 
+# อ่านบรรทัดเรียนแล้วผ่าน (เกี่ยวกับโรงเรียนเรา/อ่านไม่ออก) -> ส่ง AI เกษียณรอไว้เลยเบื้องหลัง หลายเรื่องพร้อมกัน
+# ตอนกดเปิดลงรับจะได้ไม่ต้องรอ AI ทีละเรื่อง — งานนี้รอเน็ต (อัปไฟล์ให้ Gemini แล้วรอคำตอบ) ไม่กิน RAM/CPU
+# จำนวนพร้อมกันตั้งได้ที่ SARABAN_AI_WORKERS (โควตาฟรีของ Gemini ราว ๑๐ ครั้ง/นาที ตั้งมากไปจะโดน 429)
+# ไม่ได้ตั้ง API Key ไว้ก็ไม่ทำ (ไม่ส่ง AI ล่วงหน้า กดเปิดแล้วค่อยอ่านแบบเดิม)
+AI_WORKERS = _env_int("SARABAN_AI_WORKERS", 3, 1, 8)
+AI_WAIT_SEC = 300                  # กดเปิดตอน AI กำลังอ่านเรื่องนั้นอยู่ รอผลได้นานสุดเท่านี้ ไม่งั้นอ่านเอง
+AI_PAUSE_SEC = 120                 # AI อ่านล่วงหน้าไม่สำเร็จ (โควตาหมด/ไม่ว่าง) พักส่งล่วงหน้าไว้ก่อน
+_ai_tasks = queue.Queue()
+_ai_state = {}                     # job id -> {"gen", "state": queued|running|taken, "done": Event}
+_ai_pause_until = [0.0]
+
 # กู้คิวจากไดร์ฟเสร็จหรือยัง — เซิร์ฟเวอร์เพิ่งตื่น/บูตใหม่ คิวในหน่วยความจำยังว่างอยู่
 # จนกว่า restore_queue จะทำเสร็จ ใครจะถามว่า "อะไรอยู่ในคิวแล้ว" ต้องรอตัวนี้ก่อน
 _queue_restored = threading.Event()
@@ -143,6 +155,9 @@ def _worker_loop(tasks):
 
 
 threading.Thread(target=_worker_loop, args=(_screen_tasks,), name="saraban-screen", daemon=True).start()
+for _worker_no in range(AI_WORKERS):
+    threading.Thread(target=_worker_loop, args=(_ai_tasks,),
+                     name=f"saraban-ai-{_worker_no + 1}", daemon=True).start()
 
 for _worker_no in range(JOB_WORKERS):
     threading.Thread(target=_worker_loop, args=(_work_queue,),
@@ -411,7 +426,7 @@ def _backup_to_drive(job: dict, pdf: str):
             import drive as _dr
             meta = {k: job.get(k) for k in ("book_id", "doc_no", "doc_title", "doc_date",
                                             "sender", "emoji", "attach", "redo_no", "user",
-                                            "main_pages", "extras_got", "letter_first", "screen")}
+                                            "main_pages", "extras_got", "letter_first", "screen", "ai")}
             meta["created"] = job["created"].isoformat()
             meta["job_id"] = job["id"]      # กู้กลับมาด้วยเลขงานเดิม หน้าที่เปิดค้างไว้จะได้ไม่หลงทาง
             old = job.get("drive_file_id")
@@ -508,9 +523,9 @@ def wait_queue_restored(timeout: float = RESTORE_WAIT_SEC) -> bool:
 def _restore_from_drive() -> int:
     """ดึงคิวที่ฝากไว้กลับมาตอนเปิดเซิร์ฟเวอร์ คืนจำนวนเรื่องที่กู้ได้
 
-    กู้กลับมาเป็นสถานะ "รอเปิดอ่าน" เหมือนตอนมือถือเพิ่งส่งเข้ามา ไม่ได้เก็บผล
-    วิเคราะห์ของ AI ไว้ด้วย เรื่องที่เคยกดเปิดอ่านแล้วจึงต้องให้ AI อ่านใหม่
-    (เก็บด้วยก็ได้แต่ซับซ้อนขึ้นมากและกินที่ ไม่คุ้มกับที่ประหยัดได้)
+    กู้กลับมาเป็นสถานะ "รอเปิดอ่าน" เหมือนตอนมือถือเพิ่งส่งเข้ามา คำเกษียณที่ AI อ่านล่วงหน้าไว้
+    (_queue_ai ฝากไว้ในข้อมูลไฟล์ "ai") กู้มาด้วย ไม่ต้องอ่านซ้ำ — เรื่องที่เคยกดเปิดแล้วใช้ผลนั้นไปแล้ว
+    จึงต้องให้ AI อ่านใหม่ (ตำแหน่งที่จัดค้างไว้ไม่ได้เก็บ)
 
     ตัวไฟล์ยังไม่ดึงลงมาตอนนี้ รอจนผู้ใช้กดเปิดเรื่องนั้นจริงถึงค่อยดึง
     (เหตุผลเดียวกับ prepare_stored — ไม่เปลืองแรงกับเรื่องที่ยังไม่มีใครดู)
@@ -567,6 +582,7 @@ def _restore_from_drive() -> int:
                                   extras_got=meta.get("extras_got"),
                                   letter_first=bool(meta.get("letter_first")),
                                   screen=meta.get("screen") if isinstance(meta.get("screen"), dict) else None,
+                                  ai=(meta.get("ai") if not finished_at and _ai_ok(meta.get("ai")) else None),
                                   drive_file_id=item["id"], **fields)
             try:                        # ให้เรียงตามเวลาที่มือถือส่งจริง ไม่ใช่เวลาที่กู้
                 job["created"] = datetime.fromisoformat(meta["created"])
@@ -650,6 +666,7 @@ def prepare_stored(job: dict) -> bool:
     แยกจากตอนรับไฟล์ เพราะมือถือส่งมารวดเดียวหลายเรื่อง ถ้าเข้าคิวประมวลผลทันที
     ที่รับ เครื่องจะไล่ทำทุกเรื่องรวมถึงเรื่องที่ยังไม่มีใครเปิดดู กินแรงเปล่า
     (โหมด ๑ ก็ทำแบบนี้ — หน้ารายการไม่เรียก AI เรียกตอนกดเปิดเรื่อง)
+    ยกเว้น AI — เรื่องที่ตรวจบรรทัดเรียนผ่านแล้วส่ง AI อ่านรอไว้ (_queue_ai) ตอนนี้แค่จัดหน้า
 
     คืน False ถ้าเรื่องนี้เริ่มไปแล้ว/ทำเสร็จแล้ว จะได้ไม่ทำซ้ำเวลากดรัวๆ
     """
@@ -857,6 +874,7 @@ def _phone_row(j: dict) -> dict:
         "recipient": (j.get("screen") or {}).get("recipient", ""),
         "not_ours": bool((j.get("screen") or {}).get("not_ours")),
         "screening": j.get("status") == "stored" and not j.get("screen"),
+        "ai": ai_state(j) if j.get("status") == "stored" else "",     # 🤖 AI เกษียณรอไว้แล้ว/กำลังอ่าน
         "refetch": bool(j.get("refetch")) and j.get("status") in _REFETCH_OK,   # รอมือถือดึงมาใหม่
         "misplaced": j.get("status") in _REFETCH_OK and letter_misplaced(j),   # หน้าแรกไม่ใช่หนังสือราชการ
     }
@@ -1118,7 +1136,7 @@ def start_from_phone_path(user: str, source_path: str, meta: dict,
 
     # เก็บไฟล์ไว้เฉยๆ ยังไม่เข้าคิวประมวลผล — รอผู้ใช้แตะเปิดเรื่องนี้ก่อน
     # (ดูเหตุผลที่ prepare_stored)
-    _set(job, status="stored", step="รอเปิดอ่าน", screen=None)
+    _set(job, status="stored", step="รอเปิดอ่าน", screen=None, ai=None, ai_gen=uuid.uuid4().hex)
     _backup_to_drive(job, pdf)
     _screen_tasks.put(lambda: _screen(job, pdf))
     return job, True
@@ -1232,10 +1250,12 @@ def _screen(job: dict, pdf: str):
         return
     _set(job, screen=result)
     _update_backup_meta(job)
+    if not result.get("not_ours"):
+        _queue_ai(job, pdf)
 
 
-def _update_backup_meta(job: dict):
-    """ผลอ่านบรรทัดเรียนมาถึงหลังฝากไฟล์ไปแล้ว — เขียนเพิ่มในข้อมูลของไฟล์บนไดร์ฟ
+def _update_backup_meta(job: dict, key: str = "screen"):
+    """ผลอ่านบรรทัดเรียน/ผล AI มาถึงหลังฝากไฟล์ไปแล้ว — เขียนเพิ่มในข้อมูลของไฟล์บนไดร์ฟ
     (ถ้ายังฝากไม่เสร็จ งานฝากที่อยู่ก่อนในแถวเดียวกันจะเอาผลนี้ไปด้วยเอง)"""
     def work():
         fid = job.get("drive_file_id")
@@ -1243,10 +1263,107 @@ def _update_backup_meta(job: dict):
             return
         try:
             import drive as _dr
-            _dr.queue_update_meta(fid, {"screen": job.get("screen")})
+            _dr.queue_update_meta(fid, {key: job.get(key)})
         except Exception as e:
-            print(f"บันทึกผลอ่านบรรทัดเรียนบนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
+            print(f"บันทึกผล {key} บนไดร์ฟไม่สำเร็จ: {type(e).__name__}: {e}")
     _drive_tasks.put(work)
+
+
+# ==========================================================
+# AI เกษียณรอไว้ล่วงหน้า (หลายเรื่องพร้อมกัน)
+# ==========================================================
+def _ai_ok(result) -> bool:
+    """ผล AI ที่เก็บไว้ใช้ได้ไหม — ๗ ค่าตามที่ generate_kasien_text คืน และไม่ใช่ข้อความ AI ผิดพลาด"""
+    return (isinstance(result, (list, tuple)) and len(result) == 7
+            and isinstance(result[0], str) and core.AI_FAILED not in result[0])
+
+
+def _ai_enabled() -> bool:
+    return bool(getattr(core, "GEMINI_API_KEY", ""))
+
+
+def _ai_pdf_for(pdf: str, main_pages, dest_dir: str) -> str:
+    """ไฟล์ที่ให้ AI อ่าน — มีไฟล์แนบต่อท้ายก็ตัดเอาแค่หนังสือนำ"""
+    if not main_pages:
+        return pdf
+    try:
+        return core.pdf_head(pdf, main_pages, os.path.join(dest_dir, "ai.pdf"))
+    except Exception as e:
+        print(f"แยกหนังสือนำไม่สำเร็จ ให้ AI อ่านทั้งเล่ม: {type(e).__name__}: {e}")
+        return pdf
+
+
+def _queue_ai(job: dict, pdf: str):
+    """ส่งเรื่องที่ยังรอเปิด (stored) ให้ AI อ่านเบื้องหลัง ผลเก็บไว้ที่ job["ai"] — กดเปิดแล้วใช้เลย"""
+    if not _ai_enabled() or time.time() < _ai_pause_until[0]:
+        return
+    with _lock:
+        gen = job.get("ai_gen")
+        if job.get("status") != "stored" or job.get("ai") or not gen:
+            return
+        cur = _ai_state.get(job["id"])
+        if cur and cur["gen"] == gen:
+            return                                    # เข้าแถวไว้แล้ว
+        st = {"gen": gen, "state": "queued", "done": threading.Event()}
+        _ai_state[job["id"]] = st
+
+    def work():
+        with _lock:
+            if st["state"] != "queued" or _ai_state.get(job["id"]) is not st:
+                return                                # คนกดเปิดแล้ว _prepare อ่านเอง
+            st["state"] = "running"
+        try:
+            if (time.time() < _ai_pause_until[0] or job.get("ai_gen") != gen
+                    or not os.path.exists(pdf)):
+                return
+            tmp = tempfile.mkdtemp(prefix="saraban-ai-")
+            try:
+                result = generate_kasien_text(_ai_pdf_for(pdf, job.get("main_pages"), tmp))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            if not _ai_ok(result):
+                # โควตาหมด/Google ไม่ว่าง — พักส่งล่วงหน้า เรื่องที่เหลือให้อ่านตอนกดเปิดแบบเดิม
+                _ai_pause_until[0] = time.time() + AI_PAUSE_SEC
+                return
+            with _lock:
+                if job.get("ai_gen") != gen:          # มือถือส่งไฟล์ใหม่มาแทนระหว่างอ่าน
+                    return
+                job["ai"] = list(result)
+            _update_backup_meta(job, "ai")
+        except Exception as e:
+            print(f"AI อ่านล่วงหน้าไม่สำเร็จ: {type(e).__name__}: {e}")
+        finally:
+            st["done"].set()
+            with _lock:
+                if _ai_state.get(job["id"]) is st:
+                    _ai_state.pop(job["id"], None)
+
+    _ai_tasks.put(work)
+
+
+def _take_ai(job: dict):
+    """ตอนเปิดเรื่อง: ผล AI ที่อ่านไว้แล้ว / AI กำลังอ่านอยู่ก็รอ / ยังไม่ถึงคิวก็ดึงออกมาอ่านเอง -> None"""
+    with _lock:
+        st = _ai_state.get(job["id"])
+        if st and st["gen"] == job.get("ai_gen") and st["state"] == "queued":
+            st["state"] = "taken"                     # ไม่ต้องรอแถว อ่านเองเลย
+            st = None
+    if st and st["state"] == "running":
+        _set(job, step="AI กำลังเกษียณเรื่องนี้อยู่ (ส่งไว้ตั้งแต่รับไฟล์) รอสักครู่...")
+        st["done"].wait(AI_WAIT_SEC)
+    with _lock:
+        result = job.pop("ai", None)
+    return tuple(result) if _ai_ok(result) else None
+
+
+def ai_state(job: dict) -> str:
+    """สถานะ AI อ่านล่วงหน้าของเรื่องในคิว — "done" อ่านไว้แล้ว / "reading" กำลังอ่านหรือรอคิว / "" ยังไม่ได้ส่ง"""
+    if _ai_ok(job.get("ai")):
+        return "done"
+    st = _ai_state.get(job.get("id"))
+    if st and st["gen"] == job.get("ai_gen") and st["state"] in ("queued", "running"):
+        return "reading"
+    return ""
 
 
 def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attach, book_id, redo_no=None,
@@ -1284,8 +1401,13 @@ def _prepare(job, pdf_path, *, doc_no, doc_title, doc_date, sender, emoji, attac
         ai_text = "เรียน ผอ.โรงเรียนบ้านโพนทองประชาอุทิศ\nเพื่อโปรดทราบ"
         sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = 1, "-", "-", "-", "-", "-"
     else:
-        _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
-        ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
+        # อ่านไว้แล้วตั้งแต่รับไฟล์ (_queue_ai) ใช้เลย — 🤖 ให้ AI อ่านใหม่ (force_ai) อ่านใหม่จริงเสมอ
+        cached = None if force_ai else _take_ai(job)
+        if cached:
+            ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = cached
+        else:
+            _set(job, step="กำลังให้ AI อ่านและเกษียณหนังสือ (ใช้เวลาสักครู่)...")
+            ai_text, sig_page, ai_no, ai_title, ai_date, ai_sender, ai_recipient = generate_kasien_text(ai_pdf)
 
     if category == "unknown":
         # ไฟล์สแกนอ่านเองไม่ได้ ใช้บรรทัด "เรียน" ที่ AI อ่านมาแทน (ไม่เปลือง API เพิ่ม)
